@@ -121,7 +121,7 @@ namespaces connected by a veth pair. Its current test matrix is:
 | Stage | Path profile | Cases | Pass condition |
 | --- | --- | --- | --- |
 | Bulk observation | 35 ms one-way delay on both interfaces, 0.5% independent loss each direction, 50 Mbit/s each direction | direct, Hysteria v2 (`quic` alias), TLS | every median is positive; ratios are retained |
-| Controller gate | same lossy/rate-limited profile, repeated 4 MiB uploads and downloads | client-sender BBR/Reno/negotiated 15 Mbit/s Brutal; separate BBR and Reno relays for the relay sender | both upload and download BBR/Reno median ratios are at least 1.10; modes and negotiation are reported, and Brutal reaches at least 50% of its declared upload target |
+| Controller gate | same 35 ms/50 Mbit/s path without random loss; resettable `iptables statistic nth` drops every 200th large sender datagram (0.5%); two warmups and five measured 4 MiB uploads/downloads | client-sender BBR/Reno/negotiated 15 Mbit/s Brutal; separate GSO-disabled BBR and Reno relays for the relay sender | both upload and download BBR/Reno equal-byte aggregate-goodput ratios are at least 1.10; medians, modes, and negotiation are also reported, and Brutal aggregate goodput reaches at least 50% of its declared upload target |
 | Cold fallback | same delay/rate, random loss removed, unused UDP port | `auto` Hysteria attempt followed by TLS | first command completes within finite deadlines |
 | Short-flow acceleration gate | same delay/rate, loss-free, sequential 128 KiB downloads | fresh direct TCP vs warm Hysteria v2 connection | Hysteria median/direct median is at least 1.10 |
 | Authentication | controlled namespace path | wrong CA and wrong token | both are rejected for the expected reason |
@@ -151,6 +151,10 @@ sudo env \
   AUTOCAR_BENCH_BYTES=4194304 \
   AUTOCAR_BENCH_ITERATIONS=9 \
   AUTOCAR_BENCH_WARMUP=2 \
+  AUTOCAR_CONTROLLER_DROP_EVERY=200 \
+  AUTOCAR_CONTROLLER_BYTES=4194304 \
+  AUTOCAR_CONTROLLER_ITERATIONS=5 \
+  AUTOCAR_CONTROLLER_WARMUP=2 \
   AUTOCAR_SHORT_FLOW_BYTES=131072 \
   AUTOCAR_SHORT_FLOW_ITERATIONS=9 \
   AUTOCAR_SHORT_FLOW_WARMUP=3 \
@@ -169,17 +173,28 @@ even when diagnosis is needed.
 
 The generic bulk path measurements are observations rather than a universal
 speed claim. Three controller-specific gates and one short-flow gate are narrow
-and declared in advance: on the 0.5% lossy path, both client-side uploads and
-relay-side downloads with BBR must beat their Reno baselines by at least 1.10,
-and negotiated Brutal must deliver at least 50% of its truthful 15 Mbit/s
-upload target; on the loss-free high-RTT path, sequential warm Hysteria
-128 KiB downloads must beat fresh direct TCP by at least 1.10. These checks
-demonstrate the selected mechanisms under those profiles only.
+and declared in advance: on the separate deterministic-loss path, two warmups
+precede five measured transfers, and both client-side uploads and relay-side
+downloads with BBR must beat their Reno baselines by at least 1.10. The loss
+matcher is reset before each controller run and drops every 200th large sender
+datagram. Controller senders disable UDP GSO so a matched packet is one QUIC
+datagram rather than a host-dependent batch. Negotiated Brutal must deliver at
+least 50% of its truthful 15 Mbit/s upload target. On the loss-free high-RTT
+path, sequential warm Hysteria 128 KiB downloads must beat fresh direct TCP by
+at least 1.10. These checks demonstrate the selected mechanisms under those
+profiles only.
 
-Do not lower `AUTOCAR_MIN_SHORT_FLOW_RATIO` merely to hide a regression, and do
-not publish the CI ratio as a universal production claim. BBR profile quality,
-Brutal fairness, sustained high-loss behavior, and real-route improvement need
-the broader retained matrix above.
+Controller acceptance uses aggregate goodput across equal-size measured
+transfers. This is the harmonic mean of the per-transfer Mbit/s values and is
+equivalent to total bytes divided by total transfer time. Medians remain in the
+artifacts for distribution context, but they do not discard a genuine slow
+loss-recovery transfer from the acceptance result.
+
+Do not lower `AUTOCAR_MIN_SHORT_FLOW_RATIO` or
+`AUTOCAR_MIN_BBR_RENO_RATIO` merely to hide a regression, and do not publish
+the CI ratio as a universal production claim. BBR profile quality, Brutal
+fairness, sustained high-loss behavior, and real-route improvement need the
+broader retained matrix above.
 
 The pcap sentinel assertion is a regression smoke test, not a cryptographic
 proof. TLS 1.3, verified X.509, token authentication, optional mTLS, and the

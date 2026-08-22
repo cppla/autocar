@@ -39,12 +39,12 @@ SERVER_DEV="acs${RUN_ID}"
 CLIENT_IP=10.203.0.1
 SERVER_IP=10.203.0.2
 RELAY_PORT=7443
-RENO_RELAY_PORT=7445
+BBR_RELAY_PORT=7445
+RENO_RELAY_PORT=7446
 UNUSED_QUIC_PORT=7444
 BENCH_PORT=9000
 ORIGIN_PORT=9080
 PROXY_PORT=18080
-WORK_DIR=$(mktemp -d -t autocar-netem.XXXXXX)
 
 DELAY_MS=${AUTOCAR_NETEM_DELAY_MS:-35}
 LOSS=${AUTOCAR_NETEM_LOSS:-0.5%}
@@ -52,6 +52,10 @@ RATE=${AUTOCAR_NETEM_RATE:-50mbit}
 BENCH_BYTES=${AUTOCAR_BENCH_BYTES:-1048576}
 BENCH_ITERATIONS=${AUTOCAR_BENCH_ITERATIONS:-5}
 BENCH_WARMUP=${AUTOCAR_BENCH_WARMUP:-1}
+CONTROLLER_DROP_EVERY=${AUTOCAR_CONTROLLER_DROP_EVERY:-200}
+CONTROLLER_BYTES=${AUTOCAR_CONTROLLER_BYTES:-4194304}
+CONTROLLER_ITERATIONS=${AUTOCAR_CONTROLLER_ITERATIONS:-5}
+CONTROLLER_WARMUP=${AUTOCAR_CONTROLLER_WARMUP:-2}
 SHORT_FLOW_BYTES=${AUTOCAR_SHORT_FLOW_BYTES:-131072}
 SHORT_FLOW_ITERATIONS=${AUTOCAR_SHORT_FLOW_ITERATIONS:-9}
 SHORT_FLOW_WARMUP=${AUTOCAR_SHORT_FLOW_WARMUP:-3}
@@ -63,6 +67,14 @@ BRUTAL_SERVER_DOWNLOAD_MBPS=15
 BRUTAL_CLIENT_UPLOAD_MBPS=20
 BRUTAL_CLIENT_DOWNLOAD_MBPS=20
 BRUTAL_EXPECTED_TX_BYTES_SEC=1875000
+CONTROLLER_LOSS_CHAIN=AUTOCAR_CC_LOSS
+
+if ! [[ ${CONTROLLER_DROP_EVERY} =~ ^[0-9]+$ ]] || \
+   (( CONTROLLER_DROP_EVERY < 2 )); then
+  echo "error: AUTOCAR_CONTROLLER_DROP_EVERY must be an integer of at least 2" >&2
+  exit 1
+fi
+WORK_DIR=$(mktemp -d -t autocar-netem.XXXXXX)
 
 PIDS=()
 
@@ -133,6 +145,34 @@ run_client() {
   ip netns exec "${CLIENT_NS}" "${AUTOCAR_BIN}" bench-client "$@"
 }
 
+# Disabling UDP GSO for controller A/B senders makes one statistic-matcher
+# packet correspond to one QUIC datagram instead of a host-dependent GSO batch.
+run_controller_client() {
+  ip netns exec "${CLIENT_NS}" env QUIC_GO_DISABLE_GSO=true \
+    "${AUTOCAR_BIN}" bench-client "$@"
+}
+
+reset_client_controller_loss() {
+  ip netns exec "${CLIENT_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
+  # xt_statistic stores --every N as N-1; --packet 0 therefore makes the first
+  # drop the Nth match. Using N-1 would drop the first QUIC Initial instead.
+  ip netns exec "${CLIENT_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
+    -p udp -s "${CLIENT_IP}" -d "${SERVER_IP}" --dport "${RELAY_PORT}" \
+    -m length --length 1000:65535 \
+    -m statistic --mode nth --every "${CONTROLLER_DROP_EVERY}" \
+    --packet 0 -j DROP
+}
+
+reset_server_controller_loss() {
+  local source_port=$1
+  ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
+  ip netns exec "${SERVER_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
+    -p udp -s "${SERVER_IP}" --sport "${source_port}" -d "${CLIENT_IP}" \
+    -m length --length 1000:65535 \
+    -m statistic --mode nth --every "${CONTROLLER_DROP_EVERY}" \
+    --packet 0 -j DROP
+}
+
 expect_failure() {
   local name=$1
   shift
@@ -190,10 +230,25 @@ RELAY_PID=${STARTED_PID}
 wait_for_log "${RELAY_PID}" "${ARTIFACT_DIR}/relay.log" "transport=hy2"
 wait_for_log "${RELAY_PID}" "${ARTIFACT_DIR}/relay.log" "transport=tls"
 
-# A second, otherwise identical relay makes the download comparison exercise
-# the relay-side sender. Client flags alone only select the client-side sender.
+# Two otherwise identical, controller-only relays make the download comparison
+# exercise the relay-side sender. GSO is disabled on both so the deterministic
+# packet-loss matcher observes individual QUIC datagrams on either path.
+start_background "${ARTIFACT_DIR}/relay-bbr-controller.log" \
+  ip netns exec "${SERVER_NS}" env QUIC_GO_DISABLE_GSO=true \
+  "${AUTOCAR_BIN}" server \
+  --listen="${SERVER_IP}:${BBR_RELAY_PORT}" \
+  --tcp-listen="${SERVER_IP}:${BBR_RELAY_PORT}" \
+  --cert="${WORK_DIR}/server.crt" \
+  --key="${WORK_DIR}/server.key" \
+  --token-file="${WORK_DIR}/relay-token" \
+  --congestion=bbr --bbr-profile=standard \
+  --allow-private --deny-ports=none
+BBR_RELAY_PID=${STARTED_PID}
+wait_for_log "${BBR_RELAY_PID}" "${ARTIFACT_DIR}/relay-bbr-controller.log" "transport=hy2"
+
 start_background "${ARTIFACT_DIR}/relay-reno.log" \
-  ip netns exec "${SERVER_NS}" "${AUTOCAR_BIN}" server \
+  ip netns exec "${SERVER_NS}" env QUIC_GO_DISABLE_GSO=true \
+  "${AUTOCAR_BIN}" server \
   --listen="${SERVER_IP}:${RENO_RELAY_PORT}" \
   --tcp-listen="${SERVER_IP}:${RENO_RELAY_PORT}" \
   --cert="${WORK_DIR}/server.crt" \
@@ -229,38 +284,64 @@ TUNNEL_AUTH_RENO=(
   --dial-timeout=3s
   --open-timeout=5s
 )
+TUNNEL_AUTH_BBR=(
+  --server="${SERVER_IP}:${BBR_RELAY_PORT}"
+  --server-name="${SERVER_IP}"
+  --ca="${WORK_DIR}/server.crt"
+  --token-file="${WORK_DIR}/relay-token"
+  --dial-timeout=3s
+  --open-timeout=5s
+)
 
 run_client --transport=direct "${COMMON_BENCH[@]}" >"${ARTIFACT_DIR}/direct.json"
 run_client --transport=quic "${TUNNEL_AUTH[@]}" "${COMMON_BENCH[@]}" >"${ARTIFACT_DIR}/quic.json"
 run_client --transport=tls "${TUNNEL_AUTH[@]}" "${COMMON_BENCH[@]}" >"${ARTIFACT_DIR}/tls.json"
 
-# Prove both controller paths with real authenticated transfers while the
-# original delay, random loss and rate limits are still active. The BBR run
+# Use a separately declared, deterministic controller profile. The bulk stage
+# intentionally observes random loss; controller A/B instead drops every Nth
+# large sender datagram and resets the matcher before every run. That gives BBR
+# and Reno the same repeatable loss sequence. Two warmups and five measured
+# transfers span multiple recovery epochs. This is a narrow regression
+# scenario, not a universal speed claim.
+ip netns exec "${CLIENT_NS}" tc qdisc replace dev "${CLIENT_DEV}" root netem \
+  delay "${DELAY_MS}ms" rate "${RATE}" limit 10000
+ip netns exec "${SERVER_NS}" tc qdisc replace dev "${SERVER_DEV}" root netem \
+  delay "${DELAY_MS}ms" rate "${RATE}" limit 10000
+ip netns exec "${CLIENT_NS}" iptables -N "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${CLIENT_NS}" iptables -I OUTPUT 1 -j "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${SERVER_NS}" iptables -N "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${SERVER_NS}" iptables -I OUTPUT 1 -j "${CONTROLLER_LOSS_CHAIN}"
+
+# Prove both controller paths with real authenticated transfers. The BBR run
 # declares no bandwidth and therefore must negotiate a zero Tx rate. The
 # Brutal run declares 20 Mbit/s in both directions, while the relay's 15
 # Mbit/s upload cap deterministically limits client-to-relay Tx to 1,875,000
-# bytes/s. Repeated uploads isolate the client-side sender so the congestion
-# flag deterministically selects the controller under comparison.
+# bytes/s. Repeated, warmed uploads isolate the client-side sender so the
+# congestion flag deterministically selects the controller under comparison.
 MODE_PROOF_BENCH=(
   --target="${SERVER_IP}:${BENCH_PORT}"
   --mode=upload
-  --bytes=4194304
-  --iterations=3
-  --warmup=1
+  --bytes="${CONTROLLER_BYTES}"
+  --iterations="${CONTROLLER_ITERATIONS}"
+  --warmup="${CONTROLLER_WARMUP}"
   --timeout=60s
   --json
 )
-run_client --transport=quic --congestion=bbr --bbr-profile=standard \
+reset_client_controller_loss
+run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/bbr.json"
-run_client --transport=quic --congestion=reno \
+reset_client_controller_loss
+run_controller_client --transport=quic --congestion=reno \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/reno.json"
-run_client --transport=quic --congestion=bbr --bbr-profile=standard \
+reset_client_controller_loss
+run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   --upload-mbps="${BRUTAL_CLIENT_UPLOAD_MBPS}" \
   --download-mbps="${BRUTAL_CLIENT_DOWNLOAD_MBPS}" \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/brutal.json"
+ip netns exec "${CLIENT_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
 
 # Repeat the BBR/Reno proof in the opposite direction. Both clients use the
 # same configuration; only the relay sender differs (default BBR vs the
@@ -268,18 +349,23 @@ run_client --transport=quic --congestion=bbr --bbr-profile=standard \
 MODE_PROOF_DOWNLOAD=(
   --target="${SERVER_IP}:${BENCH_PORT}"
   --mode=download
-  --bytes=4194304
-  --iterations=3
-  --warmup=1
+  --bytes="${CONTROLLER_BYTES}"
+  --iterations="${CONTROLLER_ITERATIONS}"
+  --warmup="${CONTROLLER_WARMUP}"
   --timeout=60s
   --json
 )
-run_client --transport=quic --congestion=bbr --bbr-profile=standard \
-  "${TUNNEL_AUTH[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
-  >"${ARTIFACT_DIR}/bbr-download.json"
-run_client --transport=quic --congestion=bbr --bbr-profile=standard \
+# Use BBR/Reno/Reno/BBR ordering across the two directions to reduce monotonic
+# host-load bias without sharing controller state between runs.
+reset_server_controller_loss "${RENO_RELAY_PORT}"
+run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   "${TUNNEL_AUTH_RENO[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
   >"${ARTIFACT_DIR}/reno-download.json"
+reset_server_controller_loss "${BBR_RELAY_PORT}"
+run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
+  "${TUNNEL_AUTH_BBR[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
+  >"${ARTIFACT_DIR}/bbr-download.json"
+ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
 
 # This intentionally narrow acceleration profile isolates the benefit of a
 # warm, shared congestion-control context. Every direct iteration creates a
@@ -439,7 +525,9 @@ python3 - "${ARTIFACT_DIR}/direct.json" "${ARTIFACT_DIR}/quic.json" \
   "${ARTIFACT_DIR}/reno.json" "${ARTIFACT_DIR}/brutal.json" \
   "${ARTIFACT_DIR}/bbr-download.json" "${ARTIFACT_DIR}/reno-download.json" \
   "${ARTIFACT_DIR}/summary.json" \
-  "${DELAY_MS}" "${LOSS}" "${RATE}" "${SHORT_FLOW_BYTES}" \
+  "${DELAY_MS}" "${LOSS}" "${RATE}" "${CONTROLLER_DROP_EVERY}" \
+  "${CONTROLLER_BYTES}" "${CONTROLLER_ITERATIONS}" \
+  "${CONTROLLER_WARMUP}" "${SHORT_FLOW_BYTES}" \
   "${MIN_SHORT_FLOW_RATIO}" "${MIN_BBR_RENO_RATIO}" \
   "${MIN_BRUTAL_TARGET_RATIO}" "${BRUTAL_SERVER_UPLOAD_MBPS}" \
   "${BRUTAL_SERVER_DOWNLOAD_MBPS}" "${BRUTAL_CLIENT_UPLOAD_MBPS}" \
@@ -467,6 +555,10 @@ import sys
     delay_ms,
     loss,
     rate,
+    controller_drop_every,
+    controller_bytes,
+    controller_iterations,
+    controller_warmup,
     short_flow_bytes,
     minimum_ratio,
     minimum_bbr_reno_ratio,
@@ -476,7 +568,7 @@ import sys
     client_upload_mbps,
     client_download_mbps,
     expected_brutal_tx,
-) = sys.argv[12:24]
+) = sys.argv[12:28]
 direct = json.loads(direct_path.read_text())
 quic = json.loads(quic_path.read_text())
 tls = json.loads(tls_path.read_text())
@@ -497,6 +589,46 @@ for name, result in (("bbr", bbr), ("reno", reno), ("brutal", brutal)):
 for name, result in (("bbr download", bbr_download), ("reno download", reno_download)):
     if result["median_mbps"] <= 0:
         raise SystemExit(f"{name} controller proof reported non-positive goodput")
+
+for name, result in (
+    ("bbr", bbr),
+    ("reno", reno),
+    ("brutal", brutal),
+    ("bbr download", bbr_download),
+    ("reno download", reno_download),
+):
+    if result.get("bytes_per_iteration") != int(controller_bytes):
+        raise SystemExit(
+            f"{name} proof used {result.get('bytes_per_iteration')!r} bytes, "
+            f"want {int(controller_bytes)}"
+        )
+    if result.get("iterations") != int(controller_iterations):
+        raise SystemExit(
+            f"{name} proof used {result.get('iterations')!r} iterations, "
+            f"want {int(controller_iterations)}"
+        )
+
+
+def aggregate_goodput(name, result):
+    """Return total equal-size bytes divided by total measured elapsed time."""
+    values = result.get("results_mbps")
+    if not isinstance(values, list) or len(values) != int(controller_iterations):
+        raise SystemExit(
+            f"{name} proof has {len(values) if isinstance(values, list) else 'invalid'} "
+            f"raw results, want {int(controller_iterations)}"
+        )
+    if any(not isinstance(value, (int, float)) or value <= 0 for value in values):
+        raise SystemExit(f"{name} proof contains a non-positive raw goodput value")
+    # Every transfer has the same byte count, so this harmonic mean is exactly
+    # aggregate goodput: total bytes divided by total transfer time.
+    return len(values) / sum(1.0 / value for value in values)
+
+
+bbr_aggregate_mbps = aggregate_goodput("bbr", bbr)
+reno_aggregate_mbps = aggregate_goodput("reno", reno)
+brutal_aggregate_mbps = aggregate_goodput("brutal", brutal)
+bbr_download_aggregate_mbps = aggregate_goodput("bbr download", bbr_download)
+reno_download_aggregate_mbps = aggregate_goodput("reno download", reno_download)
 
 if bbr.get("acceleration") != "bbr-standard":
     raise SystemExit(
@@ -519,17 +651,21 @@ if reno.get("negotiated_tx_bytes_per_second", 0) != 0:
         f"{reno.get('negotiated_tx_bytes_per_second')!r}"
     )
 
-bbr_reno_ratio = bbr["median_mbps"] / reno["median_mbps"]
+bbr_reno_ratio = bbr_aggregate_mbps / reno_aggregate_mbps
 if bbr_reno_ratio < float(minimum_bbr_reno_ratio):
     raise SystemExit(
-        f"lossy BBR/Reno upload ratio {bbr_reno_ratio:.3f} is below "
+        f"deterministic-loss BBR/Reno upload aggregate-goodput ratio "
+        f"{bbr_reno_ratio:.3f} is below "
         f"the declared acceptance threshold {float(minimum_bbr_reno_ratio):.3f}"
     )
 
-bbr_reno_download_ratio = bbr_download["median_mbps"] / reno_download["median_mbps"]
+bbr_reno_download_ratio = (
+    bbr_download_aggregate_mbps / reno_download_aggregate_mbps
+)
 if bbr_reno_download_ratio < float(minimum_bbr_reno_ratio):
     raise SystemExit(
-        f"lossy BBR/Reno download ratio {bbr_reno_download_ratio:.3f} is below "
+        f"deterministic-loss BBR/Reno download aggregate-goodput ratio "
+        f"{bbr_reno_download_ratio:.3f} is below "
         f"the declared acceptance threshold {float(minimum_bbr_reno_ratio):.3f}"
     )
 
@@ -546,7 +682,7 @@ if brutal.get("negotiated_tx_bytes_per_second") != expected_brutal_tx:
         f"want {expected_brutal_tx} bytes/s"
     )
 brutal_target_mbps = expected_brutal_tx * 8 / 1_000_000
-brutal_target_ratio = brutal["median_mbps"] / brutal_target_mbps
+brutal_target_ratio = brutal_aggregate_mbps / brutal_target_mbps
 if brutal_target_ratio < float(minimum_brutal_target_ratio):
     raise SystemExit(
         f"Brutal achieved/target ratio {brutal_target_ratio:.3f} is below "
@@ -578,8 +714,12 @@ summary = {
     "controller_proof": {
         "network_profile": {
             "one_way_delay_ms": int(delay_ms),
-            "loss_each_direction": loss,
             "rate_each_direction": rate,
+            "random_loss_each_direction": "0%",
+            "sender_large_udp_drop_every": int(controller_drop_every),
+            "bytes_per_iteration": int(controller_bytes),
+            "measured_iterations": int(controller_iterations),
+            "warmup_iterations": int(controller_warmup),
         },
         "bbr": {
             "artifact": bbr_path.name,
@@ -588,6 +728,7 @@ summary = {
                 "negotiated_tx_bytes_per_second", 0
             ),
             "median_mbps": bbr["median_mbps"],
+            "aggregate_mbps": bbr_aggregate_mbps,
         },
         "reno": {
             "artifact": reno_path.name,
@@ -596,14 +737,20 @@ summary = {
                 "negotiated_tx_bytes_per_second", 0
             ),
             "median_mbps": reno["median_mbps"],
+            "aggregate_mbps": reno_aggregate_mbps,
         },
+        "comparison_metric": "equal-byte aggregate goodput (harmonic mean of per-transfer Mbit/s)",
         "bbr_to_reno_ratio": bbr_reno_ratio,
+        "bbr_to_reno_aggregate_ratio": bbr_reno_ratio,
         "relay_sender_download": {
             "bbr_artifact": bbr_download_path.name,
             "reno_artifact": reno_download_path.name,
             "bbr_median_mbps": bbr_download["median_mbps"],
             "reno_median_mbps": reno_download["median_mbps"],
+            "bbr_aggregate_mbps": bbr_download_aggregate_mbps,
+            "reno_aggregate_mbps": reno_download_aggregate_mbps,
             "bbr_to_reno_ratio": bbr_reno_download_ratio,
+            "bbr_to_reno_aggregate_ratio": bbr_reno_download_ratio,
             "minimum_accepted_bbr_to_reno_ratio": float(minimum_bbr_reno_ratio),
         },
         "minimum_accepted_bbr_to_reno_ratio": float(minimum_bbr_reno_ratio),
@@ -614,6 +761,7 @@ summary = {
                 "negotiated_tx_bytes_per_second"
             ],
             "median_mbps": brutal["median_mbps"],
+            "aggregate_mbps": brutal_aggregate_mbps,
             "target_mbps": brutal_target_mbps,
             "achieved_to_target_ratio": brutal_target_ratio,
             "minimum_accepted_target_ratio": float(minimum_brutal_target_ratio),
