@@ -58,7 +58,7 @@ func run(ctx context.Context, args []string) (err error) {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `AutoCAR - authenticated dual-ended TCP acceleration
+	fmt.Fprintln(os.Stderr, `AutoCAR - secure dual-ended TCP/UDP acceleration
 
 Usage:
   autocar server [options]       run the remote QUIC/TLS relay

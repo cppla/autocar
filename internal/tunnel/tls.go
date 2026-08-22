@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ type TLSServerConfig struct {
 	HandshakeTimeout     time.Duration
 	DialTimeout          time.Duration
 	MaxConcurrentStreams int
+	MaxClientConnections int
 }
 
 // TLSServer serves one tunneled TCP stream per TLS 1.3 connection. It is a
@@ -31,6 +33,7 @@ type TLSServer struct {
 	listener  net.Listener
 	tlsConfig *tls.Config
 	core      *serverCore
+	clients   *sourceConnectionLimiter
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -59,6 +62,16 @@ func ListenTLS(config TLSServerConfig) (*TLSServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	maxClientConnections := config.MaxClientConnections
+	if maxClientConnections < 0 {
+		return nil, errors.New("tunnel: maximum TLS client connections cannot be negative")
+	}
+	if maxClientConnections == 0 {
+		maxClientConnections = min(defaultMaxClientConnections, cap(core.sem))
+	}
+	if maxClientConnections > cap(core.sem) {
+		return nil, fmt.Errorf("tunnel: maximum TLS client connections (%d) exceeds maximum concurrent streams (%d)", maxClientConnections, cap(core.sem))
+	}
 	listener, err := net.Listen("tcp", config.Address)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: listen TLS fallback: %w", err)
@@ -68,6 +81,7 @@ func ListenTLS(config TLSServerConfig) (*TLSServer, error) {
 		listener:  listener,
 		tlsConfig: tlsConfig,
 		core:      core,
+		clients:   newSourceConnectionLimiter(maxClientConnections),
 		ctx:       ctx,
 		cancel:    cancel,
 		conns:     make(map[net.Conn]struct{}),
@@ -121,19 +135,27 @@ func (s *TLSServer) Serve(ctx context.Context) error {
 			_ = raw.Close()
 			continue
 		}
+		sourceKey := tlsSourceKey(raw.RemoteAddr())
+		if !s.clients.acquire(sourceKey) {
+			s.core.release()
+			s.lifecycle.Unlock()
+			_ = raw.Close()
+			continue
+		}
 		tlsConn := tls.Server(raw, s.tlsConfig)
 		s.connMu.Lock()
 		s.conns[tlsConn] = struct{}{}
 		s.connMu.Unlock()
 		s.wg.Add(1)
 		s.lifecycle.Unlock()
-		go s.serveTLSConnection(acceptCtx, tlsConn)
+		go s.serveTLSConnection(acceptCtx, tlsConn, sourceKey)
 	}
 }
 
-func (s *TLSServer) serveTLSConnection(ctx context.Context, conn *tls.Conn) {
+func (s *TLSServer) serveTLSConnection(ctx context.Context, conn *tls.Conn, sourceKey string) {
 	defer s.wg.Done()
 	defer s.core.release()
+	defer s.clients.release(sourceKey)
 	defer func() {
 		s.connMu.Lock()
 		delete(s.conns, conn)
@@ -147,6 +169,73 @@ func (s *TLSServer) serveTLSConnection(ctx context.Context, conn *tls.Conn) {
 		return
 	}
 	s.core.handleStream(ctx, conn, nil)
+}
+
+type sourceConnectionLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	active map[string]int
+}
+
+func newSourceConnectionLimiter(limit int) *sourceConnectionLimiter {
+	return &sourceConnectionLimiter{limit: limit, active: make(map[string]int)}
+}
+
+func (l *sourceConnectionLimiter) acquire(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active[key] >= l.limit {
+		return false
+	}
+	l.active[key]++
+	return true
+}
+
+func (l *sourceConnectionLimiter) release(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active[key] <= 1 {
+		delete(l.active, key)
+		return
+	}
+	l.active[key]--
+}
+
+func (l *sourceConnectionLimiter) count(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.active[key]
+}
+
+func tlsSourceKey(address net.Addr) string {
+	if address == nil {
+		return ""
+	}
+	if tcpAddress, ok := address.(*net.TCPAddr); ok {
+		if ip, ok := netip.AddrFromSlice(tcpAddress.IP); ok {
+			return sourceIPKey(ip)
+		}
+	}
+	host, _, err := net.SplitHostPort(address.String())
+	if err == nil {
+		if ip, parseErr := netip.ParseAddr(host); parseErr == nil {
+			return sourceIPKey(ip)
+		}
+	}
+	// Unknown address representations share one conservative bucket. Including
+	// an unparsed port here would let a peer obtain a fresh bucket per socket.
+	return ""
+}
+
+func sourceIPKey(ip netip.Addr) string {
+	ip = ip.Unmap().WithZone("")
+	if ip.Is4() {
+		return ip.String()
+	}
+	if ip.Is6() {
+		return netip.PrefixFrom(ip, 64).Masked().String()
+	}
+	return ""
 }
 
 // Close stops the listener, closes active connections and waits for relays.

@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	defaultHandshakeTimeout = 10 * time.Second
-	defaultDialTimeout      = 10 * time.Second
-	defaultMaxStreams       = 1024
-	defaultMaxConnections   = 256
+	defaultHandshakeTimeout     = 10 * time.Second
+	defaultDialTimeout          = 10 * time.Second
+	defaultMaxStreams           = 1024
+	defaultMaxConnections       = 256
+	defaultMaxClientConnections = 32
 )
 
 // RemoteError is returned when the authenticated exit rejects a CONNECT

@@ -39,6 +39,7 @@ SERVER_DEV="acs${RUN_ID}"
 CLIENT_IP=10.203.0.1
 SERVER_IP=10.203.0.2
 RELAY_PORT=7443
+RENO_RELAY_PORT=7445
 UNUSED_QUIC_PORT=7444
 BENCH_PORT=9000
 ORIGIN_PORT=9080
@@ -55,6 +56,13 @@ SHORT_FLOW_BYTES=${AUTOCAR_SHORT_FLOW_BYTES:-131072}
 SHORT_FLOW_ITERATIONS=${AUTOCAR_SHORT_FLOW_ITERATIONS:-9}
 SHORT_FLOW_WARMUP=${AUTOCAR_SHORT_FLOW_WARMUP:-3}
 MIN_SHORT_FLOW_RATIO=${AUTOCAR_MIN_SHORT_FLOW_RATIO:-1.10}
+MIN_BBR_RENO_RATIO=${AUTOCAR_MIN_BBR_RENO_RATIO:-1.10}
+MIN_BRUTAL_TARGET_RATIO=${AUTOCAR_MIN_BRUTAL_TARGET_RATIO:-0.50}
+BRUTAL_SERVER_UPLOAD_MBPS=15
+BRUTAL_SERVER_DOWNLOAD_MBPS=15
+BRUTAL_CLIENT_UPLOAD_MBPS=20
+BRUTAL_CLIENT_DOWNLOAD_MBPS=20
+BRUTAL_EXPECTED_TX_BYTES_SEC=1875000
 
 PIDS=()
 
@@ -174,10 +182,27 @@ start_background "${ARTIFACT_DIR}/relay.log" \
   --cert="${WORK_DIR}/server.crt" \
   --key="${WORK_DIR}/server.key" \
   --token-file="${WORK_DIR}/relay-token" \
+  --max-upload-mbps="${BRUTAL_SERVER_UPLOAD_MBPS}" \
+  --max-download-mbps="${BRUTAL_SERVER_DOWNLOAD_MBPS}" \
+  --allow-client-bandwidth \
   --allow-private --deny-ports=none
 RELAY_PID=${STARTED_PID}
-wait_for_log "${RELAY_PID}" "${ARTIFACT_DIR}/relay.log" "transport=quic"
+wait_for_log "${RELAY_PID}" "${ARTIFACT_DIR}/relay.log" "transport=hy2"
 wait_for_log "${RELAY_PID}" "${ARTIFACT_DIR}/relay.log" "transport=tls"
+
+# A second, otherwise identical relay makes the download comparison exercise
+# the relay-side sender. Client flags alone only select the client-side sender.
+start_background "${ARTIFACT_DIR}/relay-reno.log" \
+  ip netns exec "${SERVER_NS}" "${AUTOCAR_BIN}" server \
+  --listen="${SERVER_IP}:${RENO_RELAY_PORT}" \
+  --tcp-listen="${SERVER_IP}:${RENO_RELAY_PORT}" \
+  --cert="${WORK_DIR}/server.crt" \
+  --key="${WORK_DIR}/server.key" \
+  --token-file="${WORK_DIR}/relay-token" \
+  --congestion=reno \
+  --allow-private --deny-ports=none
+RENO_RELAY_PID=${STARTED_PID}
+wait_for_log "${RENO_RELAY_PID}" "${ARTIFACT_DIR}/relay-reno.log" "transport=hy2"
 
 COMMON_BENCH=(
   --target="${SERVER_IP}:${BENCH_PORT}"
@@ -196,21 +221,65 @@ TUNNEL_AUTH=(
   --dial-timeout=3s
   --open-timeout=5s
 )
+TUNNEL_AUTH_RENO=(
+  --server="${SERVER_IP}:${RENO_RELAY_PORT}"
+  --server-name="${SERVER_IP}"
+  --ca="${WORK_DIR}/server.crt"
+  --token-file="${WORK_DIR}/relay-token"
+  --dial-timeout=3s
+  --open-timeout=5s
+)
 
 run_client --transport=direct "${COMMON_BENCH[@]}" >"${ARTIFACT_DIR}/direct.json"
 run_client --transport=quic "${TUNNEL_AUTH[@]}" "${COMMON_BENCH[@]}" >"${ARTIFACT_DIR}/quic.json"
 run_client --transport=tls "${TUNNEL_AUTH[@]}" "${COMMON_BENCH[@]}" >"${ARTIFACT_DIR}/tls.json"
 
-run_client --transport=auto \
-  --server="${SERVER_IP}:${UNUSED_QUIC_PORT}" \
-  --fallback-server="${SERVER_IP}:${RELAY_PORT}" \
-  --server-name="${SERVER_IP}" \
-  --ca="${WORK_DIR}/server.crt" \
-  --token-file="${WORK_DIR}/relay-token" \
-  --dial-timeout=1s --quic-attempt-timeout=1s --open-timeout=5s \
-  --target="${SERVER_IP}:${BENCH_PORT}" --mode=download \
-  --bytes=131072 --iterations=2 --warmup=0 --timeout=20s --json \
-  >"${ARTIFACT_DIR}/auto-fallback.json"
+# Prove both controller paths with real authenticated transfers while the
+# original delay, random loss and rate limits are still active. The BBR run
+# declares no bandwidth and therefore must negotiate a zero Tx rate. The
+# Brutal run declares 20 Mbit/s in both directions, while the relay's 15
+# Mbit/s upload cap deterministically limits client-to-relay Tx to 1,875,000
+# bytes/s. Repeated uploads isolate the client-side sender so the congestion
+# flag deterministically selects the controller under comparison.
+MODE_PROOF_BENCH=(
+  --target="${SERVER_IP}:${BENCH_PORT}"
+  --mode=upload
+  --bytes=4194304
+  --iterations=3
+  --warmup=1
+  --timeout=60s
+  --json
+)
+run_client --transport=quic --congestion=bbr --bbr-profile=standard \
+  "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
+  >"${ARTIFACT_DIR}/bbr.json"
+run_client --transport=quic --congestion=reno \
+  "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
+  >"${ARTIFACT_DIR}/reno.json"
+run_client --transport=quic --congestion=bbr --bbr-profile=standard \
+  --upload-mbps="${BRUTAL_CLIENT_UPLOAD_MBPS}" \
+  --download-mbps="${BRUTAL_CLIENT_DOWNLOAD_MBPS}" \
+  "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
+  >"${ARTIFACT_DIR}/brutal.json"
+
+# Repeat the BBR/Reno proof in the opposite direction. Both clients use the
+# same configuration; only the relay sender differs (default BBR vs the
+# explicitly configured Reno relay above).
+MODE_PROOF_DOWNLOAD=(
+  --target="${SERVER_IP}:${BENCH_PORT}"
+  --mode=download
+  --bytes=4194304
+  --iterations=3
+  --warmup=1
+  --timeout=60s
+  --json
+)
+run_client --transport=quic --congestion=bbr --bbr-profile=standard \
+  "${TUNNEL_AUTH[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
+  >"${ARTIFACT_DIR}/bbr-download.json"
+run_client --transport=quic --congestion=bbr --bbr-profile=standard \
+  "${TUNNEL_AUTH_RENO[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
+  >"${ARTIFACT_DIR}/reno-download.json"
 
 # This intentionally narrow acceleration profile isolates the benefit of a
 # warm, shared congestion-control context. Every direct iteration creates a
@@ -221,6 +290,23 @@ ip netns exec "${CLIENT_NS}" tc qdisc replace dev "${CLIENT_DEV}" root netem \
   delay "${DELAY_MS}ms" rate "${RATE}" limit 10000
 ip netns exec "${SERVER_NS}" tc qdisc replace dev "${SERVER_DEV}" root netem \
   delay "${DELAY_MS}ms" rate "${RATE}" limit 10000
+
+# Test cold QUIC-to-TLS fallback after the lossy throughput profile has
+# completed. Keeping the latency and rate constraints while removing random
+# loss isolates the fallback state machine from a coincidental dropped TLS
+# handshake. The deadlines remain finite and the command must still succeed
+# on its first attempt.
+sleep 0.25
+run_client --transport=auto \
+  --server="${SERVER_IP}:${UNUSED_QUIC_PORT}" \
+  --fallback-server="${SERVER_IP}:${RELAY_PORT}" \
+  --server-name="${SERVER_IP}" \
+  --ca="${WORK_DIR}/server.crt" \
+  --token-file="${WORK_DIR}/relay-token" \
+  --dial-timeout=3s --quic-attempt-timeout=2s --open-timeout=8s \
+  --target="${SERVER_IP}:${BENCH_PORT}" --mode=download \
+  --bytes=131072 --iterations=2 --warmup=0 --timeout=30s --json \
+  >"${ARTIFACT_DIR}/auto-fallback.json"
 
 SHORT_BENCH=(
   --target="${SERVER_IP}:${BENCH_PORT}"
@@ -268,7 +354,7 @@ kill -0 "${ORIGIN_PID}"
 start_background "${ARTIFACT_DIR}/client-proxy.log" \
   ip netns exec "${CLIENT_NS}" "${AUTOCAR_BIN}" client \
   --transport=auto "${TUNNEL_AUTH[@]}" \
-  --dial-timeout=1s --quic-attempt-timeout=1s --open-timeout=2s \
+  --dial-timeout=2s --quic-attempt-timeout=2s --open-timeout=6s \
   --socks= --http="127.0.0.1:${PROXY_PORT}" --https=
 PROXY_PID=${STARTED_PID}
 wait_for_log "${PROXY_PID}" "${ARTIFACT_DIR}/client-proxy.log" "local proxy started"
@@ -349,26 +435,123 @@ fi
 
 python3 - "${ARTIFACT_DIR}/direct.json" "${ARTIFACT_DIR}/quic.json" \
   "${ARTIFACT_DIR}/tls.json" "${ARTIFACT_DIR}/short-direct.json" \
-  "${ARTIFACT_DIR}/short-quic.json" "${ARTIFACT_DIR}/summary.json" \
+  "${ARTIFACT_DIR}/short-quic.json" "${ARTIFACT_DIR}/bbr.json" \
+  "${ARTIFACT_DIR}/reno.json" "${ARTIFACT_DIR}/brutal.json" \
+  "${ARTIFACT_DIR}/bbr-download.json" "${ARTIFACT_DIR}/reno-download.json" \
+  "${ARTIFACT_DIR}/summary.json" \
   "${DELAY_MS}" "${LOSS}" "${RATE}" "${SHORT_FLOW_BYTES}" \
-  "${MIN_SHORT_FLOW_RATIO}" <<'PY'
+  "${MIN_SHORT_FLOW_RATIO}" "${MIN_BBR_RENO_RATIO}" \
+  "${MIN_BRUTAL_TARGET_RATIO}" "${BRUTAL_SERVER_UPLOAD_MBPS}" \
+  "${BRUTAL_SERVER_DOWNLOAD_MBPS}" "${BRUTAL_CLIENT_UPLOAD_MBPS}" \
+  "${BRUTAL_CLIENT_DOWNLOAD_MBPS}" "${BRUTAL_EXPECTED_TX_BYTES_SEC}" <<'PY'
 import json
 import pathlib
 import sys
 
-direct_path, quic_path, tls_path, short_direct_path, short_quic_path, output_path = map(
-    pathlib.Path, sys.argv[1:7]
+(
+    direct_path,
+    quic_path,
+    tls_path,
+    short_direct_path,
+    short_quic_path,
+    bbr_path,
+    reno_path,
+    brutal_path,
+    bbr_download_path,
+    reno_download_path,
+    output_path,
+) = map(
+    pathlib.Path, sys.argv[1:12]
 )
-delay_ms, loss, rate, short_flow_bytes, minimum_ratio = sys.argv[7:12]
+(
+    delay_ms,
+    loss,
+    rate,
+    short_flow_bytes,
+    minimum_ratio,
+    minimum_bbr_reno_ratio,
+    minimum_brutal_target_ratio,
+    server_upload_mbps,
+    server_download_mbps,
+    client_upload_mbps,
+    client_download_mbps,
+    expected_brutal_tx,
+) = sys.argv[12:24]
 direct = json.loads(direct_path.read_text())
 quic = json.loads(quic_path.read_text())
 tls = json.loads(tls_path.read_text())
 short_direct = json.loads(short_direct_path.read_text())
 short_quic = json.loads(short_quic_path.read_text())
+bbr = json.loads(bbr_path.read_text())
+reno = json.loads(reno_path.read_text())
+brutal = json.loads(brutal_path.read_text())
+bbr_download = json.loads(bbr_download_path.read_text())
+reno_download = json.loads(reno_download_path.read_text())
 
 for name, result in (("direct", direct), ("quic", quic), ("tls", tls)):
     if result["median_mbps"] <= 0:
         raise SystemExit(f"{name} benchmark reported non-positive goodput")
+for name, result in (("bbr", bbr), ("reno", reno), ("brutal", brutal)):
+    if result["median_mbps"] <= 0:
+        raise SystemExit(f"{name} controller proof reported non-positive goodput")
+for name, result in (("bbr download", bbr_download), ("reno download", reno_download)):
+    if result["median_mbps"] <= 0:
+        raise SystemExit(f"{name} controller proof reported non-positive goodput")
+
+if bbr.get("acceleration") != "bbr-standard":
+    raise SystemExit(
+        f"BBR proof reported acceleration={bbr.get('acceleration')!r}, "
+        "want 'bbr-standard'"
+    )
+if bbr.get("negotiated_tx_bytes_per_second", 0) != 0:
+    raise SystemExit(
+        "BBR proof unexpectedly negotiated a non-zero Tx bandwidth: "
+        f"{bbr.get('negotiated_tx_bytes_per_second')!r}"
+    )
+if reno.get("acceleration") != "reno":
+    raise SystemExit(
+        f"Reno proof reported acceleration={reno.get('acceleration')!r}, "
+        "want 'reno'"
+    )
+if reno.get("negotiated_tx_bytes_per_second", 0) != 0:
+    raise SystemExit(
+        "Reno proof unexpectedly negotiated a non-zero Tx bandwidth: "
+        f"{reno.get('negotiated_tx_bytes_per_second')!r}"
+    )
+
+bbr_reno_ratio = bbr["median_mbps"] / reno["median_mbps"]
+if bbr_reno_ratio < float(minimum_bbr_reno_ratio):
+    raise SystemExit(
+        f"lossy BBR/Reno upload ratio {bbr_reno_ratio:.3f} is below "
+        f"the declared acceptance threshold {float(minimum_bbr_reno_ratio):.3f}"
+    )
+
+bbr_reno_download_ratio = bbr_download["median_mbps"] / reno_download["median_mbps"]
+if bbr_reno_download_ratio < float(minimum_bbr_reno_ratio):
+    raise SystemExit(
+        f"lossy BBR/Reno download ratio {bbr_reno_download_ratio:.3f} is below "
+        f"the declared acceptance threshold {float(minimum_bbr_reno_ratio):.3f}"
+    )
+
+expected_brutal_tx = int(expected_brutal_tx)
+if brutal.get("acceleration") != "brutal":
+    raise SystemExit(
+        f"Brutal proof reported acceleration={brutal.get('acceleration')!r}, "
+        "want 'brutal'"
+    )
+if brutal.get("negotiated_tx_bytes_per_second") != expected_brutal_tx:
+    raise SystemExit(
+        "Brutal proof negotiated Tx bandwidth "
+        f"{brutal.get('negotiated_tx_bytes_per_second')!r}, "
+        f"want {expected_brutal_tx} bytes/s"
+    )
+brutal_target_mbps = expected_brutal_tx * 8 / 1_000_000
+brutal_target_ratio = brutal["median_mbps"] / brutal_target_mbps
+if brutal_target_ratio < float(minimum_brutal_target_ratio):
+    raise SystemExit(
+        f"Brutal achieved/target ratio {brutal_target_ratio:.3f} is below "
+        f"the declared acceptance threshold {float(minimum_brutal_target_ratio):.3f}"
+    )
 
 short_ratio = short_quic["median_mbps"] / short_direct["median_mbps"]
 if short_ratio < float(minimum_ratio):
@@ -391,6 +574,54 @@ summary = {
     "ratio_to_direct": {
         "quic": quic["median_mbps"] / direct["median_mbps"],
         "tls": tls["median_mbps"] / direct["median_mbps"],
+    },
+    "controller_proof": {
+        "network_profile": {
+            "one_way_delay_ms": int(delay_ms),
+            "loss_each_direction": loss,
+            "rate_each_direction": rate,
+        },
+        "bbr": {
+            "artifact": bbr_path.name,
+            "acceleration": bbr["acceleration"],
+            "negotiated_tx_bytes_per_second": bbr.get(
+                "negotiated_tx_bytes_per_second", 0
+            ),
+            "median_mbps": bbr["median_mbps"],
+        },
+        "reno": {
+            "artifact": reno_path.name,
+            "acceleration": reno["acceleration"],
+            "negotiated_tx_bytes_per_second": reno.get(
+                "negotiated_tx_bytes_per_second", 0
+            ),
+            "median_mbps": reno["median_mbps"],
+        },
+        "bbr_to_reno_ratio": bbr_reno_ratio,
+        "relay_sender_download": {
+            "bbr_artifact": bbr_download_path.name,
+            "reno_artifact": reno_download_path.name,
+            "bbr_median_mbps": bbr_download["median_mbps"],
+            "reno_median_mbps": reno_download["median_mbps"],
+            "bbr_to_reno_ratio": bbr_reno_download_ratio,
+            "minimum_accepted_bbr_to_reno_ratio": float(minimum_bbr_reno_ratio),
+        },
+        "minimum_accepted_bbr_to_reno_ratio": float(minimum_bbr_reno_ratio),
+        "brutal": {
+            "artifact": brutal_path.name,
+            "acceleration": brutal["acceleration"],
+            "negotiated_tx_bytes_per_second": brutal[
+                "negotiated_tx_bytes_per_second"
+            ],
+            "median_mbps": brutal["median_mbps"],
+            "target_mbps": brutal_target_mbps,
+            "achieved_to_target_ratio": brutal_target_ratio,
+            "minimum_accepted_target_ratio": float(minimum_brutal_target_ratio),
+            "client_upload_mbps": int(client_upload_mbps),
+            "client_download_mbps": int(client_download_mbps),
+            "server_upload_cap_mbps": int(server_upload_mbps),
+            "server_download_cap_mbps": int(server_download_mbps),
+        },
     },
     "acceleration_profile": {
         "description": "sequential short downloads over a loss-free high-RTT path; QUIC uses declared warmups",

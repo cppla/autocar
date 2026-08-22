@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 900 240"
+     role="img"
+     aria-labelledby="autocar-logo-title autocar-logo-description"
+     shape-rendering="geometricPrecision"
+     text-rendering="geometricPrecision">
+  <title id="autocar-logo-title">AutoCAR secure dual-ended accelerator</title>
+  <desc id="autocar-logo-description">A deep-blue rounded emblem with two converging cyan, blue, and violet acceleration lanes forming a slanted letter A and an arrow, paired with the AutoCAR wordmark.</desc>
+
+  <defs>
+    <linearGradient id="mark-background" x1="20" y1="20" x2="220" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B315D"/>
+      <stop offset="0.52" stop-color="#071E3D"/>
+      <stop offset="1" stop-color="#040F24"/>
+    </linearGradient>
+    <linearGradient id="acceleration-lane" x1="45" y1="194" x2="199" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20E3D2"/>
+      <stop offset="0.48" stop-color="#19A9FF"/>
+      <stop offset="1" stop-color="#8B5CFF"/>
+    </linearGradient>
+    <linearGradient id="speed-line" x1="40" y1="0" x2="91" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20E3D2" stop-opacity="0"/>
+      <stop offset="1" stop-color="#20E3D2"/>
+    </linearGradient>
+    <linearGradient id="car-word" x1="640" y1="64" x2="812" y2="154" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#11CFE2"/>
+      <stop offset="0.5" stop-color="#258CFF"/>
+      <stop offset="1" stop-color="#8358F4"/>
+    </linearGradient>
+    <style>
+      .word-auto { fill: #092747; }
+      .tagline { fill: #3B5872; }
+      @media (prefers-color-scheme: dark) {
+        .word-auto { fill: #F4FAFF; }
+        .tagline { fill: #B9CDE0; }
+      }
+    </style>
+  </defs>
+
+  <!-- Emblem: two accelerated lanes become a slanted A and an outbound arrow. -->
+  <rect x="20" y="20" width="200" height="200" rx="44"
+        fill="url(#mark-background)" stroke="#1BC7E2" stroke-width="2"/>
+  <rect x="29" y="29" width="182" height="182" rx="36"
+        fill="none" stroke="#6DEBFA" stroke-opacity="0.12"/>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M42 101 H86" stroke="url(#speed-line)" stroke-width="5"/>
+    <path d="M36 119 H78" stroke="url(#speed-line)" stroke-width="5"/>
+    <path d="M43 137 H70" stroke="url(#speed-line)" stroke-width="5"/>
+
+    <path d="M49 171 H83 L125 62 H181"
+          stroke="#020B1A" stroke-opacity="0.82" stroke-width="23"/>
+    <path d="M49 193 H97 L136 86 L184 178"
+          stroke="#020B1A" stroke-opacity="0.82" stroke-width="23"/>
+    <path d="M49 171 H83 L125 62 H181"
+          stroke="url(#acceleration-lane)" stroke-width="11"/>
+    <path d="M49 193 H97 L136 86 L184 178"
+          stroke="url(#acceleration-lane)" stroke-width="11"/>
+
+    <path d="M53 171 H83 L125 62" stroke="#E9FFFF" stroke-opacity="0.48"
+          stroke-width="2" stroke-dasharray="8 10"/>
+    <path d="M53 193 H97 L136 86" stroke="#E9FFFF" stroke-opacity="0.42"
+          stroke-width="2" stroke-dasharray="8 10"/>
+    <path d="M104 130 H158" stroke="#020B1A" stroke-width="16"/>
+    <path d="M104 130 H158" stroke="url(#acceleration-lane)" stroke-width="7"/>
+  </g>
+
+  <path d="M199 62 177 44 180 57 H161 V67 H180 L177 80 Z"
+        fill="#8B5CFF"/>
+  <circle cx="49" cy="171" r="5.5" fill="#20E3D2"/>
+  <circle cx="49" cy="193" r="5.5" fill="#20E3D2"/>
+
+  <!-- The protected crossbar represents authenticated, encrypted transit. -->
+  <path d="M131 112 143 117 V127 C143 136 138 142 131 146 C124 142 119 136 119 127 V117 Z"
+        fill="#061A34" stroke="#7DEBFA" stroke-width="2"/>
+  <circle cx="131" cy="127" r="3.3" fill="#30CFE4"/>
+  <path d="M131 130 V135" stroke="#30CFE4" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Custom vector wordmark: no installed font is required for AutoCAR. -->
+  <g transform="translate(17 0) skewX(-8)">
+    <g class="word-auto" fill-rule="evenodd">
+      <path d="M272 151 309 64 H334 L359 151 H337 L332 134 H295 L289 151 Z M301 116 H328 L318 82 Z"/>
+      <path d="M359 87 H380 V121 C380 132 385 137 394 137 C405 137 410 130 410 117 V87 H431 V151 H411 V142 C404 150 396 153 385 153 C367 153 359 142 359 124 Z"/>
+      <path d="M445 68 H466 V87 H486 V103 H466 V127 C466 135 470 138 477 138 C481 138 485 137 488 136 V151 C483 153 477 154 471 154 C454 154 445 146 445 130 V103 H433 V87 H445 Z"/>
+      <path d="M522 84 C543 84 556 97 556 119 C556 141 543 154 522 154 C500 154 487 141 487 119 C487 97 500 84 522 84 Z M522 101 C513 101 508 107 508 119 C508 131 513 137 522 137 C531 137 536 131 536 119 C536 107 531 101 522 101 Z"/>
+    </g>
+    <g fill="url(#car-word)" fill-rule="evenodd">
+      <path d="M638 78 622 94 C616 86 609 82 600 82 C584 82 576 92 576 109 C576 126 584 136 600 136 C610 136 617 132 623 124 L638 140 C628 150 615 155 599 155 C571 155 554 137 554 109 C554 81 572 63 599 63 C615 63 628 68 638 78 Z"/>
+      <path d="M641 151 678 64 H703 L728 151 H706 L701 134 H664 L658 151 Z M670 116 H697 L687 82 Z"/>
+      <path d="M731 151 V64 H771 C793 64 806 75 806 93 C806 106 799 114 788 118 L811 151 H786 L767 122 H753 V151 Z M753 82 V105 H768 C779 105 784 101 784 93 C784 85 779 82 769 82 Z"/>
+    </g>
+  </g>
+
+  <rect x="269" y="181" width="45" height="5" rx="2.5" fill="url(#acceleration-lane)"/>
+  <text class="tagline" x="326" y="191"
+        font-family="Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Arial, sans-serif"
+        font-size="15.5" font-weight="750" letter-spacing="2.15">SECURE DUAL-ENDED ACCELERATOR</text>
+</svg>

@@ -12,6 +12,9 @@ WORKDIR /src
 RUN apk add --no-cache ca-certificates
 
 COPY go.mod go.sum ./
+# Local replace directives are resolved during go mod download, so make the
+# audited module forks available before dependency resolution.
+COPY third_party ./third_party
 RUN go mod download
 
 COPY . .
@@ -23,11 +26,13 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
 FROM --platform=$TARGETPLATFORM scratch
 
 LABEL org.opencontainers.image.source="https://github.com/cppla/autocar" \
-      org.opencontainers.image.description="Authenticated dual-ended QUIC/TLS TCP proxy" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.description="Secure dual-ended QUIC/TLS TCP and UDP accelerator" \
+      org.opencontainers.image.licenses="MIT"
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build --chown=65532:65532 /out/autocar /autocar
+COPY --from=build /src/LICENSE /licenses/autocar-LICENSE
+COPY --from=build /src/THIRD_PARTY_NOTICES.md /licenses/THIRD_PARTY_NOTICES.md
 
 USER 65532:65532
 EXPOSE 8443/tcp 8443/udp 1080/tcp 8080/tcp

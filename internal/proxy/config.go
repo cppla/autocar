@@ -38,6 +38,7 @@ type Config struct {
 
 type serverConfig struct {
 	dialer           transport.Dialer
+	packetDialer     transport.PacketDialer
 	authenticator    Authenticator
 	handshakeTimeout time.Duration
 	dialTimeout      time.Duration
@@ -67,8 +68,10 @@ func normalizeConfig(cfg Config) (serverConfig, error) {
 	if cfg.MaxConnections == 0 {
 		cfg.MaxConnections = 1024
 	}
+	packetDialer, _ := cfg.Dialer.(transport.PacketDialer)
 	return serverConfig{
 		dialer:           cfg.Dialer,
+		packetDialer:     packetDialer,
 		authenticator:    cfg.Authenticator,
 		handshakeTimeout: cfg.HandshakeTimeout,
 		dialTimeout:      cfg.DialTimeout,
