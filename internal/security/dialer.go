@@ -222,6 +222,68 @@ func (d *SafeDialer) DialContext(ctx context.Context, network, address string) (
 	return nil, fmt.Errorf("security: %s has no addresses matching %s", host, network)
 }
 
+// ResolveUDPContext resolves a UDP destination and returns only numeric
+// addresses that pass the same port, special-use, private-network and custom
+// CIDR policy enforced by DialContext. Callers must use one of the returned
+// addresses directly and must not resolve the original hostname again. This
+// is used by datagram transports where a connected net.Conn is not suitable.
+func (d *SafeDialer) ResolveUDPContext(ctx context.Context, address string) ([]netip.AddrPort, error) {
+	if d == nil {
+		return nil, errors.New("security: nil SafeDialer")
+	}
+	if ctx == nil {
+		return nil, errors.New("security: nil resolve context")
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("security: invalid destination %q: %w", address, err)
+	}
+	if host == "" {
+		return nil, errors.New("security: destination host is required")
+	}
+	portNumber, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || portNumber == 0 {
+		return nil, fmt.Errorf("security: destination port %q is not a number from 1 to 65535", portText)
+	}
+	port := uint16(portNumber)
+	deniedPorts := d.deniedPorts
+	if deniedPorts == nil {
+		deniedPorts = map[uint16]struct{}{25: {}, 465: {}, 587: {}}
+	}
+	if _, denied := deniedPorts[port]; denied {
+		return nil, fmt.Errorf("%w: %d", ErrDeniedPort, port)
+	}
+
+	addresses, err := d.resolve(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	unsafeCount := 0
+	approved := make([]netip.AddrPort, 0, len(addresses))
+	for _, addr := range addresses {
+		addr = addr.Unmap()
+		if err := validateDestinationIP(addr, d.allowPrivate); err != nil {
+			unsafeCount++
+			continue
+		}
+		if matchesDeniedPrefix(addr, d.deniedNets) {
+			unsafeCount++
+			continue
+		}
+		approved = append(approved, netip.AddrPortFrom(addr, port))
+	}
+	if len(approved) != 0 {
+		return approved, nil
+	}
+	if unsafeCount != 0 {
+		return nil, fmt.Errorf("%w: %s resolved only to prohibited addresses", ErrUnsafeAddress, host)
+	}
+	return nil, fmt.Errorf("security: %s has no usable UDP addresses", host)
+}
+
 func (d *SafeDialer) resolve(ctx context.Context, network, host string) ([]netip.Addr, error) {
 	if literal, err := netip.ParseAddr(host); err == nil {
 		if literal.Zone() != "" {

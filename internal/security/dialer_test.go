@@ -23,6 +23,23 @@ type fakeResolver struct {
 	calls     []resolverCall
 }
 
+type rotatingResolver struct {
+	mu      sync.Mutex
+	answers [][]netip.Addr
+	calls   []resolverCall
+}
+
+func (r *rotatingResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, resolverCall{network: network, host: host})
+	index := len(r.calls) - 1
+	if index >= len(r.answers) {
+		index = len(r.answers) - 1
+	}
+	return append([]netip.Addr(nil), r.answers[index]...), nil
+}
+
 func (r *fakeResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
 	r.calls = append(r.calls, resolverCall{network: network, host: host})
 	return append([]netip.Addr(nil), r.addresses...), r.err
@@ -405,6 +422,89 @@ func TestSafeDialerChecksCanceledContextBeforeDial(t *testing.T) {
 	}
 	if len(dialer.calls) != 0 {
 		t.Fatalf("canceled context caused dialing: %v", dialer.calls)
+	}
+}
+
+func TestSafeDialerResolveUDPReturnsOnlyApprovedNumericAddresses(t *testing.T) {
+	resolver := &fakeResolver{addresses: []netip.Addr{
+		netip.MustParseAddr("10.0.0.1"),
+		netip.MustParseAddr("8.8.8.8"),
+		netip.MustParseAddr("2606:4700:4700::1111"),
+		netip.MustParseAddr("8.8.8.8"),
+	}}
+	safe := NewSafeDialer(SafeDialerOptions{Resolver: resolver})
+	addresses, err := safe.ResolveUDPContext(context.Background(), "dns.example:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []netip.AddrPort{
+		netip.MustParseAddrPort("8.8.8.8:53"),
+		netip.MustParseAddrPort("[2606:4700:4700::1111]:53"),
+	}
+	if !reflect.DeepEqual(addresses, want) {
+		t.Fatalf("UDP addresses = %v, want %v", addresses, want)
+	}
+	if !reflect.DeepEqual(resolver.calls, []resolverCall{{network: "ip", host: "dns.example"}}) {
+		t.Fatalf("resolver calls = %v", resolver.calls)
+	}
+}
+
+func TestSafeDialerResolveUDPRejectsDeniedPortBeforeDNS(t *testing.T) {
+	resolver := &fakeResolver{addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
+	safe := NewSafeDialer(SafeDialerOptions{Resolver: resolver})
+	if _, err := safe.ResolveUDPContext(context.Background(), "mail.example:465"); !errors.Is(err, ErrDeniedPort) {
+		t.Fatalf("denied UDP port error = %v", err)
+	}
+	if len(resolver.calls) != 0 {
+		t.Fatalf("denied UDP port caused DNS resolution: %v", resolver.calls)
+	}
+}
+
+func TestSafeDialerResolveUDPRejectsUnsafeResolution(t *testing.T) {
+	resolver := &fakeResolver{addresses: []netip.Addr{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("169.254.169.254"),
+	}}
+	safe := NewSafeDialer(SafeDialerOptions{Resolver: resolver, AllowPrivate: true})
+	if _, err := safe.ResolveUDPContext(context.Background(), "internal.example:53"); !errors.Is(err, ErrUnsafeAddress) {
+		t.Fatalf("unsafe UDP resolution error = %v", err)
+	}
+}
+
+func TestSafeDialerResolveUDPNumericLiteralSkipsDNS(t *testing.T) {
+	resolver := &fakeResolver{err: errors.New("must not resolve")}
+	safe := NewSafeDialer(SafeDialerOptions{Resolver: resolver})
+	addresses, err := safe.ResolveUDPContext(context.Background(), "[2606:4700:4700::1111]:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []netip.AddrPort{netip.MustParseAddrPort("[2606:4700:4700::1111]:443")}
+	if !reflect.DeepEqual(addresses, want) {
+		t.Fatalf("literal UDP addresses = %v, want %v", addresses, want)
+	}
+	if len(resolver.calls) != 0 {
+		t.Fatalf("numeric UDP literal caused DNS resolution: %v", resolver.calls)
+	}
+}
+
+func TestSafeDialerResolveUDPFreezesDNSAnswerAgainstRebinding(t *testing.T) {
+	resolver := &rotatingResolver{answers: [][]netip.Addr{
+		{netip.MustParseAddr("8.8.8.8")},
+		{netip.MustParseAddr("127.0.0.1")},
+	}}
+	safe := NewSafeDialer(SafeDialerOptions{Resolver: resolver})
+	addresses, err := safe.ResolveUDPContext(context.Background(), "rebinding.example:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(addresses, []netip.AddrPort{netip.MustParseAddrPort("8.8.8.8:53")}) {
+		t.Fatalf("frozen numeric answer = %v", addresses)
+	}
+	resolver.mu.Lock()
+	calls := append([]resolverCall(nil), resolver.calls...)
+	resolver.mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("ResolveUDPContext performed %d lookups, want exactly 1", len(calls))
 	}
 }
 

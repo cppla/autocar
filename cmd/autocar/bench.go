@@ -55,14 +55,21 @@ func ensureSafeBenchmarkListener(address string, allowPublic bool) error {
 }
 
 type benchOutput struct {
-	Mode       string    `json:"mode"`
-	Transport  string    `json:"transport"`
-	Target     string    `json:"target"`
-	Bytes      int64     `json:"bytes_per_iteration"`
-	Iterations int       `json:"iterations"`
-	MedianMbps float64   `json:"median_mbps"`
-	P95Mbps    float64   `json:"p95_mbps"`
-	Results    []float64 `json:"results_mbps"`
+	Mode                 string    `json:"mode"`
+	Transport            string    `json:"transport"`
+	Acceleration         string    `json:"acceleration,omitempty"`
+	NegotiatedTxBytesSec uint64    `json:"negotiated_tx_bytes_per_second,omitempty"`
+	Target               string    `json:"target"`
+	Bytes                int64     `json:"bytes_per_iteration"`
+	Iterations           int       `json:"iterations"`
+	MedianMbps           float64   `json:"median_mbps"`
+	P95Mbps              float64   `json:"p95_mbps"`
+	Results              []float64 `json:"results_mbps"`
+}
+
+type accelerationReporter interface {
+	AccelerationMode() string
+	NegotiatedTx() uint64
 }
 
 func runBenchClient(parent context.Context, args []string) error {
@@ -137,6 +144,10 @@ func runBenchClient(parent context.Context, args []string) error {
 		MedianMbps: median,
 		P95Mbps:    p95,
 		Results:    results,
+	}
+	if reporter, ok := dialer.(accelerationReporter); ok {
+		output.Acceleration = reporter.AccelerationMode()
+		output.NegotiatedTxBytesSec = reporter.NegotiatedTx()
 	}
 	if *jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)

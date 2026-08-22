@@ -15,28 +15,47 @@ concurrency:
 
 jobs:
   test:
-    name: Format, vet, and test (Go ${{ matrix.go }})
+    name: Vet and test (Go ${{ matrix.go }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         go: [1.25.x, 1.27.x]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
           cache: true
       - name: Verify formatting
+        if: matrix.go == '1.27.x'
         run: make fmt-check
+      - name: Verify local-fork provenance
+        if: matrix.go == '1.27.x'
+        run: make fork-provenance-check
       - name: Verify module files
+        if: matrix.go == '1.27.x'
         run: make mod-check
+      - name: Verify third-party notices
+        if: matrix.go == '1.27.x'
+        run: make notices-check
       - name: Vet
         run: make vet
       - name: Test with coverage
         run: go test -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Test hardened Hysteria module
+        working-directory: third_party/hysteria-core
+        run: go test -shuffle=on -count=1 ./...
+      - name: Test hardened QUIC core, HTTP/3, and RFC 9002 recovery
+        working-directory: third_party/quic-go
+        run: |
+          go test -shuffle=on -count=1 . -run '^TestServerCancelsConnContextWhenConnectionIDGenerationFails$'
+          go test -shuffle=on -count=1 ./http3 ./internal/ackhandler
+      - name: Test Chrome fingerprint, datagrams, and path MTU discovery
+        working-directory: third_party/quic-go
+        run: go test -shuffle=on -count=1 ./integrationtests/self -run '^(TestChromeParrot|TestDatagram(Negotiation|SizeLimit)|TestPathMTUDiscovery)'
       - name: Upload coverage
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-go-${{ matrix.go }}
           path: coverage.out
@@ -46,24 +65,32 @@ jobs:
     name: Race detector
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.27.x
           cache: true
       - run: make race
+      - name: Race-test hardened Hysteria resource limits
+        working-directory: third_party/hysteria-core
+        run: go test -race -shuffle=on -count=1 ./client ./server ./internal/frag ./internal/protocol ./internal/congestion/...
+      - name: Race-test hardened QUIC admission and loss recovery
+        working-directory: third_party/quic-go
+        run: |
+          go test -race -shuffle=on -count=1 . -run '^TestServerCancelsConnContextWhenConnectionIDGenerationFails$'
+          go test -race -shuffle=on -count=1 ./http3 ./internal/ackhandler
 
   vulnerability-scan:
     name: Reachable vulnerability scan
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.27.x
           cache: true
       - name: Run govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+        run: ./scripts/govulncheck.sh
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -74,19 +101,27 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            output: autocar-linux-amd64
+            artifact: autocar-linux-amd64
+            binary: autocar
+            archive: autocar-linux-amd64.tar.gz
           - goos: linux
             goarch: arm64
-            output: autocar-linux-arm64
+            artifact: autocar-linux-arm64
+            binary: autocar
+            archive: autocar-linux-arm64.tar.gz
           - goos: darwin
             goarch: arm64
-            output: autocar-darwin-arm64
+            artifact: autocar-darwin-arm64
+            binary: autocar
+            archive: autocar-darwin-arm64.tar.gz
           - goos: windows
             goarch: amd64
-            output: autocar-windows-amd64.exe
+            artifact: autocar-windows-amd64
+            binary: autocar.exe
+            archive: autocar-windows-amd64.zip
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.27.x
           cache: true
@@ -96,19 +131,26 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          mkdir -p dist
-          go build -trimpath -o "dist/${{ matrix.output }}" ./cmd/autocar
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          mkdir -p dist/package
+          go build -trimpath -o "dist/package/${{ matrix.binary }}" ./cmd/autocar
+          cp LICENSE THIRD_PARTY_NOTICES.md dist/package/
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            (cd dist/package && zip -q -X "../${{ matrix.archive }}" "${{ matrix.binary }}" LICENSE THIRD_PARTY_NOTICES.md)
+          else
+            tar -C dist/package -czf "dist/${{ matrix.archive }}" "${{ matrix.binary }}" LICENSE THIRD_PARTY_NOTICES.md
+          fi
+          test -s "dist/${{ matrix.archive }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ matrix.output }}
-          path: dist/${{ matrix.output }}
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.archive }}
           if-no-files-found: error
 
   container:
     name: Multi-platform container build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build OCI image index
         run: |
           docker buildx create --name autocar-ci --driver docker-container --use

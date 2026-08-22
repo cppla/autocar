@@ -13,6 +13,30 @@ updates:
           - minor
           - patch
 
+  - package-ecosystem: gomod
+    directory: /third_party/hysteria-core
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      hardened-core-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: gomod
+    directory: /third_party/quic-go
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      hardened-quic-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -24,6 +48,11 @@ updates:
         update-types:
           - minor
           - patch
+        exclude-patterns:
+          - github/codeql-action/*
+      codeql-actions:
+        patterns:
+          - github/codeql-action/*
 
   - package-ecosystem: docker
     directory: /

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -8,8 +9,12 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/cppla/autocar/internal/transport"
 )
 
 const (
@@ -38,10 +43,14 @@ const (
 	socksReplyAddressUnsupported = 0x08
 
 	userPasswordVersion = 0x01
+
+	maxUDPDatagramSize = 65507
 )
 
-// SOCKS5Server is an RFC 1928 CONNECT proxy. BIND and UDP ASSOCIATE receive a
-// standards-compliant "command not supported" response.
+var errSOCKSUDPFragmented = errors.New("socks5: fragmented UDP datagram")
+
+// SOCKS5Server is an RFC 1928 CONNECT and, when the configured transport also
+// implements transport.PacketDialer, UDP ASSOCIATE proxy. BIND is unsupported.
 type SOCKS5Server struct {
 	cfg       serverConfig
 	lifecycle *serverLifecycle
@@ -100,7 +109,15 @@ func (s *SOCKS5Server) serveConn(client net.Conn) {
 		}
 		return
 	}
-	if request.command != socksCommandConnect {
+	if request.command == socksCommandBind {
+		_ = writeSOCKSReply(client, socksReplyCommandUnsupported, nil)
+		return
+	}
+	if request.command == socksCommandUDP && s.cfg.packetDialer == nil {
+		_ = writeSOCKSReply(client, socksReplyCommandUnsupported, nil)
+		return
+	}
+	if request.command != socksCommandConnect && request.command != socksCommandUDP {
 		_ = writeSOCKSReply(client, socksReplyCommandUnsupported, nil)
 		return
 	}
@@ -108,7 +125,14 @@ func (s *SOCKS5Server) serveConn(client net.Conn) {
 	// parsed. Remote dialing has its own timeout and must not accidentally be
 	// shortened by the handshake deadline.
 	_ = client.SetDeadline(time.Time{})
+	if request.command == socksCommandUDP {
+		s.serveUDPAssociate(client, request)
+		return
+	}
+	s.serveConnect(client, request)
+}
 
+func (s *SOCKS5Server) serveConnect(client net.Conn, request socksRequest) {
 	ctx := context.Background()
 	cancel := func() {}
 	if s.cfg.dialTimeout > 0 {
@@ -133,6 +157,356 @@ func (s *SOCKS5Server) serveConn(client net.Conn) {
 	}
 	_ = client.SetWriteDeadline(time.Time{})
 	_ = relay(client, upstream, s.cfg.idleTimeout)
+}
+
+func (s *SOCKS5Server) serveUDPAssociate(client net.Conn, request socksRequest) {
+	ctx := context.Background()
+	cancel := func() {}
+	if s.cfg.dialTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, s.cfg.dialTimeout)
+	}
+	defer cancel()
+
+	peerIP, err := addressIP(client.RemoteAddr())
+	if err != nil {
+		_ = writeSOCKSReply(client, socksReplyGeneralFailure, nil)
+		return
+	}
+	requestedPort, err := validateUDPAssociateRequest(ctx, request, peerIP, net.DefaultResolver.LookupIPAddr)
+	if err != nil {
+		reply := byte(socksReplyGeneralFailure)
+		var protocolErr *socksProtocolError
+		if errors.As(err, &protocolErr) {
+			reply = protocolErr.reply
+		}
+		_ = writeSOCKSReply(client, reply, nil)
+		return
+	}
+
+	udpConn, err := listenSOCKSUDP(client)
+	if err != nil {
+		_ = writeSOCKSReply(client, socksReplyGeneralFailure, nil)
+		return
+	}
+	defer udpConn.Close()
+
+	upstream, err := s.cfg.packetDialer.DialPacket(ctx)
+	if err != nil || upstream == nil {
+		if err == nil {
+			err = errors.New("socks5: packet dialer returned a nil connection")
+		}
+		_ = writeSOCKSReply(client, socksReplyForError(err), nil)
+		return
+	}
+	upstream = &closeOncePacketConn{PacketConn: upstream}
+	defer upstream.Close()
+	cancel()
+
+	if s.cfg.handshakeTimeout > 0 {
+		_ = client.SetWriteDeadline(time.Now().Add(s.cfg.handshakeTimeout))
+	}
+	if err := writeSOCKSReply(client, socksReplySucceeded, udpConn.LocalAddr()); err != nil {
+		return
+	}
+	_ = client.SetWriteDeadline(time.Time{})
+
+	endpoint := &socksUDPClientEndpoint{
+		peerIP:        peerIP,
+		requestedPort: requestedPort,
+	}
+	runSOCKSUDPAssociation(client, udpConn, upstream, endpoint, s.cfg.idleTimeout)
+}
+
+type lookupIPFunc func(context.Context, string) ([]net.IPAddr, error)
+
+// validateUDPAssociateRequest applies the RFC 1928 meaning of DST.ADDR and
+// DST.PORT: they describe the endpoint from which the client expects to send
+// UDP packets. An unspecified address selects the TCP control connection's
+// peer. A concrete IP, or the resolved address set for a domain, is accepted
+// only when it includes that same peer. The data path independently checks the
+// actual packet source and pins a zero port on the first valid datagram.
+func validateUDPAssociateRequest(
+	ctx context.Context,
+	request socksRequest,
+	peerIP net.IP,
+	lookupIP lookupIPFunc,
+) (int, error) {
+	if peerIP == nil {
+		return 0, &socksProtocolError{
+			reply: socksReplyGeneralFailure,
+			err:   errors.New("socks5: missing UDP control peer IP"),
+		}
+	}
+
+	switch request.addressType {
+	case socksAddressIPv4, socksAddressIPv6:
+		requestedIP := net.ParseIP(request.host)
+		if requestedIP == nil {
+			return 0, &socksProtocolError{
+				reply: socksReplyAddressUnsupported,
+				err:   errors.New("socks5: invalid UDP associate IP"),
+			}
+		}
+		if !requestedIP.IsUnspecified() && !requestedIP.Equal(peerIP) {
+			return 0, &socksProtocolError{
+				reply: socksReplyNotAllowed,
+				err:   errors.New("socks5: UDP associate address does not match the control peer"),
+			}
+		}
+	case socksAddressDomain:
+		if lookupIP == nil {
+			return 0, &socksProtocolError{
+				reply: socksReplyHostUnreachable,
+				err:   errors.New("socks5: no resolver for UDP associate domain"),
+			}
+		}
+		addresses, err := lookupIP(ctx, request.host)
+		if err != nil {
+			return 0, &socksProtocolError{
+				reply: socksReplyHostUnreachable,
+				err:   fmt.Errorf("socks5: resolve UDP associate domain: %w", err),
+			}
+		}
+		matched := false
+		for _, address := range addresses {
+			if address.IP.Equal(peerIP) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return 0, &socksProtocolError{
+				reply: socksReplyNotAllowed,
+				err:   errors.New("socks5: UDP associate domain does not resolve to the control peer"),
+			}
+		}
+	default:
+		return 0, &socksProtocolError{
+			reply: socksReplyAddressUnsupported,
+			err:   errors.New("socks5: unsupported UDP associate address type"),
+		}
+	}
+	return int(request.port), nil
+}
+
+func listenSOCKSUDP(client net.Conn) (*net.UDPConn, error) {
+	localIP, err := addressIP(client.LocalAddr())
+	if err != nil {
+		return nil, err
+	}
+	if ip4 := localIP.To4(); ip4 != nil {
+		return net.ListenUDP("udp4", &net.UDPAddr{IP: ip4})
+	}
+	ip16 := localIP.To16()
+	if ip16 == nil {
+		return nil, errors.New("socks5: TCP listener has no IP address")
+	}
+	return net.ListenUDP("udp6", &net.UDPAddr{IP: ip16})
+}
+
+func addressIP(address net.Addr) (net.IP, error) {
+	switch value := address.(type) {
+	case *net.TCPAddr:
+		if value.IP != nil {
+			return append(net.IP(nil), value.IP...), nil
+		}
+	case *net.UDPAddr:
+		if value.IP != nil {
+			return append(net.IP(nil), value.IP...), nil
+		}
+	}
+	if address == nil {
+		return nil, errors.New("socks5: missing socket address")
+	}
+	host, _, err := net.SplitHostPort(address.String())
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, errors.New("socks5: socket address is not an IP address")
+	}
+	return ip, nil
+}
+
+type socksUDPClientEndpoint struct {
+	mu            sync.RWMutex
+	peerIP        net.IP
+	requestedPort int
+	address       *net.UDPAddr
+}
+
+type closeOncePacketConn struct {
+	transport.PacketConn
+	once sync.Once
+	err  error
+}
+
+func (c *closeOncePacketConn) Close() error {
+	c.once.Do(func() { c.err = c.PacketConn.Close() })
+	return c.err
+}
+
+func (c *closeOncePacketConn) MaxPayloadSize() int {
+	if sized, ok := c.PacketConn.(transport.PacketPayloadSizer); ok {
+		return sized.MaxPayloadSize()
+	}
+	return 0
+}
+
+// accept records the first valid source port when the UDP ASSOCIATE request
+// specified port zero. Every datagram must originate from the control TCP
+// connection's peer IP, preventing the relay from becoming an open UDP proxy.
+func (e *socksUDPClientEndpoint) accept(address *net.UDPAddr) bool {
+	if address == nil || !address.IP.Equal(e.peerIP) {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.requestedPort != 0 && address.Port != e.requestedPort {
+		return false
+	}
+	if e.address == nil {
+		e.address = &net.UDPAddr{
+			IP:   append(net.IP(nil), address.IP...),
+			Port: address.Port,
+			Zone: address.Zone,
+		}
+		return true
+	}
+	return address.Port == e.address.Port && address.Zone == e.address.Zone
+}
+
+func (e *socksUDPClientEndpoint) current() *net.UDPAddr {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.address == nil {
+		return nil
+	}
+	return &net.UDPAddr{
+		IP:   append(net.IP(nil), e.address.IP...),
+		Port: e.address.Port,
+		Zone: e.address.Zone,
+	}
+}
+
+func runSOCKSUDPAssociation(
+	control net.Conn,
+	local *net.UDPConn,
+	upstream transport.PacketConn,
+	endpoint *socksUDPClientEndpoint,
+	idleTimeout time.Duration,
+) {
+	maxPayloadSize := maxUDPDatagramSize
+	if sized, ok := upstream.(transport.PacketPayloadSizer); ok {
+		if limit := sized.MaxPayloadSize(); limit > 0 && limit < maxPayloadSize {
+			maxPayloadSize = limit
+		}
+	}
+	finished := make(chan struct{}, 3)
+	activity := make(chan struct{}, 1)
+	signalActivity := func() {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	}
+	finish := func() { finished <- struct{}{} }
+
+	go func() {
+		defer finish()
+		// One extra byte lets us detect and drop oversized IPv6 UDP payloads
+		// instead of forwarding a silently truncated 65,507-byte prefix.
+		buffer := make([]byte, maxUDPDatagramSize+1)
+		for {
+			n, source, err := local.ReadFromUDP(buffer)
+			if err != nil {
+				return
+			}
+			payload, target, err := parseSOCKSUDPDatagram(buffer[:n])
+			if err != nil || len(payload) > maxPayloadSize || !endpoint.accept(source) {
+				continue
+			}
+			if err := upstream.Send(payload, target); err != nil {
+				return
+			}
+			signalActivity()
+		}
+	}()
+
+	go func() {
+		defer finish()
+		for {
+			payload, source, err := upstream.Receive()
+			if err != nil {
+				return
+			}
+			clientAddress := endpoint.current()
+			if clientAddress == nil {
+				// An unsolicited upstream packet cannot be routed safely before
+				// the client's source endpoint has been validated.
+				continue
+			}
+			packet, err := buildSOCKSUDPDatagram(payload, source)
+			if err != nil {
+				continue
+			}
+			if _, err := local.WriteToUDP(packet, clientAddress); err != nil {
+				return
+			}
+			signalActivity()
+		}
+	}()
+
+	go func() {
+		defer finish()
+		buffer := make([]byte, 1)
+		for {
+			if _, err := control.Read(buffer); err != nil {
+				return
+			}
+		}
+	}()
+
+	var timer *time.Timer
+	var idle <-chan time.Time
+	if idleTimeout > 0 {
+		timer = time.NewTimer(idleTimeout)
+		idle = timer.C
+		defer timer.Stop()
+	}
+	completed := 0
+wait:
+	for {
+		select {
+		case <-finished:
+			completed++
+			break wait
+		case <-activity:
+			if timer != nil {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idleTimeout)
+			}
+		case <-idle:
+			break wait
+		}
+	}
+
+	// Closing both packet endpoints interrupts their blocking reads. A read
+	// deadline interrupts the control watcher without removing the connection
+	// from lifecycle tracking before all association goroutines have exited.
+	_ = local.Close()
+	_ = upstream.Close()
+	_ = control.SetReadDeadline(time.Now())
+	for completed < 3 {
+		<-finished
+		completed++
+	}
 }
 
 func (s *SOCKS5Server) negotiate(conn net.Conn) error {
@@ -220,8 +594,11 @@ func readUserPasswordRequest(r io.Reader) (string, string, error) {
 }
 
 type socksRequest struct {
-	command byte
-	address string
+	command     byte
+	addressType byte
+	host        string
+	port        uint16
+	address     string
 }
 
 type socksProtocolError struct {
@@ -259,15 +636,18 @@ func readSOCKSRequest(r io.Reader) (socksRequest, error) {
 		return socksRequest{}, err
 	}
 	port := binary.BigEndian.Uint16(portBytes[:])
-	if port == 0 {
+	if port == 0 && header[1] != socksCommandUDP {
 		return socksRequest{}, &socksProtocolError{
 			reply: socksReplyAddressUnsupported,
 			err:   errors.New("socks5: zero destination port"),
 		}
 	}
 	return socksRequest{
-		command: header[1],
-		address: net.JoinHostPort(host, fmt.Sprintf("%d", port)),
+		command:     header[1],
+		addressType: header[3],
+		host:        host,
+		port:        port,
+		address:     net.JoinHostPort(host, fmt.Sprintf("%d", port)),
 	}, nil
 }
 
@@ -315,6 +695,81 @@ func readSOCKSHost(r io.Reader, addressType byte) (string, error) {
 			err:   fmt.Errorf("socks5: unsupported address type %d", addressType),
 		}
 	}
+}
+
+func parseSOCKSUDPDatagram(packet []byte) ([]byte, string, error) {
+	if len(packet) > maxUDPDatagramSize {
+		return nil, "", errors.New("socks5: UDP datagram exceeds maximum size")
+	}
+	if len(packet) < 4 {
+		return nil, "", io.ErrUnexpectedEOF
+	}
+	if packet[0] != 0 || packet[1] != 0 {
+		return nil, "", errors.New("socks5: nonzero UDP reserved field")
+	}
+	if packet[2] != 0 {
+		return nil, "", errSOCKSUDPFragmented
+	}
+
+	reader := bytes.NewReader(packet[4:])
+	host, err := readSOCKSHost(reader, packet[3])
+	if err != nil {
+		return nil, "", err
+	}
+	portBytes := [2]byte{}
+	if _, err := io.ReadFull(reader, portBytes[:]); err != nil {
+		return nil, "", err
+	}
+	port := binary.BigEndian.Uint16(portBytes[:])
+	if port == 0 {
+		return nil, "", errors.New("socks5: zero UDP destination port")
+	}
+	payloadOffset := len(packet) - reader.Len()
+	return packet[payloadOffset:], net.JoinHostPort(host, strconv.Itoa(int(port))), nil
+}
+
+func buildSOCKSUDPDatagram(payload []byte, address string) ([]byte, error) {
+	host, portString, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.ParseUint(portString, 10, 16)
+	if err != nil || port == 0 {
+		return nil, errors.New("socks5: invalid UDP source port")
+	}
+
+	packet := make([]byte, 4, 4+net.IPv6len+2+len(payload))
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			packet[3] = socksAddressIPv4
+			packet = append(packet, ip4...)
+		} else {
+			ip16 := ip.To16()
+			if ip16 == nil {
+				return nil, errors.New("socks5: invalid UDP source IP")
+			}
+			packet[3] = socksAddressIPv6
+			packet = append(packet, ip16...)
+		}
+	} else {
+		if len(host) == 0 || len(host) > 255 {
+			return nil, errors.New("socks5: invalid UDP source host length")
+		}
+		for _, value := range []byte(host) {
+			if value <= 0x20 || value == 0x7f {
+				return nil, errors.New("socks5: invalid UDP source host")
+			}
+		}
+		packet[3] = socksAddressDomain
+		packet = append(packet, byte(len(host)))
+		packet = append(packet, host...)
+	}
+	packet = binary.BigEndian.AppendUint16(packet, uint16(port))
+	if len(packet)+len(payload) > maxUDPDatagramSize {
+		return nil, errors.New("socks5: UDP datagram exceeds maximum size")
+	}
+	packet = append(packet, payload...)
+	return packet, nil
 }
 
 func writeSOCKSReply(w io.Writer, reply byte, address net.Addr) error {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +11,39 @@ import (
 
 	"github.com/cppla/autocar/internal/security"
 )
+
+func TestMegabitsToBytesPerSecond(t *testing.T) {
+	for value, wanted := range map[uint64]uint64{
+		0:   0,
+		1:   125_000,
+		100: 12_500_000,
+	} {
+		got, err := megabitsToBytesPerSecond(value)
+		if err != nil || got != wanted {
+			t.Fatalf("%d Mbit/s = %d B/s, %v; want %d", value, got, err, wanted)
+		}
+	}
+	if _, err := megabitsToBytesPerSecond(math.MaxUint64); err == nil {
+		t.Fatal("overflowing bandwidth was accepted")
+	}
+}
+
+func TestLoadOptionalSecret(t *testing.T) {
+	t.Setenv("AUTOCAR_TEST_OPTIONAL_SECRET", "")
+	value, err := loadOptionalSecret("", "AUTOCAR_TEST_OPTIONAL_SECRET", 16)
+	if err != nil || value != nil {
+		t.Fatalf("empty optional secret = %q, %v", value, err)
+	}
+	t.Setenv("AUTOCAR_TEST_OPTIONAL_SECRET", "short")
+	if _, err := loadOptionalSecret("", "AUTOCAR_TEST_OPTIONAL_SECRET", 16); err == nil {
+		t.Fatal("short optional secret was accepted")
+	}
+	t.Setenv("AUTOCAR_TEST_OPTIONAL_SECRET", strings.Repeat("x", 16))
+	value, err = loadOptionalSecret("", "AUTOCAR_TEST_OPTIONAL_SECRET", 16)
+	if err != nil || string(value) != strings.Repeat("x", 16) {
+		t.Fatalf("optional secret = %q, %v", value, err)
+	}
+}
 
 func TestParseDeniedPorts(t *testing.T) {
 	ports, err := parseDeniedPorts("25, 443,25")
@@ -172,6 +206,18 @@ func TestRunHelpAndUnknownCommand(t *testing.T) {
 	}
 	if err := run(context.Background(), []string{"does-not-exist"}); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestServerRejectsFallbackSourceLimitAboveGlobalLimit(t *testing.T) {
+	err := runServer(context.Background(), []string{
+		"--cert", "unused.crt",
+		"--key", "unused.key",
+		"--max-streams", "1",
+		"--max-client-fallback-connections", "2",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--max-client-fallback-connections") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
