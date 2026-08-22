@@ -1,0 +1,55 @@
+name: autocar
+
+x-hardening: &hardening
+  image: autocar:local
+  build:
+    context: .
+  user: "${AUTOCAR_UID:-65532}:${AUTOCAR_GID:-65532}"
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+  relay:
+    <<: *hardening
+    profiles: ["server"]
+    command:
+      - server
+      - --listen=:8443
+      - --tcp-listen=:8443
+      - --cert=/run/autocar/server.crt
+      - --key=/run/autocar/server.key
+      - --token-file=/run/autocar/relay-token
+    ports:
+      - "${AUTOCAR_RELAY_PORT:-443}:8443/udp"
+      - "${AUTOCAR_RELAY_PORT:-443}:8443/tcp"
+    volumes:
+      - ./secrets/server.crt:/run/autocar/server.crt:ro
+      - ./secrets/server.key:/run/autocar/server.key:ro
+      - ./secrets/relay-token:/run/autocar/relay-token:ro
+
+  client:
+    <<: *hardening
+    profiles: ["client"]
+    command:
+      - client
+      - --server=${AUTOCAR_RELAY:-relay.example.com:443}
+      - --server-name=${AUTOCAR_SERVER_NAME:-relay.example.com}
+      - --transport=${AUTOCAR_TRANSPORT:-auto}
+      - --ca=/run/autocar/relay-ca.crt
+      - --token-file=/run/autocar/relay-token
+      - --socks=0.0.0.0:1080
+      - --http=0.0.0.0:8080
+      - --allow-public-plaintext
+      - --proxy-user=${AUTOCAR_PROXY_USER:-autocar}
+      - --proxy-password-file=/run/autocar/proxy-password
+    ports:
+      - "127.0.0.1:${AUTOCAR_SOCKS_PORT:-1080}:1080/tcp"
+      - "127.0.0.1:${AUTOCAR_HTTP_PORT:-8080}:8080/tcp"
+    volumes:
+      - ./secrets/relay-ca.crt:/run/autocar/relay-ca.crt:ro
+      - ./secrets/relay-token:/run/autocar/relay-token:ro
+      - ./secrets/proxy-password:/run/autocar/proxy-password:ro

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.github
+bin
+dist
+artifacts
+coverage.out
+*.prof
+*.test
+*.key
+*.pem
+*.crt
+secrets
+token
+.env
+*.secret
+*.token

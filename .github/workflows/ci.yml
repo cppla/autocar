@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Format, vet, and test (Go ${{ matrix.go }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        go: [1.25.x, 1.27.x]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: Verify formatting
+        run: make fmt-check
+      - name: Verify module files
+        run: make mod-check
+      - name: Vet
+        run: make vet
+      - name: Test with coverage
+        run: go test -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Upload coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-go-${{ matrix.go }}
+          path: coverage.out
+          if-no-files-found: error
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.27.x
+          cache: true
+      - run: make race
+
+  vulnerability-scan:
+    name: Reachable vulnerability scan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.27.x
+          cache: true
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            output: autocar-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: autocar-linux-arm64
+          - goos: darwin
+            goarch: arm64
+            output: autocar-darwin-arm64
+          - goos: windows
+            goarch: amd64
+            output: autocar-windows-amd64.exe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.27.x
+          cache: true
+      - name: Cross-build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -o "dist/${{ matrix.output }}" ./cmd/autocar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+          if-no-files-found: error
+
+  container:
+    name: Multi-platform container build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build OCI image index
+        run: |
+          docker buildx create --name autocar-ci --driver docker-container --use
+          docker buildx inspect --bootstrap
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --output type=oci,dest=/tmp/autocar-images.tar \
+            .
