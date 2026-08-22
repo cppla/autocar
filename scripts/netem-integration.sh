@@ -152,21 +152,23 @@ run_controller_client() {
     "${AUTOCAR_BIN}" bench-client "$@"
 }
 
-reset_client_controller_loss() {
-  ip netns exec "${CLIENT_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
+reset_upload_controller_loss() {
+  # Drop at the receiver's INPUT hook. An OUTPUT drop can make sendmsg return
+  # EPERM on nft-backed iptables instead of behaving like path loss.
+  ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
   # xt_statistic stores --every N as N-1; --packet 0 therefore makes the first
   # drop the Nth match. Using N-1 would drop the first QUIC Initial instead.
-  ip netns exec "${CLIENT_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
+  ip netns exec "${SERVER_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
     -p udp -s "${CLIENT_IP}" -d "${SERVER_IP}" --dport "${RELAY_PORT}" \
     -m length --length 1000:65535 \
     -m statistic --mode nth --every "${CONTROLLER_DROP_EVERY}" \
     --packet 0 -j DROP
 }
 
-reset_server_controller_loss() {
+reset_download_controller_loss() {
   local source_port=$1
-  ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
-  ip netns exec "${SERVER_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
+  ip netns exec "${CLIENT_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
+  ip netns exec "${CLIENT_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
     -p udp -s "${SERVER_IP}" --sport "${source_port}" -d "${CLIENT_IP}" \
     -m length --length 1000:65535 \
     -m statistic --mode nth --every "${CONTROLLER_DROP_EVERY}" \
@@ -308,9 +310,9 @@ ip netns exec "${CLIENT_NS}" tc qdisc replace dev "${CLIENT_DEV}" root netem \
 ip netns exec "${SERVER_NS}" tc qdisc replace dev "${SERVER_DEV}" root netem \
   delay "${DELAY_MS}ms" rate "${RATE}" limit 10000
 ip netns exec "${CLIENT_NS}" iptables -N "${CONTROLLER_LOSS_CHAIN}"
-ip netns exec "${CLIENT_NS}" iptables -I OUTPUT 1 -j "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${CLIENT_NS}" iptables -I INPUT 1 -j "${CONTROLLER_LOSS_CHAIN}"
 ip netns exec "${SERVER_NS}" iptables -N "${CONTROLLER_LOSS_CHAIN}"
-ip netns exec "${SERVER_NS}" iptables -I OUTPUT 1 -j "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${SERVER_NS}" iptables -I INPUT 1 -j "${CONTROLLER_LOSS_CHAIN}"
 
 # Prove both controller paths with real authenticated transfers. The BBR run
 # declares no bandwidth and therefore must negotiate a zero Tx rate. The
@@ -327,21 +329,21 @@ MODE_PROOF_BENCH=(
   --timeout=60s
   --json
 )
-reset_client_controller_loss
+reset_upload_controller_loss
 run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/bbr.json"
-reset_client_controller_loss
+reset_upload_controller_loss
 run_controller_client --transport=quic --congestion=reno \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/reno.json"
-reset_client_controller_loss
+reset_upload_controller_loss
 run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   --upload-mbps="${BRUTAL_CLIENT_UPLOAD_MBPS}" \
   --download-mbps="${BRUTAL_CLIENT_DOWNLOAD_MBPS}" \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/brutal.json"
-ip netns exec "${CLIENT_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
 
 # Repeat the BBR/Reno proof in the opposite direction. Both clients use the
 # same configuration; only the relay sender differs (default BBR vs the
@@ -357,15 +359,15 @@ MODE_PROOF_DOWNLOAD=(
 )
 # Use BBR/Reno/Reno/BBR ordering across the two directions to reduce monotonic
 # host-load bias without sharing controller state between runs.
-reset_server_controller_loss "${RENO_RELAY_PORT}"
+reset_download_controller_loss "${RENO_RELAY_PORT}"
 run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   "${TUNNEL_AUTH_RENO[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
   >"${ARTIFACT_DIR}/reno-download.json"
-reset_server_controller_loss "${BBR_RELAY_PORT}"
+reset_download_controller_loss "${BBR_RELAY_PORT}"
 run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   "${TUNNEL_AUTH_BBR[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
   >"${ARTIFACT_DIR}/bbr-download.json"
-ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${CLIENT_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
 
 # This intentionally narrow acceleration profile isolates the benefit of a
 # warm, shared congestion-control context. Every direct iteration creates a
