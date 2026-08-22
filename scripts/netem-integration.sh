@@ -275,7 +275,7 @@ wait_for_log "${PROXY_PID}" "${ARTIFACT_DIR}/client-proxy.log" "local proxy star
 
 QUIC_CAPTURE_FILE="${ARTIFACT_DIR}/quic-tunnel.pcap"
 start_background "${ARTIFACT_DIR}/tcpdump.log" \
-  ip netns exec "${CLIENT_NS}" tcpdump -i "${CLIENT_DEV}" -s 0 -U -w "${QUIC_CAPTURE_FILE}" \
+  ip netns exec "${CLIENT_NS}" tcpdump --immediate-mode -i "${CLIENT_DEV}" -s 0 -U -w "${QUIC_CAPTURE_FILE}" \
   "host ${SERVER_IP} and (udp port ${RELAY_PORT} or tcp port ${RELAY_PORT})"
 CAPTURE_PID=${STARTED_PID}
 wait_for_log "${CAPTURE_PID}" "${ARTIFACT_DIR}/tcpdump.log" "listening on"
@@ -290,6 +290,9 @@ if [[ ${QUIC_RESPONSE} != "${SENTINEL}" ]]; then
   exit 1
 fi
 
+# Give tcpdump a scheduling turn before interrupting it. Immediate mode avoids
+# leaving already-filtered packets in libpcap's kernel buffer on busy CI hosts.
+sleep 0.5
 kill -INT "${CAPTURE_PID}" >/dev/null 2>&1 || true
 wait "${CAPTURE_PID}" >/dev/null 2>&1 || true
 if ! tcpdump -nn -r "${QUIC_CAPTURE_FILE}" "udp port ${RELAY_PORT}" 2>/dev/null | grep . >/dev/null; then
@@ -309,7 +312,7 @@ ip netns exec "${CLIENT_NS}" iptables -I OUTPUT 1 -p udp \
 
 FALLBACK_CAPTURE_FILE="${ARTIFACT_DIR}/tls-fallback.pcap"
 start_background "${ARTIFACT_DIR}/fallback-tcpdump.log" \
-  ip netns exec "${CLIENT_NS}" tcpdump -i "${CLIENT_DEV}" -s 0 -U -w "${FALLBACK_CAPTURE_FILE}" \
+  ip netns exec "${CLIENT_NS}" tcpdump --immediate-mode -i "${CLIENT_DEV}" -s 0 -U -w "${FALLBACK_CAPTURE_FILE}" \
   "host ${SERVER_IP} and (udp port ${RELAY_PORT} or tcp port ${RELAY_PORT})"
 CAPTURE_PID=${STARTED_PID}
 wait_for_log "${CAPTURE_PID}" "${ARTIFACT_DIR}/fallback-tcpdump.log" "listening on"
@@ -331,6 +334,7 @@ if (( FALLBACK_ELAPSED > 10 )); then
   exit 1
 fi
 
+sleep 0.5
 kill -INT "${CAPTURE_PID}" >/dev/null 2>&1 || true
 wait "${CAPTURE_PID}" >/dev/null 2>&1 || true
 if ! tcpdump -nn -r "${FALLBACK_CAPTURE_FILE}" "tcp port ${RELAY_PORT}" 2>/dev/null | grep . >/dev/null; then
