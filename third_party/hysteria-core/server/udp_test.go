@@ -26,7 +26,8 @@ func TestUDPSessionManager(t *testing.T) {
 		return m, nil
 	})
 
-	go sm.Run()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sm.Run() }()
 
 	udpReadFunc := func(addr string, ch chan []byte, b []byte) (int, string, error) {
 		bs := <-ch
@@ -135,10 +136,24 @@ func TestUDPSessionManager(t *testing.T) {
 		close(udpConn2Ch)
 		return nil
 	}).Once()
-	eventLogger.EXPECT().Close(msg1.SessionID, nil).Once()
-	eventLogger.EXPECT().Close(msg2_1.SessionID, nil).Once()
-
-	time.Sleep(3 * time.Second) // Wait for timeout
+	timeoutCloses := make(chan uint32, 2)
+	eventLogger.On("Close", msg1.SessionID, nil).Run(func(args mock.Arguments) {
+		timeoutCloses <- args.Get(0).(uint32)
+	}).Once()
+	eventLogger.On("Close", msg2_1.SessionID, nil).Run(func(args mock.Arguments) {
+		timeoutCloses <- args.Get(0).(uint32)
+	}).Once()
+	closedSessions := make(map[uint32]bool, 2)
+	for range 2 {
+		select {
+		case id := <-timeoutCloses:
+			closedSessions[id] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for idle UDP sessions to close")
+		}
+	}
+	assert.True(t, closedSessions[msg1.SessionID])
+	assert.True(t, closedSessions[msg2_1.SessionID])
 	mock.AssertExpectationsForObjects(t, io, eventLogger, udpConn1, udpConn2)
 
 	// Test UDP connection close error propagation
@@ -158,10 +173,18 @@ func TestUDPSessionManager(t *testing.T) {
 	udpConn4.EXPECT().WriteTo(msg4.Data, msg4.Addr).Return(12, nil).Once()
 	udpConn4.EXPECT().ReadFrom(mock.Anything).Return(0, "", errUDPClosed).Once()
 	udpConn4.EXPECT().Close().Return(nil).Once()
-	eventLogger.EXPECT().Close(msg4.SessionID, errUDPClosed).Once()
+	msg4Closed := make(chan error, 1)
+	eventLogger.EXPECT().Close(msg4.SessionID, errUDPClosed).Run(func(_ uint32, err error) {
+		msg4Closed <- err
+	}).Once()
 	msgCh <- msg4
 
-	time.Sleep(1 * time.Second)
+	select {
+	case err := <-msg4Closed:
+		assert.ErrorIs(t, err, errUDPClosed)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for UDP read error cleanup")
+	}
 	mock.AssertExpectationsForObjects(t, io, eventLogger, udpConn4)
 
 	// Test UDP connection creation error propagation
@@ -177,15 +200,28 @@ func TestUDPSessionManager(t *testing.T) {
 	eventLogger.EXPECT().New(msg5.SessionID, msg5.Addr).Return().Once()
 	io.EXPECT().Hook(msg5.Data, &msg5.Addr).Return(nil).Once()
 	io.EXPECT().UDP(msg5.Addr).Return(nil, errUDPIO).Once()
-	eventLogger.EXPECT().Close(msg5.SessionID, errUDPIO).Once()
+	msg5Closed := make(chan error, 1)
+	eventLogger.EXPECT().Close(msg5.SessionID, errUDPIO).Run(func(_ uint32, err error) {
+		msg5Closed <- err
+	}).Once()
 	msgCh <- msg5
 
-	time.Sleep(1 * time.Second)
+	select {
+	case err := <-msg5Closed:
+		assert.ErrorIs(t, err, errUDPIO)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for UDP dial error cleanup")
+	}
 	mock.AssertExpectationsForObjects(t, io, eventLogger)
 
 	// Leak checks
-	close(msgCh)                // This will return error from ReceiveMessage(), should stop the session manager
-	time.Sleep(1 * time.Second) // Wait one more second just to be sure
+	close(msgCh) // This returns an error from ReceiveMessage and stops the manager.
+	select {
+	case err := <-runDone:
+		assert.EqualError(t, err, "closed")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for UDP session manager shutdown")
+	}
 	assert.Zero(t, sm.Count(), "session count should be 0")
 	goleak.VerifyNone(t)
 }

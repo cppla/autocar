@@ -146,7 +146,7 @@ func TestChromeHandshakeFailureIncludesCertificateGuidance(t *testing.T) {
 	client := &Client{
 		config:  ClientConfig{},
 		closeCh: make(chan struct{}),
-		connectFunc: func() (hyclient.Client, *hyclient.HandshakeInfo, error) {
+		connectFunc: func(context.Context) (hyclient.Client, *hyclient.HandshakeInfo, error) {
 			return nil, nil, errors.New("remote error: tls: handshake failure")
 		},
 	}
@@ -158,7 +158,7 @@ func TestChromeHandshakeFailureIncludesCertificateGuidance(t *testing.T) {
 	disabled := &Client{
 		config:  ClientConfig{DisableChromeParrot: true},
 		closeCh: make(chan struct{}),
-		connectFunc: func() (hyclient.Client, *hyclient.HandshakeInfo, error) {
+		connectFunc: func(context.Context) (hyclient.Client, *hyclient.HandshakeInfo, error) {
 			return nil, nil, errors.New("remote error: tls: handshake failure")
 		},
 	}
@@ -811,6 +811,43 @@ func TestDialContextCancellationClosesLateConnection(t *testing.T) {
 	}
 }
 
+func TestExplicitClientOpenTimeoutBoundsConnectionSetup(t *testing.T) {
+	started := make(chan struct{})
+	attemptDone := make(chan struct{})
+	client := &Client{
+		config:  ClientConfig{OpenTimeout: 25 * time.Millisecond},
+		closeCh: make(chan struct{}),
+		connectFunc: func(ctx context.Context) (hyclient.Client, *hyclient.HandshakeInfo, error) {
+			close(started)
+			<-ctx.Done()
+			close(attemptDone)
+			return nil, nil, context.Cause(ctx)
+		},
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.DialContext(context.Background(), "tcp", "1.1.1.1:443")
+		result <- err
+	}()
+	<-started
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("DialContext error = %v, want open-timeout deadline", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("explicit Hysteria dial ignored OpenTimeout")
+	}
+
+	select {
+	case <-attemptDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked connector remained alive after OpenTimeout")
+	}
+	_ = client.Close()
+}
+
 func TestConcurrentCanceledDialsShareOneConnectionAttempt(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -818,7 +855,7 @@ func TestConcurrentCanceledDialsShareOneConnectionAttempt(t *testing.T) {
 	var attempts atomic.Int64
 	core := &instantCore{}
 	client := &Client{
-		connectFunc: func() (hyclient.Client, *hyclient.HandshakeInfo, error) {
+		connectFunc: func(context.Context) (hyclient.Client, *hyclient.HandshakeInfo, error) {
 			attempts.Add(1)
 			startOnce.Do(func() { close(started) })
 			<-release
@@ -867,7 +904,7 @@ func TestConcurrentCanceledDialsShareOneConnectionAttempt(t *testing.T) {
 	}
 }
 
-func TestCanceledTCPDialsKeepUnderlyingWorkersBounded(t *testing.T) {
+func TestCanceledTCPDialsReleaseUnderlyingWorkers(t *testing.T) {
 	core := newBlockingOpenCore()
 	client := &Client{
 		core:      core,
@@ -876,37 +913,23 @@ func TestCanceledTCPDialsKeepUnderlyingWorkersBounded(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	for index := 1; index <= 2; index++ {
+	for index := 1; index <= 3; index++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		_, err := client.DialContext(ctx, "tcp", "1.1.1.1:443")
 		cancel()
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("dial %d error = %v, want deadline", index, err)
 		}
+		deadline := time.Now().Add(time.Second)
+		for len(client.openSlots) != 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if got := len(client.openSlots); got != 0 {
+			t.Fatalf("worker slots after canceled dial %d = %d, want 0", index, got)
+		}
 	}
-	if got := core.calls.Load(); got != 2 {
-		t.Fatalf("underlying open calls = %d, want 2", got)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	_, err := client.DialContext(ctx, "tcp", "1.1.1.1:443")
-	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("capacity-waiting dial error = %v, want deadline", err)
-	}
-	if got := core.calls.Load(); got != 2 {
-		t.Fatalf("capacity gate allowed %d underlying opens, want 2", got)
-	}
-
-	if err := client.Close(); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(time.Second)
-	for len(client.openSlots) != 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := len(client.openSlots); got != 0 {
-		t.Fatalf("worker slots after Close = %d, want 0", got)
+	if got := core.calls.Load(); got != 3 {
+		t.Fatalf("underlying context-aware open calls = %d, want 3", got)
 	}
 }
 
@@ -1451,9 +1474,17 @@ func newBlockingOpenCore() *blockingOpenCore {
 }
 
 func (c *blockingOpenCore) TCP(string) (net.Conn, error) {
+	return c.TCPContext(context.Background(), "")
+}
+
+func (c *blockingOpenCore) TCPContext(ctx context.Context, _ string) (net.Conn, error) {
 	c.calls.Add(1)
-	<-c.release
-	return nil, net.ErrClosed
+	select {
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	case <-c.release:
+		return nil, net.ErrClosed
+	}
 }
 
 func (c *blockingOpenCore) UDP() (hyclient.HyUDPConn, error) {
@@ -1609,6 +1640,7 @@ var _ hyserver.Outbound = (*testOutbound)(nil)
 var _ hyserver.UDPConn = (*testUDPConn)(nil)
 var _ hyclient.Client = (*delayedCore)(nil)
 var _ hyclient.Client = (*blockingOpenCore)(nil)
+var _ hyclient.ContextualTCPClient = (*blockingOpenCore)(nil)
 var _ hyclient.Client = (*closeErrorCore)(nil)
 var _ hyclient.Client = (*instantCore)(nil)
 var _ hyserver.Server = (*blockingServerCore)(nil)

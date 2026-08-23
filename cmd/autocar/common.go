@@ -170,6 +170,7 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 			FastOpen:                flags.fastOpen,
 			ObfuscationKey:          obfuscationKey,
 			DisableChromeParrot:     flags.disableChromeParrot,
+			OpenTimeout:             flags.openTimeout,
 			MaxPendingOpens:         flags.maxPendingOpens,
 		})
 	}

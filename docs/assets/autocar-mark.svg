@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 240 240"
+     role="img"
+     aria-labelledby="autocar-mark-title autocar-mark-description"
+     shape-rendering="geometricPrecision">
+  <title id="autocar-mark-title">AutoCAR accelerator mark</title>
+  <desc id="autocar-mark-description">Two cyan-to-violet acceleration lanes converge into a slanted A and forward arrow inside a secure dark-blue enclosure.</desc>
+
+  <defs>
+    <linearGradient id="mark-background" x1="20" y1="20" x2="220" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B315D"/>
+      <stop offset="0.52" stop-color="#071E3D"/>
+      <stop offset="1" stop-color="#040F24"/>
+    </linearGradient>
+    <linearGradient id="acceleration-lane" x1="45" y1="194" x2="199" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20E3D2"/>
+      <stop offset="0.48" stop-color="#19A9FF"/>
+      <stop offset="1" stop-color="#8B5CFF"/>
+    </linearGradient>
+    <linearGradient id="speed-line" x1="40" y1="0" x2="91" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#20E3D2" stop-opacity="0"/>
+      <stop offset="1" stop-color="#20E3D2"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="20" y="20" width="200" height="200" rx="44"
+        fill="url(#mark-background)" stroke="#1BC7E2" stroke-width="2"/>
+  <rect x="29" y="29" width="182" height="182" rx="36"
+        fill="none" stroke="#6DEBFA" stroke-opacity="0.12"/>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M42 101 H86" stroke="url(#speed-line)" stroke-width="5"/>
+    <path d="M36 119 H78" stroke="url(#speed-line)" stroke-width="5"/>
+    <path d="M43 137 H70" stroke="url(#speed-line)" stroke-width="5"/>
+
+    <path d="M49 171 H83 L125 62 H181"
+          stroke="#020B1A" stroke-opacity="0.82" stroke-width="23"/>
+    <path d="M49 193 H97 L136 86 L184 178"
+          stroke="#020B1A" stroke-opacity="0.82" stroke-width="23"/>
+    <path d="M49 171 H83 L125 62 H181"
+          stroke="url(#acceleration-lane)" stroke-width="11"/>
+    <path d="M49 193 H97 L136 86 L184 178"
+          stroke="url(#acceleration-lane)" stroke-width="11"/>
+
+    <path d="M53 171 H83 L125 62" stroke="#E9FFFF" stroke-opacity="0.48"
+          stroke-width="2" stroke-dasharray="8 10"/>
+    <path d="M53 193 H97 L136 86" stroke="#E9FFFF" stroke-opacity="0.42"
+          stroke-width="2" stroke-dasharray="8 10"/>
+    <path d="M104 130 H158" stroke="#020B1A" stroke-width="16"/>
+    <path d="M104 130 H158" stroke="url(#acceleration-lane)" stroke-width="7"/>
+  </g>
+
+  <path d="M199 62 177 44 180 57 H161 V67 H180 L177 80 Z" fill="#8B5CFF"/>
+  <circle cx="49" cy="171" r="5.5" fill="#20E3D2"/>
+  <circle cx="49" cy="193" r="5.5" fill="#20E3D2"/>
+
+  <path d="M131 112 143 117 V127 C143 136 138 142 131 146 C124 142 119 136 119 127 V117 Z"
+        fill="#061A34" stroke="#7DEBFA" stroke-width="2"/>
+  <circle cx="131" cy="127" r="3.3" fill="#30CFE4"/>
+  <path d="M131 130 V135" stroke="#30CFE4" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

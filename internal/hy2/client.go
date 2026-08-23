@@ -57,7 +57,11 @@ type ClientConfig struct {
 	DisableChromeParrot     bool
 	MaxIdleTimeout          time.Duration
 	KeepAlivePeriod         time.Duration
-	MaxPendingOpens         int
+	// OpenTimeout bounds each authenticated session establishment and logical
+	// stream/session open. Zero disables this additional deadline; each caller's
+	// context still bounds how long that caller waits.
+	OpenTimeout     time.Duration
+	MaxPendingOpens int
 }
 
 // Client is a reconnecting Hysteria v2 client. The first request establishes
@@ -68,7 +72,7 @@ type Client struct {
 	coreMu      sync.Mutex
 	core        hyclient.Client
 	attempt     *connectAttempt
-	connectFunc func() (hyclient.Client, *hyclient.HandshakeInfo, error)
+	connectFunc func(context.Context) (hyclient.Client, *hyclient.HandshakeInfo, error)
 
 	closed      sync.Once
 	closeErr    error
@@ -82,9 +86,10 @@ type Client struct {
 }
 
 type connectAttempt struct {
-	done chan struct{}
-	core hyclient.Client
-	err  error
+	done   chan struct{}
+	cancel context.CancelFunc
+	core   hyclient.Client
+	err    error
 }
 
 // NewClient validates config and creates a lazy reconnecting client.
@@ -153,6 +158,9 @@ func validateClientConfig(config ClientConfig) error {
 	}
 	if config.KeepAlivePeriod != 0 && (config.KeepAlivePeriod < 2*time.Second || config.KeepAlivePeriod > 60*time.Second) {
 		return errors.New("hy2: keepalive period must be zero or between 2s and 60s")
+	}
+	if config.OpenTimeout < 0 {
+		return errors.New("hy2: open timeout cannot be negative")
 	}
 	if config.MaxPendingOpens < 0 || config.MaxPendingOpens > 65536 {
 		return errors.New("hy2: maximum pending opens must be zero or at most 65536")
@@ -244,9 +252,16 @@ func (c *Client) coreForContext(ctx context.Context) (hyclient.Client, error) {
 	}
 	attempt := c.attempt
 	if attempt == nil {
-		attempt = &connectAttempt{done: make(chan struct{})}
+		connectCtx := context.Background()
+		var cancel context.CancelFunc
+		if c.config.OpenTimeout > 0 {
+			connectCtx, cancel = context.WithTimeout(connectCtx, c.config.OpenTimeout)
+		} else {
+			connectCtx, cancel = context.WithCancel(connectCtx)
+		}
+		attempt = &connectAttempt{done: make(chan struct{}), cancel: cancel}
 		c.attempt = attempt
-		go c.connect(attempt)
+		go c.connect(connectCtx, attempt)
 	}
 	c.coreMu.Unlock()
 
@@ -263,18 +278,19 @@ func (c *Client) coreForContext(ctx context.Context) (hyclient.Client, error) {
 	}
 }
 
-func (c *Client) connect(attempt *connectAttempt) {
+func (c *Client) connect(ctx context.Context, attempt *connectAttempt) {
+	defer attempt.cancel()
 	connect := c.connectFunc
 	if connect == nil {
-		connect = func() (hyclient.Client, *hyclient.HandshakeInfo, error) {
+		connect = func(ctx context.Context) (hyclient.Client, *hyclient.HandshakeInfo, error) {
 			config, err := c.newCoreConfig()
 			if err != nil {
 				return nil, nil, err
 			}
-			return hyclient.NewClient(config)
+			return hyclient.NewClientContext(ctx, config)
 		}
 	}
-	core, info, err := connect()
+	core, info, err := connect(ctx)
 	if err == nil && (core == nil || info == nil) {
 		err = errors.New("hy2: connector returned an incomplete session")
 	}
@@ -378,6 +394,11 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	if _, _, err := net.SplitHostPort(address); err != nil {
 		return nil, fmt.Errorf("hy2: invalid destination %q: %w", address, err)
 	}
+	if c.config.OpenTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.config.OpenTimeout)
+		defer cancel()
+	}
 	if err := c.acquireOpen(ctx); err != nil {
 		return nil, err
 	}
@@ -389,7 +410,13 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	result := make(chan tcpResult)
 	go func() {
 		defer c.releaseOpen()
-		conn, err := core.TCP(address)
+		var conn net.Conn
+		var err error
+		if contextual, ok := core.(hyclient.ContextualTCPClient); ok {
+			conn, err = contextual.TCPContext(ctx, address)
+		} else {
+			conn, err = core.TCP(address)
+		}
 		c.invalidate(core, err)
 		value := tcpResult{conn: conn, err: err}
 		select {
@@ -448,6 +475,11 @@ func (c *Client) DialPacket(ctx context.Context) (transport.PacketConn, error) {
 	}
 	if c.closedState.Load() {
 		return nil, net.ErrClosed
+	}
+	if c.config.OpenTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.config.OpenTimeout)
+		defer cancel()
 	}
 	core, err := c.coreForContext(ctx)
 	if err != nil {
@@ -514,8 +546,12 @@ func (c *Client) Close() error {
 		}
 		c.coreMu.Lock()
 		core := c.core
+		attempt := c.attempt
 		c.core = nil
 		c.coreMu.Unlock()
+		if attempt != nil {
+			attempt.cancel()
+		}
 		if core != nil {
 			c.closeErr = core.Close()
 		}

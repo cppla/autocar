@@ -63,6 +63,15 @@ acknowledgement. Connection and tunnel-stream setup occur before that timer.
 Measure a complete real application operation separately when user-perceived
 latency matters.
 
+For Hysteria output, `local_tx_acceleration` and
+`local_negotiated_tx_bytes_per_second` always describe the client's
+client-to-relay sender. `tunnel_sender_endpoint` identifies which endpoint
+sends benchmark payload on the tunnel. Only an upload can therefore populate
+`payload_sender_acceleration` from the client process. A download names the
+relay as sender but deliberately does not mislabel the client's controller as
+relay telemetry; record the relay configuration or collect relay-side
+telemetry separately.
+
 ## Controller matrix
 
 Do not compare only one controller on one path. A useful minimum matrix is:
@@ -101,13 +110,15 @@ For every row, exercise at least:
    CPU, memory, and time of day. Confirm neither endpoint is CPU-limited.
 5. Report median plus all individual results. The emitted `p95_mbps` is the
    95th percentile of goodput, where larger is better; it is not latency p95.
-6. Distinguish a warm shared QUIC connection from fresh direct TCP flows. That
-   is a real short-flow benefit, but it must be stated in the test description.
+6. Distinguish a warm shared QUIC connection from fresh direct TCP flows, and
+   state whether setup is timed. Warm payload-phase goodput is useful evidence,
+   but it is not the same metric as end-to-end short-flow latency.
 7. Repeat on the intended production path. Emulation catches regressions but
    cannot reproduce every queue, middlebox, policer, or competing flow.
 
 Why Hysteria/QUIC can help: streams reuse a warm authenticated connection and
-its BBR delivery/RTT model; pacing uses the inferred BDP; explicitly enabled
+its BBR delivery/RTT model; pacing uses estimated delivery rate and its gain
+while the congestion window uses the inferred BDP; explicitly enabled
 Fast Open can overlap the target response with initial writes; unrelated
 streams avoid TCP-style cross-flow head-of-line blocking. Why it may not help:
 the relay adds work and distance, the relay-to-destination leg is still a new
@@ -121,11 +132,11 @@ namespaces connected by a veth pair. Its current test matrix is:
 | Stage | Path profile | Cases | Pass condition |
 | --- | --- | --- | --- |
 | Bulk observation | 35 ms one-way delay on both interfaces, 0.5% independent loss each direction, 50 Mbit/s each direction | direct, Hysteria v2 (`quic` alias), TLS | every median is positive; ratios are retained |
-| Controller gate | same 35 ms/50 Mbit/s path without random loss; a resettable receiver-side `iptables statistic nth` rule drops every 200th large sender datagram (0.5%); two warmups and five measured 4 MiB uploads/downloads | client-sender BBR/Reno/negotiated 15 Mbit/s Brutal; separate GSO-disabled BBR and Reno relays for the relay sender | both upload and download BBR/Reno equal-byte aggregate-goodput ratios are at least 1.10; medians, modes, and negotiation are also reported, and Brutal aggregate goodput reaches at least 50% of its declared upload target |
+| Controller gate | same 35 ms/50 Mbit/s path without random loss; a resettable receiver `INPUT` `iptables statistic nth` rule drops the 200th, 400th, … large sender datagram (0.5%); two warmups and five measured 4 MiB uploads/downloads | client-sender BBR/Reno and 15 Mbit/s Brutal; separate GSO-disabled BBR/Reno relay senders plus the capped Brutal relay sender | upload and download BBR/Reno equal-byte aggregate-goodput ratios are at least 1.10; every rule has non-zero counters and exactly `floor(eligible/200)` drops; Brutal upload and download each stay within 80%–115% of the declared target |
 | Cold fallback | same delay/rate, random loss removed, unused UDP port | `auto` Hysteria attempt followed by TLS | first command completes within finite deadlines |
-| Short-flow acceleration gate | same delay/rate, loss-free, sequential 128 KiB downloads | fresh direct TCP vs warm Hysteria v2 connection | Hysteria median/direct median is at least 1.10 |
+| Warm payload-phase gate | same delay/rate, loss-free, sequential 128 KiB downloads; timing excludes dial, tunnel-stream open, and request header | fresh direct TCP payload phases vs warm Hysteria v2 payload phases | Hysteria median/direct median is at least 1.10; this is not an end-to-end operation-latency claim |
 | Authentication | controlled namespace path | wrong CA and wrong token | both are rejected for the expected reason |
-| Live UDP failure | first proxy request over Hysteria, then client UDP output is dropped | new TCP proxy flow in `auto` | new flow completes over TLS within the 10-second bound |
+| Live UDP failure | first proxy request over Hysteria, then both receivers silently blackhole the established UDP path in `INPUT` while TCP remains available | new TCP proxy flow in `auto` | pcap contains a UDP attempt followed by TCP/TLS, a receiver DROP counter is non-zero, the log contains a timeout-class QUIC failure and no `sendmsg EPERM`, and the flow completes within 10 seconds |
 | Confidentiality smoke | pcap of Hysteria and fallback links | unique HTTP plaintext sentinel | sentinel is absent from both captures |
 
 The source and sink benchmark is TCP. SOCKS5 UDP ASSOCIATE, source validation,
@@ -160,29 +171,44 @@ sudo env \
   AUTOCAR_SHORT_FLOW_WARMUP=3 \
   AUTOCAR_MIN_SHORT_FLOW_RATIO=1.10 \
   AUTOCAR_MIN_BBR_RENO_RATIO=1.10 \
-  AUTOCAR_MIN_BRUTAL_TARGET_RATIO=0.50 \
+  AUTOCAR_MIN_BRUTAL_TARGET_RATIO=0.80 \
+  AUTOCAR_MAX_BRUTAL_TARGET_RATIO=1.15 \
   AUTOCAR_ARTIFACT_DIR="$PWD/artifacts/netem" \
   ./scripts/netem-integration.sh ./bin/autocar
 ```
 
 The script writes raw JSON, a summary, process logs, and packet captures under
-`artifacts/netem`. The GitHub Actions netem workflow publishes the directory
-even when diagnosis is needed.
+`artifacts/netem`. It also retains `iptables --version`, including the
+legacy/nft backend marker, and the actual per-case eligible/DROP counters. The
+GitHub Actions netem workflow publishes the directory even when diagnosis is
+needed.
 
 ## What the CI gate proves
 
 The generic bulk path measurements are observations rather than a universal
-speed claim. Three controller-specific gates and one short-flow gate are narrow
-and declared in advance: on the separate deterministic-loss path, two warmups
-precede five measured transfers, and both client-side uploads and relay-side
-downloads with BBR must beat their Reno baselines by at least 1.10. The loss
-receiver-side matcher is reset before each controller run and drops every
-200th large sender datagram. Controller senders disable UDP GSO so a matched
-packet is one QUIC datagram rather than a host-dependent batch. Negotiated Brutal must deliver at
-least 50% of its truthful 15 Mbit/s upload target. On the loss-free high-RTT
-path, sequential warm Hysteria 128 KiB downloads must beat fresh direct TCP by
-at least 1.10. These checks demonstrate the selected mechanisms under those
-profiles only.
+speed claim. The controller and warm-payload gates are narrow and declared in
+advance. On the deterministic-loss path, two warmups precede five measured
+transfers, and both client-side uploads and relay-side downloads with BBR must
+beat their Reno baselines by at least 1.10. The receiver-side matcher is reset
+before every controller run. `--packet N-1` makes the Nth eligible datagram the
+first drop rather than the first QUIC Initial, and a following counter rule
+proves both the eligible denominator and exactly `floor(eligible/N)` drops.
+Controller senders disable UDP GSO so a matched packet is one QUIC datagram
+rather than a host-dependent batch.
+
+Negotiated Brutal is exercised in both directions. Each equal-byte aggregate
+goodput must remain between 80% and 115% of its truthful 15 Mbit/s target. The
+lower bound rejects a controller that cannot sustain its declared rate; the
+upper bound rejects a mislabeled/no-op Brutal path that is actually sending at
+the 50 Mbit/s emulated link rate. The client JSON proves its upload controller
+and negotiated rate. The download gate uses the separately configured relay
+sender, while the raw client JSON intentionally labels only local Tx state.
+
+On the loss-free high-RTT path, sequential warm Hysteria 128 KiB payload
+phases must beat fresh direct TCP payload phases by at least 1.10. Because the
+timer starts after dial and the request header, this checks warm data-phase
+goodput, not complete short-flow setup or user-perceived latency. These checks
+demonstrate the selected mechanisms under those profiles only.
 
 Controller acceptance uses aggregate goodput across equal-size measured
 transfers. This is the harmonic mean of the per-transfer Mbit/s values and is
@@ -191,10 +217,13 @@ artifacts for distribution context, but they do not discard a genuine slow
 loss-recovery transfer from the acceptance result.
 
 Do not lower `AUTOCAR_MIN_SHORT_FLOW_RATIO` or
-`AUTOCAR_MIN_BBR_RENO_RATIO` merely to hide a regression, and do not publish
-the CI ratio as a universal production claim. BBR profile quality, Brutal
-fairness, sustained high-loss behavior, and real-route improvement need the
-broader retained matrix above.
+`AUTOCAR_MIN_BBR_RENO_RATIO`, widen the Brutal window, or publish a CI ratio as
+a universal production claim merely to hide a regression. Fixed nth loss is
+repeatable but is not identical packet-number loss across controllers: packet
+sizes and retransmissions can change the later sequence. BBR profile quality,
+Brutal fairness, burst loss, reordering, ECN/AQM, concurrent sessions,
+sustained high-loss behavior, and real-route improvement need the broader
+retained matrix above.
 
 The pcap sentinel assertion is a regression smoke test, not a cryptographic
 proof. TLS 1.3, verified X.509, token authentication, optional mTLS, and the

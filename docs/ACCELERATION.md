@@ -6,8 +6,8 @@ replacement for any of them:
 | Design family | What AutoCAR adopts | What AutoCAR does not claim |
 | --- | --- | --- |
 | Hysteria v2 | HTTP/3 over QUIC, a persistent multiplexed session, Fast Open, negotiated Brutal, QUIC DATAGRAM, Chrome-oriented handshake shaping, HTTP/3 cover handling, and optional Salamander | Port hopping, Mimic, a user-facing ECH setup, or invisibility |
-| BBR | A real userspace BBRv1-derived delivery-rate/minimum-RTT model, BDP-based pacing and congestion window, and the four BBR phases | Linux kernel TCP BBR, BBRv2, or BBRv3 |
-| ServerSpeeder/LotServer/Zeta-TCP objectives | ACK-driven feedback in both directions, paced sending, warm state, standard early loss detection, PTO probes, and independent multiplexed streams | Proprietary prediction, redundant retransmission, FEC, transparent TCP interception, or protocol compatibility |
+| BBR | A real userspace BBRv1-derived delivery-rate/minimum-RTT model, delivery-rate × gain pacing, a BDP-based congestion window, and the four BBR phases | Linux kernel TCP BBR, BBRv2, or BBRv3 |
+| ServerSpeeder/LotServer/Zeta-TCP objectives | Standard QUIC ACK-driven estimates in both directions, paced sending, warm state, standard early loss detection, PTO probes, and independent multiplexed streams | Proprietary prediction, proactive or redundant retransmission, FEC, transparent TCP interception, or protocol compatibility |
 
 The implementation comes from an in-tree, security-hardened fork of the pinned
 MIT-licensed Hysteria v2.12.1 core and its QUIC fork. AutoCAR adds admission
@@ -34,6 +34,11 @@ under a different name. For traffic sent by each endpoint it:
 4. applies a pacing gain to the estimated delivery rate; and
 5. bounds in-flight data with a congestion-window gain around the BDP, with
    loss-recovery limits when packets are declared lost.
+
+QUIC Initial and handshake packets precede Hysteria authentication and use
+quic-go's default Reno controller. The authenticated client and relay install
+their configured BBR, Reno, or negotiated Brutal sender for application data;
+no claim is made that BBR accelerates the unauthenticated handshake itself.
 
 The BBR state machine is:
 
@@ -132,9 +137,10 @@ The pinned QUIC transport follows RFC 9002 with:
 - probe timeout (PTO) packets with exponential backoff when acknowledgements
   stop arriving.
 
-Both client and relay are QUIC senders and receivers. ACKs flowing in each
-direction continuously return RTT, delivery, and loss observations to the
-opposite sender. That is the concrete dual-ended feedback mechanism behind
+Both client and relay are QUIC senders and receivers. Each receiver sends
+standard QUIC ACK frames; the sender combines their packet numbers and timing
+with its local send history to estimate RTT and delivery rate, while RFC 9002
+declares losses. That is the concrete dual-ended feedback mechanism behind
 AutoCAR's "reverse-control" goal. It is auditable standard QUIC behavior, not
 an assertion that AutoCAR reconstructed Zeta-TCP's private algorithm.
 

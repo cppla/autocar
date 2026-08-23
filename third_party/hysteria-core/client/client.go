@@ -34,6 +34,12 @@ type Client interface {
 	Close() error
 }
 
+// ContextualTCPClient is implemented by clients that can cancel an in-flight
+// TCP request without closing the shared QUIC connection.
+type ContextualTCPClient interface {
+	TCPContext(ctx context.Context, addr string) (net.Conn, error)
+}
+
 type HyUDPConn interface {
 	Receive() ([]byte, string, error)
 	Send([]byte, string) error
@@ -48,13 +54,21 @@ type HandshakeInfo struct {
 }
 
 func NewClient(config *Config) (Client, *HandshakeInfo, error) {
+	return NewClientContext(context.Background(), config)
+}
+
+// NewClientContext establishes an authenticated session bounded by ctx.
+func NewClientContext(ctx context.Context, config *Config) (Client, *HandshakeInfo, error) {
+	if ctx == nil {
+		return nil, nil, errors.New("nil client context")
+	}
 	if err := config.verifyAndFill(); err != nil {
 		return nil, nil, err
 	}
 	c := &clientImpl{
 		config: config,
 	}
-	info, err := c.connect()
+	info, err := c.connect(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -71,7 +85,7 @@ type clientImpl struct {
 	udpSM *udpSessionManager
 }
 
-func (c *clientImpl) connect() (*HandshakeInfo, error) {
+func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
 	pktConn, err := c.config.ConnFactory.New(c.config.ServerAddr)
 	if err != nil {
 		return nil, err
@@ -107,16 +121,28 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		tr.ConnectionIDGenerator = quic.ZeroLengthConnectionIDGenerator{}
 	}
 	// Prepare RoundTripper
+	var connMu sync.Mutex
 	var conn *quic.Conn
+	abandoned := false
 	rt := &http3.Transport{
 		TLSClientConfig: tlsConfig,
 		QUICConfig:      quicConfig,
-		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			qc, err := tr.DialEarly(ctx, c.config.ServerAddr, tlsCfg, cfg)
+		Dial: func(dialCtx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			qc, err := tr.DialEarly(dialCtx, c.config.ServerAddr, tlsCfg, cfg)
 			if err != nil {
 				return nil, err
 			}
+			connMu.Lock()
+			if abandoned {
+				connMu.Unlock()
+				_ = qc.CloseWithError(closeErrCodeProtocolError, "")
+				if cause := context.Cause(dialCtx); cause != nil {
+					return nil, cause
+				}
+				return nil, net.ErrClosed
+			}
 			conn = qc
+			connMu.Unlock()
 			return qc, nil
 		},
 	}
@@ -130,21 +156,36 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		},
 		Header: make(http.Header),
 	}
+	req = req.WithContext(ctx)
 	protocol.AuthRequestToHeader(req.Header, protocol.AuthRequest{
 		Auth: c.config.Auth,
 		Rx:   c.config.BandwidthConfig.MaxRx,
 	})
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
-		if conn != nil {
-			_ = conn.CloseWithError(closeErrCodeProtocolError, "")
+		connMu.Lock()
+		abandoned = true
+		activeConn := conn
+		connMu.Unlock()
+		if activeConn != nil {
+			_ = activeConn.CloseWithError(closeErrCodeProtocolError, "")
 		}
 		_ = tr.Close()
 		_ = pktConn.Close()
 		return nil, coreErrs.ConnectError{Err: err}
 	}
+	connMu.Lock()
+	activeConn := conn
+	connMu.Unlock()
+	if activeConn == nil {
+		_ = resp.Body.Close()
+		_ = tr.Close()
+		_ = pktConn.Close()
+		return nil, coreErrs.ConnectError{Err: errors.New("HTTP/3 authentication completed without a QUIC connection")}
+	}
 	if resp.StatusCode != protocol.StatusAuthOK {
-		_ = conn.CloseWithError(closeErrCodeProtocolError, "")
+		_ = resp.Body.Close()
+		_ = activeConn.CloseWithError(closeErrCodeProtocolError, "")
 		_ = tr.Close()
 		_ = pktConn.Close()
 		return nil, coreErrs.AuthError{StatusCode: resp.StatusCode}
@@ -155,7 +196,7 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 	if authResp.RxAuto {
 		// Server asks client to use bandwidth detection,
 		// ignore local bandwidth config and use the configured congestion controller.
-		congestion.UseConfigured(conn, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
+		congestion.UseConfigured(activeConn, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
 	} else {
 		// actualTx = min(serverRx, clientTx)
 		actualTx = authResp.Rx
@@ -164,25 +205,25 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 			actualTx = c.config.BandwidthConfig.MaxTx
 		}
 		if actualTx > 0 {
-			congestion.UseBrutal(conn, actualTx, c.config.BandwidthConfig.DisableLossCompensation)
+			congestion.UseBrutal(activeConn, actualTx, c.config.BandwidthConfig.DisableLossCompensation)
 		} else {
 			// We don't know our own bandwidth either, use the configured congestion controller.
-			congestion.UseConfigured(conn, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
+			congestion.UseConfigured(activeConn, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
 		}
 	}
 	_ = resp.Body.Close()
 
 	c.pktConn = pktConn
 	c.tr = tr
-	c.conn = conn
+	c.conn = activeConn
 	if authResp.UDPEnabled {
-		c.udpSM = newUDPSessionManager(&udpIOImpl{Conn: conn})
+		c.udpSM = newUDPSessionManager(&udpIOImpl{Conn: activeConn})
 	}
 	return &HandshakeInfo{
 		UDPEnabled:  authResp.UDPEnabled,
 		Tx:          actualTx,
 		ServerAddr:  c.config.ServerAddr,
-		ECHAccepted: conn.ConnectionState().TLS.ECHAccepted,
+		ECHAccepted: activeConn.ConnectionState().TLS.ECHAccepted,
 	}, nil
 }
 
@@ -196,13 +237,58 @@ func (c *clientImpl) openStream() (*utils.QStream, error) {
 }
 
 func (c *clientImpl) TCP(addr string) (net.Conn, error) {
+	return c.TCPContext(context.Background(), addr)
+}
+
+// TCPContext opens a stream and cancels it if ctx expires while the relay is
+// still resolving or dialing the requested target.
+func (c *clientImpl) TCPContext(ctx context.Context, addr string) (net.Conn, error) {
+	if ctx == nil {
+		return nil, errors.New("nil TCP context")
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
 	stream, err := c.openStream()
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return nil, cause
+		}
 		return nil, wrapIfConnectionClosed(err)
+	}
+	cancelDone := make(chan struct{})
+	stopCancellation := context.AfterFunc(ctx, func() {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+		close(cancelDone)
+	})
+	watchingContext := true
+	defer func() {
+		if watchingContext {
+			stopCancellation()
+		}
+	}()
+	finishContextWatch := func() error {
+		if !stopCancellation() {
+			<-cancelDone
+		}
+		watchingContext = false
+		cause := context.Cause(ctx)
+		if cause != nil {
+			// stopCancellation may win after ctx is canceled but before the
+			// callback starts. Take ownership and cancel both directions here
+			// as well; these operations are idempotent.
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+		}
+		return cause
 	}
 	// Send request
 	err = protocol.WriteTCPRequest(stream, addr)
 	if err != nil {
+		if cause := finishContextWatch(); cause != nil {
+			return nil, cause
+		}
 		_ = stream.Close()
 		return nil, wrapIfConnectionClosed(err)
 	}
@@ -210,6 +296,9 @@ func (c *clientImpl) TCP(addr string) (net.Conn, error) {
 		// Don't wait for the response when fast open is enabled.
 		// Return the connection immediately, defer the response handling
 		// to the first Read() call.
+		if cause := finishContextWatch(); cause != nil {
+			return nil, cause
+		}
 		return &tcpConn{
 			Orig:             stream,
 			PseudoLocalAddr:  c.conn.LocalAddr(),
@@ -219,8 +308,14 @@ func (c *clientImpl) TCP(addr string) (net.Conn, error) {
 	// Read response
 	ok, msg, err := protocol.ReadTCPResponse(stream)
 	if err != nil {
+		if cause := finishContextWatch(); cause != nil {
+			return nil, cause
+		}
 		_ = stream.Close()
 		return nil, wrapIfConnectionClosed(err)
+	}
+	if cause := finishContextWatch(); cause != nil {
+		return nil, cause
 	}
 	if !ok {
 		_ = stream.Close()
@@ -247,6 +342,8 @@ func (c *clientImpl) Close() error {
 	_ = c.pktConn.Close()
 	return nil
 }
+
+var _ ContextualTCPClient = (*clientImpl)(nil)
 
 var nonPermanentErrors = []error{
 	quic.StreamLimitReachedError{},

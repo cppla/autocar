@@ -13,7 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e.svg" alt="MIT License"></a>
 </p>
 
-AutoCAR 在本地提供 SOCKS5、HTTP 和 HTTPS Proxy，在远端安全地解析域名并连接目标。默认链路采用 Hysteria v2.12.1 的 HTTP/3-over-QUIC 核心；每个方向独立使用真实的 BBRv1，或在双方明确配置带宽后使用 Brutal。UDP 不可达时，新建 TCP 流会自动切换到独立的 TLS 1.3/TCP 回退链路。
+AutoCAR 在本地提供 SOCKS5、HTTP 和 HTTPS Proxy，在远端安全地解析域名并连接目标。默认链路采用 Hysteria v2.12.1 的 HTTP/3-over-QUIC 核心；认证完成后，每个方向独立使用真实的用户态 BBRv1-derived controller，或在双方明确配置带宽后使用 Brutal。UDP 不可达时，新建 TCP 流会自动切换到独立的 TLS 1.3/TCP 回退链路。
 
 它是 split proxy，不把原始 TCP 包套进 UDP，因此不会产生 TCP-over-TCP 的双重可靠传输。目标是改善高 RTT、随机丢包、短连接和多并发场景；稳定、低时延的直连仍可能更快，请始终在真实路径上测量。
 
@@ -22,8 +22,8 @@ AutoCAR 在本地提供 SOCKS5、HTTP 和 HTTPS Proxy，在远端安全地解析
 | 来源/目标 | AutoCAR 中的实现 | 边界 |
 | --- | --- | --- |
 | Hysteria v2 | 基于官方 core v2.12.1 的可审计安全加固 fork、HTTP/3 多流、QUIC DATAGRAM、Fast Open、Chrome QUIC 指纹、HTTP/3 cover、可选 Salamander | 不包含实验性的 Gecko、Mimic、端口跳跃或 TUN/TProxy |
-| BBR | delivery-rate 与 min-RTT/BDP 模型、pacing，以及 `STARTUP → DRAIN → PROBE_BW → PROBE_RTT`；支持 conservative/standard/aggressive profile | 这是 Hysteria 的 **BBRv1**，不是 Linux 内核 BBRv2/BBRv3 |
-| ServerSpeeder/LotServer 的公开目标 | 双端独立发送控制、对端 ACK/RTT/loss 反馈、RFC 9002 packet/time threshold、PTO、热连接拥塞状态复用 | 没有复制 Zeta-TCP 的专有逐包概率算法，也不是内核透明 TCP、FEC 或包复制 |
+| BBR | 用户态 BBRv1-derived delivery-rate 与 min-RTT/BDP 模型、delivery-rate × gain pacing，以及 `STARTUP → DRAIN → PROBE_BW → PROBE_RTT`；支持 conservative/standard/aggressive profile | 不是 Linux 内核 BBR，也不是 BBRv2/BBRv3；QUIC Initial/握手阶段仍由 quic-go 默认 Reno 发送，认证后才切换 |
+| ServerSpeeder/LotServer 的公开目标 | 双端独立发送控制；对端发送标准 QUIC ACK，本端据此估算 RTT、delivery rate 与 loss；RFC 9002 packet/time threshold、PTO、热连接状态复用 | 只与公开目标部分对齐；没有复制 Zeta-TCP 的专有预测/逐包概率算法，也不是内核透明 TCP、FEC、抢先重传或包复制 |
 | 高丢包固定带宽 | 双方协商 `min(发送端上限, 接收端上限)` 后启用 Brutal；根据 ACK/loss 采样补偿并 pacing | 必须显式填准确带宽；会争抢共享链路，默认关闭 |
 
 默认值是 `bbr + standard`，客户端上下行带宽均为 `0`，且服务端默认忽略客户端带宽提示，所以不会无意启用 Brutal。详细机制、参数和诚实的声明边界见 [加速设计](docs/ACCELERATION.md)。
@@ -182,7 +182,7 @@ export AUTOCAR_PROXY_PASSWORD='replace-with-a-long-random-secret'
   --bytes 8388608 --iterations 7 --warmup 2 --json
 ```
 
-Linux `netem` 套件分别验证客户端上传与中继下载在高 RTT/丢包下 BBR 相对 Reno 的收益、Brutal 实际协商/发送、热连接短流收益、错误证书/令牌、UDP→TLS 回退，以及抓包中不存在明文 sentinel：
+Linux `netem` 套件分别验证客户端上传与中继下载在高 RTT/确定性丢包下 BBR 相对 Reno 的收益、Brutal 双向固定速率窗口、热连接短 payload 数据阶段、错误证书/令牌、静默 UDP 黑洞后的 TLS 回退，以及抓包中不存在明文 sentinel：
 
 ```bash
 make build
@@ -191,7 +191,7 @@ sudo ./scripts/netem-integration.sh ./bin/autocar
 
 `make release` 生成四个平台的发布归档；每个归档都同时包含可执行文件、AutoCAR 的 `LICENSE` 和完整的 `THIRD_PARTY_NOTICES.md`，不会发布缺少许可文件的裸二进制。
 
-CI 中的窄场景速度门只证明被测试的机制有效，不代表所有生产网络都会加速。方法、指标和扩展矩阵见 [基准说明](docs/BENCHMARK.md)。
+CI 中预先声明的窄场景回归门只证明被测试机制在该 profile 下工作，不代表所有生产网络都会加速。方法、指标和扩展矩阵见 [基准说明](docs/BENCHMARK.md)。
 
 ## 开发
 

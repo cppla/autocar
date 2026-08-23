@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+export LC_ALL=C
 
 # Reproducible functional and security smoke test for Linux. This script uses
 # network namespaces and tc netem, so it intentionally requires root.
@@ -14,7 +15,7 @@ if [[ $# -ne 1 ]]; then
   exit 1
 fi
 
-for command in ip tc iptables tcpdump curl python3 grep readlink; do
+for command in ip tc iptables tcpdump curl python3 grep readlink awk; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "error: required command not found: ${command}" >&2
     exit 1
@@ -30,6 +31,8 @@ fi
 ARTIFACT_DIR=${AUTOCAR_ARTIFACT_DIR:-artifacts/netem}
 mkdir -p "${ARTIFACT_DIR}"
 ARTIFACT_DIR=$(readlink -f "${ARTIFACT_DIR}")
+IPTABLES_VERSION=$(iptables --version)
+printf '%s\n' "${IPTABLES_VERSION}" >"${ARTIFACT_DIR}/iptables-version.txt"
 
 RUN_ID=$$
 CLIENT_NS="autocar-client-${RUN_ID}"
@@ -61,7 +64,8 @@ SHORT_FLOW_ITERATIONS=${AUTOCAR_SHORT_FLOW_ITERATIONS:-9}
 SHORT_FLOW_WARMUP=${AUTOCAR_SHORT_FLOW_WARMUP:-3}
 MIN_SHORT_FLOW_RATIO=${AUTOCAR_MIN_SHORT_FLOW_RATIO:-1.10}
 MIN_BBR_RENO_RATIO=${AUTOCAR_MIN_BBR_RENO_RATIO:-1.10}
-MIN_BRUTAL_TARGET_RATIO=${AUTOCAR_MIN_BRUTAL_TARGET_RATIO:-0.50}
+MIN_BRUTAL_TARGET_RATIO=${AUTOCAR_MIN_BRUTAL_TARGET_RATIO:-0.80}
+MAX_BRUTAL_TARGET_RATIO=${AUTOCAR_MAX_BRUTAL_TARGET_RATIO:-1.15}
 BRUTAL_SERVER_UPLOAD_MBPS=15
 BRUTAL_SERVER_DOWNLOAD_MBPS=15
 BRUTAL_CLIENT_UPLOAD_MBPS=20
@@ -74,6 +78,7 @@ if ! [[ ${CONTROLLER_DROP_EVERY} =~ ^[0-9]+$ ]] || \
   echo "error: AUTOCAR_CONTROLLER_DROP_EVERY must be an integer of at least 2" >&2
   exit 1
 fi
+CONTROLLER_INITIAL_PACKET=$((CONTROLLER_DROP_EVERY - 1))
 WORK_DIR=$(mktemp -d -t autocar-netem.XXXXXX)
 
 PIDS=()
@@ -156,13 +161,19 @@ reset_upload_controller_loss() {
   # Drop at the receiver's INPUT hook. An OUTPUT drop can make sendmsg return
   # EPERM on nft-backed iptables instead of behaving like path loss.
   ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
-  # xt_statistic stores --every N as N-1; --packet 0 therefore makes the first
-  # drop the Nth match. Using N-1 would drop the first QUIC Initial instead.
+  # libxt_statistic stores --every N as N-1 and initializes the kernel counter
+  # to (every - packet). Starting at N-1 therefore drops the Nth eligible
+  # datagram. --packet 0 would drop the first eligible QUIC Initial instead.
   ip netns exec "${SERVER_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
     -p udp -s "${CLIENT_IP}" -d "${SERVER_IP}" --dport "${RELAY_PORT}" \
     -m length --length 1000:65535 \
     -m statistic --mode nth --every "${CONTROLLER_DROP_EVERY}" \
-    --packet 0 -j DROP
+    --packet "${CONTROLLER_INITIAL_PACKET}" -j DROP
+  # Count every other eligible datagram. DROP + RETURN counters therefore give
+  # the actual denominator, rather than assuming that the matcher was active.
+  ip netns exec "${SERVER_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
+    -p udp -s "${CLIENT_IP}" -d "${SERVER_IP}" --dport "${RELAY_PORT}" \
+    -m length --length 1000:65535 -j RETURN
 }
 
 reset_download_controller_loss() {
@@ -172,7 +183,31 @@ reset_download_controller_loss() {
     -p udp -s "${SERVER_IP}" --sport "${source_port}" -d "${CLIENT_IP}" \
     -m length --length 1000:65535 \
     -m statistic --mode nth --every "${CONTROLLER_DROP_EVERY}" \
-    --packet 0 -j DROP
+    --packet "${CONTROLLER_INITIAL_PACKET}" -j DROP
+  ip netns exec "${CLIENT_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
+    -p udp -s "${SERVER_IP}" --sport "${source_port}" -d "${CLIENT_IP}" \
+    -m length --length 1000:65535 -j RETURN
+}
+
+snapshot_controller_loss() {
+  local namespace=$1
+  local dropped_variable=$2
+  local eligible_variable=$3
+  local counters dropped eligible
+
+  counters=$(ip netns exec "${namespace}" iptables -L "${CONTROLLER_LOSS_CHAIN}" \
+    --verbose --numeric --exact --line-numbers | awk '
+      $4 == "DROP" { dropped += $2 }
+      $4 == "RETURN" { returned += $2 }
+      END { printf "%.0f %.0f\\n", dropped, dropped + returned }
+    ')
+  read -r dropped eligible <<<"${counters}"
+  if ! [[ ${dropped} =~ ^[0-9]+$ && ${eligible} =~ ^[0-9]+$ ]]; then
+    echo "error: could not read deterministic-loss counters in ${namespace}" >&2
+    return 1
+  fi
+  printf -v "${dropped_variable}" '%s' "${dropped}"
+  printf -v "${eligible_variable}" '%s' "${eligible}"
 }
 
 expect_failure() {
@@ -218,7 +253,8 @@ BENCH_PID=${STARTED_PID}
 wait_for_log "${BENCH_PID}" "${ARTIFACT_DIR}/bench-server.log" "benchmark server listening"
 
 start_background "${ARTIFACT_DIR}/relay.log" \
-  ip netns exec "${SERVER_NS}" "${AUTOCAR_BIN}" server \
+  ip netns exec "${SERVER_NS}" env QUIC_GO_DISABLE_GSO=true \
+  "${AUTOCAR_BIN}" server \
   --listen="${SERVER_IP}:${RELAY_PORT}" \
   --tcp-listen="${SERVER_IP}:${RELAY_PORT}" \
   --cert="${WORK_DIR}/server.crt" \
@@ -333,16 +369,19 @@ reset_upload_controller_loss
 run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/bbr.json"
+snapshot_controller_loss "${SERVER_NS}" BBR_UPLOAD_DROPS BBR_UPLOAD_ELIGIBLE
 reset_upload_controller_loss
 run_controller_client --transport=quic --congestion=reno \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/reno.json"
+snapshot_controller_loss "${SERVER_NS}" RENO_UPLOAD_DROPS RENO_UPLOAD_ELIGIBLE
 reset_upload_controller_loss
 run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   --upload-mbps="${BRUTAL_CLIENT_UPLOAD_MBPS}" \
   --download-mbps="${BRUTAL_CLIENT_DOWNLOAD_MBPS}" \
   "${TUNNEL_AUTH[@]}" "${MODE_PROOF_BENCH[@]}" \
   >"${ARTIFACT_DIR}/brutal.json"
+snapshot_controller_loss "${SERVER_NS}" BRUTAL_UPLOAD_DROPS BRUTAL_UPLOAD_ELIGIBLE
 ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
 
 # Repeat the BBR/Reno proof in the opposite direction. Both clients use the
@@ -357,16 +396,26 @@ MODE_PROOF_DOWNLOAD=(
   --timeout=60s
   --json
 )
-# Use BBR/Reno/Reno/BBR ordering across the two directions to reduce monotonic
-# host-load bias without sharing controller state between runs.
+# Reverse the BBR/Reno order for relay-sender downloads to reduce monotonic
+# host-load bias without sharing controller state between runs. Brutal follows
+# each direction's paired comparison and is judged against its own rate window.
 reset_download_controller_loss "${RENO_RELAY_PORT}"
 run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   "${TUNNEL_AUTH_RENO[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
   >"${ARTIFACT_DIR}/reno-download.json"
+snapshot_controller_loss "${CLIENT_NS}" RENO_DOWNLOAD_DROPS RENO_DOWNLOAD_ELIGIBLE
 reset_download_controller_loss "${BBR_RELAY_PORT}"
 run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
   "${TUNNEL_AUTH_BBR[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
   >"${ARTIFACT_DIR}/bbr-download.json"
+snapshot_controller_loss "${CLIENT_NS}" BBR_DOWNLOAD_DROPS BBR_DOWNLOAD_ELIGIBLE
+reset_download_controller_loss "${RELAY_PORT}"
+run_controller_client --transport=quic --congestion=bbr --bbr-profile=standard \
+  --upload-mbps="${BRUTAL_CLIENT_UPLOAD_MBPS}" \
+  --download-mbps="${BRUTAL_CLIENT_DOWNLOAD_MBPS}" \
+  "${TUNNEL_AUTH[@]}" "${MODE_PROOF_DOWNLOAD[@]}" \
+  >"${ARTIFACT_DIR}/brutal-download.json"
+snapshot_controller_loss "${CLIENT_NS}" BRUTAL_DOWNLOAD_DROPS BRUTAL_DOWNLOAD_ELIGIBLE
 ip netns exec "${CLIENT_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
 
 # This intentionally narrow acceleration profile isolates the benefit of a
@@ -478,11 +527,16 @@ if tcpdump -nn -r "${QUIC_CAPTURE_FILE}" "tcp port ${RELAY_PORT}" 2>/dev/null | 
   exit 1
 fi
 
-# Drop the established client's UDP path only after a successful QUIC request.
-# A new proxy flow must detect the broken connection, open the circuit breaker,
-# and complete over the same relay's TCP/TLS listener within curl's deadline.
-ip netns exec "${CLIENT_NS}" iptables -I OUTPUT 1 -p udp \
-  -d "${SERVER_IP}" --dport "${RELAY_PORT}" -j DROP
+# Silently blackhole the established UDP path at both receivers only after a
+# successful QUIC request. Sender-side OUTPUT drops can make nft-backed
+# iptables return EPERM from sendmsg, which proves a local firewall error rather
+# than a dead network path. Keep TCP untouched for the authenticated fallback.
+ip netns exec "${SERVER_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${SERVER_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
+  -p udp -s "${CLIENT_IP}" -d "${SERVER_IP}" --dport "${RELAY_PORT}" -j DROP
+ip netns exec "${CLIENT_NS}" iptables -F "${CONTROLLER_LOSS_CHAIN}"
+ip netns exec "${CLIENT_NS}" iptables -A "${CONTROLLER_LOSS_CHAIN}" \
+  -p udp -s "${SERVER_IP}" --sport "${RELAY_PORT}" -d "${CLIENT_IP}" -j DROP
 
 FALLBACK_CAPTURE_FILE="${ARTIFACT_DIR}/tls-fallback.pcap"
 start_background "${ARTIFACT_DIR}/fallback-tcpdump.log" \
@@ -507,12 +561,35 @@ if (( FALLBACK_ELAPSED > 10 )); then
   echo "error: auto/TLS fallback exceeded the 10-second bound" >&2
   exit 1
 fi
+if (( FALLBACK_ELAPSED < 1 )); then
+  echo "error: auto/TLS fallback completed too quickly to prove a silent UDP blackhole" >&2
+  exit 1
+fi
 
 sleep 0.5
 kill -INT "${CAPTURE_PID}" >/dev/null 2>&1 || true
 wait "${CAPTURE_PID}" >/dev/null 2>&1 || true
 if ! tcpdump -nn -r "${FALLBACK_CAPTURE_FILE}" "tcp port ${RELAY_PORT}" 2>/dev/null | grep . >/dev/null; then
   echo "error: request after UDP loss did not use the TCP/TLS fallback" >&2
+  exit 1
+fi
+if ! tcpdump -nn -r "${FALLBACK_CAPTURE_FILE}" "udp port ${RELAY_PORT}" 2>/dev/null | grep . >/dev/null; then
+  echo "error: silent-blackhole fallback capture contains no UDP attempt" >&2
+  exit 1
+fi
+LIVE_UPSTREAM_DROPS=$(ip netns exec "${SERVER_NS}" iptables \
+  -L "${CONTROLLER_LOSS_CHAIN}" --verbose --numeric --exact --line-numbers | \
+  awk '$4 == "DROP" { dropped += $2 } END { printf "%.0f\\n", dropped }')
+if ! [[ ${LIVE_UPSTREAM_DROPS} =~ ^[0-9]+$ ]] || (( LIVE_UPSTREAM_DROPS == 0 )); then
+  echo "error: silent UDP blackhole did not drop an upstream datagram" >&2
+  exit 1
+fi
+if grep -Fqi 'operation not permitted' "${ARTIFACT_DIR}/client-proxy.log"; then
+  echo "error: live-path fallback was triggered by local sendmsg EPERM" >&2
+  exit 1
+fi
+if ! grep -Eiq 'deadline exceeded|timed out|timeout' "${ARTIFACT_DIR}/client-proxy.log"; then
+  echo "error: live-path fallback did not report a timeout-class QUIC failure" >&2
   exit 1
 fi
 if grep -aFq "${SENTINEL}" "${QUIC_CAPTURE_FILE}" || \
@@ -526,17 +603,31 @@ python3 - "${ARTIFACT_DIR}/direct.json" "${ARTIFACT_DIR}/quic.json" \
   "${ARTIFACT_DIR}/short-quic.json" "${ARTIFACT_DIR}/bbr.json" \
   "${ARTIFACT_DIR}/reno.json" "${ARTIFACT_DIR}/brutal.json" \
   "${ARTIFACT_DIR}/bbr-download.json" "${ARTIFACT_DIR}/reno-download.json" \
-  "${ARTIFACT_DIR}/summary.json" \
-  "${DELAY_MS}" "${LOSS}" "${RATE}" "${CONTROLLER_DROP_EVERY}" \
+  "${ARTIFACT_DIR}/brutal-download.json" "${ARTIFACT_DIR}/summary.json" \
+  "${DELAY_MS}" "${LOSS}" "${RATE}" "${IPTABLES_VERSION}" \
+  "${CONTROLLER_DROP_EVERY}" \
   "${CONTROLLER_BYTES}" "${CONTROLLER_ITERATIONS}" \
   "${CONTROLLER_WARMUP}" "${SHORT_FLOW_BYTES}" \
   "${MIN_SHORT_FLOW_RATIO}" "${MIN_BBR_RENO_RATIO}" \
-  "${MIN_BRUTAL_TARGET_RATIO}" "${BRUTAL_SERVER_UPLOAD_MBPS}" \
+  "${MIN_BRUTAL_TARGET_RATIO}" "${MAX_BRUTAL_TARGET_RATIO}" \
+  "${BRUTAL_SERVER_UPLOAD_MBPS}" \
   "${BRUTAL_SERVER_DOWNLOAD_MBPS}" "${BRUTAL_CLIENT_UPLOAD_MBPS}" \
-  "${BRUTAL_CLIENT_DOWNLOAD_MBPS}" "${BRUTAL_EXPECTED_TX_BYTES_SEC}" <<'PY'
+  "${BRUTAL_CLIENT_DOWNLOAD_MBPS}" "${BRUTAL_EXPECTED_TX_BYTES_SEC}" \
+  "${BBR_UPLOAD_DROPS}" "${BBR_UPLOAD_ELIGIBLE}" \
+  "${RENO_UPLOAD_DROPS}" "${RENO_UPLOAD_ELIGIBLE}" \
+  "${BRUTAL_UPLOAD_DROPS}" "${BRUTAL_UPLOAD_ELIGIBLE}" \
+  "${BBR_DOWNLOAD_DROPS}" "${BBR_DOWNLOAD_ELIGIBLE}" \
+  "${RENO_DOWNLOAD_DROPS}" "${RENO_DOWNLOAD_ELIGIBLE}" \
+  "${BRUTAL_DOWNLOAD_DROPS}" "${BRUTAL_DOWNLOAD_ELIGIBLE}" \
+  "${LIVE_UPSTREAM_DROPS}" <<'PY'
 import json
 import pathlib
 import sys
+
+if len(sys.argv) != 44:
+    raise SystemExit(
+        f"internal netem summary argument mismatch: got {len(sys.argv) - 1}, want 43"
+    )
 
 (
     direct_path,
@@ -549,14 +640,16 @@ import sys
     brutal_path,
     bbr_download_path,
     reno_download_path,
+    brutal_download_path,
     output_path,
 ) = map(
-    pathlib.Path, sys.argv[1:12]
+    pathlib.Path, sys.argv[1:13]
 )
 (
     delay_ms,
     loss,
     rate,
+    iptables_version,
     controller_drop_every,
     controller_bytes,
     controller_iterations,
@@ -565,12 +658,26 @@ import sys
     minimum_ratio,
     minimum_bbr_reno_ratio,
     minimum_brutal_target_ratio,
+    maximum_brutal_target_ratio,
     server_upload_mbps,
     server_download_mbps,
     client_upload_mbps,
     client_download_mbps,
     expected_brutal_tx,
-) = sys.argv[12:28]
+    bbr_upload_drops,
+    bbr_upload_eligible,
+    reno_upload_drops,
+    reno_upload_eligible,
+    brutal_upload_drops,
+    brutal_upload_eligible,
+    bbr_download_drops,
+    bbr_download_eligible,
+    reno_download_drops,
+    reno_download_eligible,
+    brutal_download_drops,
+    brutal_download_eligible,
+    live_upstream_drops,
+) = sys.argv[13:44]
 direct = json.loads(direct_path.read_text())
 quic = json.loads(quic_path.read_text())
 tls = json.loads(tls_path.read_text())
@@ -581,14 +688,96 @@ reno = json.loads(reno_path.read_text())
 brutal = json.loads(brutal_path.read_text())
 bbr_download = json.loads(bbr_download_path.read_text())
 reno_download = json.loads(reno_download_path.read_text())
+brutal_download = json.loads(brutal_download_path.read_text())
 
-for name, result in (("direct", direct), ("quic", quic), ("tls", tls)):
+minimum_ratio = float(minimum_ratio)
+minimum_bbr_reno_ratio = float(minimum_bbr_reno_ratio)
+minimum_brutal_target_ratio = float(minimum_brutal_target_ratio)
+maximum_brutal_target_ratio = float(maximum_brutal_target_ratio)
+if minimum_ratio <= 0 or minimum_bbr_reno_ratio <= 0:
+    raise SystemExit("BBR/Reno and warm-payload acceptance ratios must be positive")
+if not 0 < minimum_brutal_target_ratio <= maximum_brutal_target_ratio:
+    raise SystemExit(
+        "Brutal acceptance ratios must satisfy 0 < minimum <= maximum"
+    )
+
+loss_observations = {
+    "bbr_upload": (int(bbr_upload_drops), int(bbr_upload_eligible)),
+    "reno_upload": (int(reno_upload_drops), int(reno_upload_eligible)),
+    "brutal_upload": (int(brutal_upload_drops), int(brutal_upload_eligible)),
+    "bbr_download": (int(bbr_download_drops), int(bbr_download_eligible)),
+    "reno_download": (int(reno_download_drops), int(reno_download_eligible)),
+    "brutal_download": (
+        int(brutal_download_drops),
+        int(brutal_download_eligible),
+    ),
+}
+
+for name, (dropped, eligible) in loss_observations.items():
+    if dropped <= 0 or eligible <= 0:
+        raise SystemExit(
+            f"{name} deterministic-loss rule matched {eligible} and dropped {dropped}; "
+            "the controller gate did not exercise loss"
+        )
+    expected_drops = eligible // int(controller_drop_every)
+    if dropped != expected_drops:
+        raise SystemExit(
+            f"{name} deterministic-loss counters report {dropped}/{eligible}, "
+            f"want exactly floor(eligible/{int(controller_drop_every)})={expected_drops}"
+        )
+
+
+def require_comparable_loss_volume(name, left, right):
+    allowed_delta = max(2, int(max(left, right) * 0.02 + 0.999))
+    if abs(left - right) > allowed_delta:
+        raise SystemExit(
+            f"{name} eligible packet counts {left} and {right} differ by more than "
+            f"the allowed {allowed_delta}; controller loss inputs are not comparable"
+        )
+
+
+require_comparable_loss_volume(
+    "BBR/Reno upload",
+    loss_observations["bbr_upload"][1],
+    loss_observations["reno_upload"][1],
+)
+require_comparable_loss_volume(
+    "BBR/Reno download",
+    loss_observations["bbr_download"][1],
+    loss_observations["reno_download"][1],
+)
+
+for name, result, transport in (
+    ("direct", direct, "direct"),
+    ("quic", quic, "quic"),
+    ("tls", tls, "tls"),
+):
     if result["median_mbps"] <= 0:
         raise SystemExit(f"{name} benchmark reported non-positive goodput")
+    if result.get("mode") != "download" or result.get("transport") != transport:
+        raise SystemExit(
+            f"{name} benchmark metadata reported mode={result.get('mode')!r}, "
+            f"transport={result.get('transport')!r}"
+        )
+for name, result, transport in (
+    ("short direct", short_direct, "direct"),
+    ("short quic", short_quic, "quic"),
+):
+    if result.get("mode") != "download" or result.get("transport") != transport:
+        raise SystemExit(f"{name} benchmark has incorrect mode or transport metadata")
+    if result.get("bytes_per_iteration") != int(short_flow_bytes):
+        raise SystemExit(
+            f"{name} benchmark used {result.get('bytes_per_iteration')!r} bytes, "
+            f"want {int(short_flow_bytes)}"
+        )
 for name, result in (("bbr", bbr), ("reno", reno), ("brutal", brutal)):
     if result["median_mbps"] <= 0:
         raise SystemExit(f"{name} controller proof reported non-positive goodput")
-for name, result in (("bbr download", bbr_download), ("reno download", reno_download)):
+for name, result in (
+    ("bbr download", bbr_download),
+    ("reno download", reno_download),
+    ("brutal download", brutal_download),
+):
     if result["median_mbps"] <= 0:
         raise SystemExit(f"{name} controller proof reported non-positive goodput")
 
@@ -598,6 +787,7 @@ for name, result in (
     ("brutal", brutal),
     ("bbr download", bbr_download),
     ("reno download", reno_download),
+    ("brutal download", brutal_download),
 ):
     if result.get("bytes_per_iteration") != int(controller_bytes):
         raise SystemExit(
@@ -631,71 +821,126 @@ reno_aggregate_mbps = aggregate_goodput("reno", reno)
 brutal_aggregate_mbps = aggregate_goodput("brutal", brutal)
 bbr_download_aggregate_mbps = aggregate_goodput("bbr download", bbr_download)
 reno_download_aggregate_mbps = aggregate_goodput("reno download", reno_download)
+brutal_download_aggregate_mbps = aggregate_goodput(
+    "brutal download", brutal_download
+)
 
-if bbr.get("acceleration") != "bbr-standard":
+for name, result, mode, sender in (
+    ("bbr", bbr, "upload", "client"),
+    ("reno", reno, "upload", "client"),
+    ("brutal", brutal, "upload", "client"),
+    ("bbr download", bbr_download, "download", "relay"),
+    ("reno download", reno_download, "download", "relay"),
+    ("brutal download", brutal_download, "download", "relay"),
+):
+    if result.get("mode") != mode or result.get("transport") != "quic":
+        raise SystemExit(
+            f"{name} metadata reported mode={result.get('mode')!r}, "
+            f"transport={result.get('transport')!r}; want {mode!r}, 'quic'"
+        )
+    if result.get("tunnel_sender_endpoint") != sender:
+        raise SystemExit(
+            f"{name} reported tunnel sender "
+            f"{result.get('tunnel_sender_endpoint')!r}, want {sender!r}"
+        )
+
+if bbr.get("payload_sender_acceleration") != "bbr-standard":
     raise SystemExit(
-        f"BBR proof reported acceleration={bbr.get('acceleration')!r}, "
+        "BBR upload proof reported payload sender acceleration="
+        f"{bbr.get('payload_sender_acceleration')!r}, "
         "want 'bbr-standard'"
     )
-if bbr.get("negotiated_tx_bytes_per_second", 0) != 0:
+if bbr.get("payload_sender_negotiated_tx_bytes_per_second", 0) != 0:
     raise SystemExit(
         "BBR proof unexpectedly negotiated a non-zero Tx bandwidth: "
-        f"{bbr.get('negotiated_tx_bytes_per_second')!r}"
+        f"{bbr.get('payload_sender_negotiated_tx_bytes_per_second')!r}"
     )
-if reno.get("acceleration") != "reno":
+if reno.get("payload_sender_acceleration") != "reno":
     raise SystemExit(
-        f"Reno proof reported acceleration={reno.get('acceleration')!r}, "
+        "Reno upload proof reported payload sender acceleration="
+        f"{reno.get('payload_sender_acceleration')!r}, "
         "want 'reno'"
     )
-if reno.get("negotiated_tx_bytes_per_second", 0) != 0:
+if reno.get("payload_sender_negotiated_tx_bytes_per_second", 0) != 0:
     raise SystemExit(
         "Reno proof unexpectedly negotiated a non-zero Tx bandwidth: "
-        f"{reno.get('negotiated_tx_bytes_per_second')!r}"
+        f"{reno.get('payload_sender_negotiated_tx_bytes_per_second')!r}"
     )
 
+for name, result in (("bbr download", bbr_download), ("reno download", reno_download)):
+    if result.get("local_tx_acceleration") != "bbr-standard":
+        raise SystemExit(
+            f"{name} local client Tx metadata changed unexpectedly: "
+            f"{result.get('local_tx_acceleration')!r}"
+        )
+    if result.get("payload_sender_acceleration") is not None:
+        raise SystemExit(
+            f"{name} falsely attributed the client's controller to the relay sender"
+        )
+
 bbr_reno_ratio = bbr_aggregate_mbps / reno_aggregate_mbps
-if bbr_reno_ratio < float(minimum_bbr_reno_ratio):
+if bbr_reno_ratio < minimum_bbr_reno_ratio:
     raise SystemExit(
         f"deterministic-loss BBR/Reno upload aggregate-goodput ratio "
         f"{bbr_reno_ratio:.3f} is below "
-        f"the declared acceptance threshold {float(minimum_bbr_reno_ratio):.3f}"
+        f"the declared acceptance threshold {minimum_bbr_reno_ratio:.3f}"
     )
 
 bbr_reno_download_ratio = (
     bbr_download_aggregate_mbps / reno_download_aggregate_mbps
 )
-if bbr_reno_download_ratio < float(minimum_bbr_reno_ratio):
+if bbr_reno_download_ratio < minimum_bbr_reno_ratio:
     raise SystemExit(
         f"deterministic-loss BBR/Reno download aggregate-goodput ratio "
         f"{bbr_reno_download_ratio:.3f} is below "
-        f"the declared acceptance threshold {float(minimum_bbr_reno_ratio):.3f}"
+        f"the declared acceptance threshold {minimum_bbr_reno_ratio:.3f}"
     )
 
 expected_brutal_tx = int(expected_brutal_tx)
-if brutal.get("acceleration") != "brutal":
+if brutal.get("payload_sender_acceleration") != "brutal":
     raise SystemExit(
-        f"Brutal proof reported acceleration={brutal.get('acceleration')!r}, "
+        "Brutal upload proof reported payload sender acceleration="
+        f"{brutal.get('payload_sender_acceleration')!r}, "
         "want 'brutal'"
     )
-if brutal.get("negotiated_tx_bytes_per_second") != expected_brutal_tx:
+if brutal.get("payload_sender_negotiated_tx_bytes_per_second") != expected_brutal_tx:
     raise SystemExit(
         "Brutal proof negotiated Tx bandwidth "
-        f"{brutal.get('negotiated_tx_bytes_per_second')!r}, "
+        f"{brutal.get('payload_sender_negotiated_tx_bytes_per_second')!r}, "
         f"want {expected_brutal_tx} bytes/s"
+    )
+if brutal_download.get("local_tx_acceleration") != "brutal":
+    raise SystemExit("Brutal download handshake did not negotiate client-side Brutal")
+if brutal_download.get("payload_sender_acceleration") is not None:
+    raise SystemExit(
+        "Brutal download falsely attributed the client's controller to the relay sender"
     )
 brutal_target_mbps = expected_brutal_tx * 8 / 1_000_000
 brutal_target_ratio = brutal_aggregate_mbps / brutal_target_mbps
-if brutal_target_ratio < float(minimum_brutal_target_ratio):
-    raise SystemExit(
-        f"Brutal achieved/target ratio {brutal_target_ratio:.3f} is below "
-        f"the declared acceptance threshold {float(minimum_brutal_target_ratio):.3f}"
-    )
+brutal_download_target_ratio = (
+    brutal_download_aggregate_mbps / brutal_target_mbps
+)
+for direction, ratio in (
+    ("upload", brutal_target_ratio),
+    ("download", brutal_download_target_ratio),
+):
+    if ratio < minimum_brutal_target_ratio:
+        raise SystemExit(
+            f"Brutal {direction} achieved/target ratio {ratio:.3f} is below "
+            f"the declared minimum {minimum_brutal_target_ratio:.3f}"
+        )
+    if ratio > maximum_brutal_target_ratio:
+        raise SystemExit(
+            f"Brutal {direction} achieved/target ratio {ratio:.3f} is above "
+            f"the declared maximum {maximum_brutal_target_ratio:.3f}; "
+            "the fixed-rate controller may not be active"
+        )
 
 short_ratio = short_quic["median_mbps"] / short_direct["median_mbps"]
-if short_ratio < float(minimum_ratio):
+if short_ratio < minimum_ratio:
     raise SystemExit(
-        f"warm-QUIC short-flow ratio {short_ratio:.3f} is below "
-        f"the declared acceptance threshold {float(minimum_ratio):.3f}"
+        f"warm-QUIC payload-phase ratio {short_ratio:.3f} is below "
+        f"the declared acceptance threshold {minimum_ratio:.3f}"
     )
 
 summary = {
@@ -703,6 +948,7 @@ summary = {
         "one_way_delay_ms": int(delay_ms),
         "loss_each_direction": loss,
         "rate_each_direction": rate,
+        "iptables_version": iptables_version,
     },
     "median_mbps": {
         "direct": direct["median_mbps"],
@@ -718,25 +964,34 @@ summary = {
             "one_way_delay_ms": int(delay_ms),
             "rate_each_direction": rate,
             "random_loss_each_direction": "0%",
-            "sender_large_udp_drop_every": int(controller_drop_every),
+            "loss_hook": "receiver INPUT",
+            "receiver_input_large_udp_drop_every": int(controller_drop_every),
+            "actual_loss": {
+                name: {
+                    "eligible_packets": eligible,
+                    "dropped_packets": dropped,
+                    "drop_rate": dropped / eligible,
+                }
+                for name, (dropped, eligible) in loss_observations.items()
+            },
             "bytes_per_iteration": int(controller_bytes),
             "measured_iterations": int(controller_iterations),
             "warmup_iterations": int(controller_warmup),
         },
         "bbr": {
             "artifact": bbr_path.name,
-            "acceleration": bbr["acceleration"],
-            "negotiated_tx_bytes_per_second": bbr.get(
-                "negotiated_tx_bytes_per_second", 0
+            "sender_acceleration": bbr["payload_sender_acceleration"],
+            "sender_negotiated_tx_bytes_per_second": bbr.get(
+                "payload_sender_negotiated_tx_bytes_per_second", 0
             ),
             "median_mbps": bbr["median_mbps"],
             "aggregate_mbps": bbr_aggregate_mbps,
         },
         "reno": {
             "artifact": reno_path.name,
-            "acceleration": reno["acceleration"],
-            "negotiated_tx_bytes_per_second": reno.get(
-                "negotiated_tx_bytes_per_second", 0
+            "sender_acceleration": reno["payload_sender_acceleration"],
+            "sender_negotiated_tx_bytes_per_second": reno.get(
+                "payload_sender_negotiated_tx_bytes_per_second", 0
             ),
             "median_mbps": reno["median_mbps"],
             "aggregate_mbps": reno_aggregate_mbps,
@@ -745,6 +1000,8 @@ summary = {
         "bbr_to_reno_ratio": bbr_reno_ratio,
         "bbr_to_reno_aggregate_ratio": bbr_reno_ratio,
         "relay_sender_download": {
+            "bbr_configured_sender_acceleration": "bbr-standard",
+            "reno_configured_sender_acceleration": "reno",
             "bbr_artifact": bbr_download_path.name,
             "reno_artifact": reno_download_path.name,
             "bbr_median_mbps": bbr_download["median_mbps"],
@@ -753,28 +1010,36 @@ summary = {
             "reno_aggregate_mbps": reno_download_aggregate_mbps,
             "bbr_to_reno_ratio": bbr_reno_download_ratio,
             "bbr_to_reno_aggregate_ratio": bbr_reno_download_ratio,
-            "minimum_accepted_bbr_to_reno_ratio": float(minimum_bbr_reno_ratio),
+            "minimum_accepted_bbr_to_reno_ratio": minimum_bbr_reno_ratio,
         },
-        "minimum_accepted_bbr_to_reno_ratio": float(minimum_bbr_reno_ratio),
+        "minimum_accepted_bbr_to_reno_ratio": minimum_bbr_reno_ratio,
         "brutal": {
             "artifact": brutal_path.name,
-            "acceleration": brutal["acceleration"],
-            "negotiated_tx_bytes_per_second": brutal[
-                "negotiated_tx_bytes_per_second"
+            "sender_acceleration": brutal["payload_sender_acceleration"],
+            "sender_negotiated_tx_bytes_per_second": brutal[
+                "payload_sender_negotiated_tx_bytes_per_second"
             ],
             "median_mbps": brutal["median_mbps"],
             "aggregate_mbps": brutal_aggregate_mbps,
             "target_mbps": brutal_target_mbps,
             "achieved_to_target_ratio": brutal_target_ratio,
-            "minimum_accepted_target_ratio": float(minimum_brutal_target_ratio),
+            "minimum_accepted_target_ratio": minimum_brutal_target_ratio,
+            "maximum_accepted_target_ratio": maximum_brutal_target_ratio,
+            "relay_sender_download": {
+                "artifact": brutal_download_path.name,
+                "configured_sender_acceleration": "brutal",
+                "aggregate_mbps": brutal_download_aggregate_mbps,
+                "target_mbps": brutal_target_mbps,
+                "achieved_to_target_ratio": brutal_download_target_ratio,
+            },
             "client_upload_mbps": int(client_upload_mbps),
             "client_download_mbps": int(client_download_mbps),
             "server_upload_cap_mbps": int(server_upload_mbps),
             "server_download_cap_mbps": int(server_download_mbps),
         },
     },
-    "acceleration_profile": {
-        "description": "sequential short downloads over a loss-free high-RTT path; QUIC uses declared warmups",
+    "warm_payload_profile": {
+        "description": "sequential short payload phases over a loss-free high-RTT path; tunnel setup is excluded and QUIC uses declared warmups",
         "payload_bytes": int(short_flow_bytes),
         "one_way_delay_ms": int(delay_ms),
         "loss_each_direction": "0%",
@@ -782,14 +1047,17 @@ summary = {
         "direct_median_mbps": short_direct["median_mbps"],
         "quic_median_mbps": short_quic["median_mbps"],
         "quic_to_direct_ratio": short_ratio,
-        "minimum_accepted_ratio": float(minimum_ratio),
+        "minimum_accepted_ratio": minimum_ratio,
     },
     "security_smoke": {
         "wrong_ca_rejected": True,
         "wrong_token_rejected": True,
         "plaintext_sentinel_absent_from_tunnel_capture": True,
         "auto_initial_quic_request_succeeded": True,
-        "auto_tls_request_after_udp_drop_succeeded": True,
+        "auto_tls_request_after_silent_udp_blackhole_succeeded": True,
+        "silent_blackhole_receiver_input_udp_drops": int(live_upstream_drops),
+        "quic_timeout_class_failure_observed": True,
+        "sendmsg_eperm_absent": True,
     },
 }
 output_path.write_text(json.dumps(summary, indent=2) + "\n")

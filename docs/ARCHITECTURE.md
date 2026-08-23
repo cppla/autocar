@@ -47,8 +47,9 @@ relay-to-client directions adapt independently:
 
 - with bandwidth hints left at zero, each sender uses real BBRv1-derived model
   control by default (or Reno when explicitly selected);
-- with a non-zero client bandwidth hint, the corresponding direction
-  negotiates a capped Brutal pacing rate with the relay; and
+- with a non-zero client bandwidth hint, the corresponding direction can use
+  Brutal only when the relay explicitly opts in and configures finite non-zero
+  ceilings for both directions; the lower client/relay value wins; and
 - QUIC loss recovery remains the standards-based RFC 9002 packet-threshold,
   time-threshold, and probe-timeout machinery regardless of congestion mode.
 

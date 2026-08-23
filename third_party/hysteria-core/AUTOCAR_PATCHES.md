@@ -49,3 +49,10 @@ the job timeout.
 
 Integration tests generate an ephemeral ECDSA P-256 certificate in memory;
 the fork does not carry the upstream repository's fixed test private key.
+Timing-sensitive UDP session-manager tests wait for close and shutdown events
+instead of sleeping across ticker boundaries, preventing scheduler load from
+causing false CI failures.
+
+The client exposes context-aware authentication and TCP stream opens. Timeout
+or cancellation aborts the HTTP/3 handshake or the individual QUIC stream,
+preventing timed-out proxy opens from retaining worker slots or goroutines.

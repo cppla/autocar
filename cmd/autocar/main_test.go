@@ -2,15 +2,30 @@ package main
 
 import (
 	"context"
+	"errors"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/cppla/autocar/internal/netbench"
 	"github.com/cppla/autocar/internal/security"
 )
+
+type benchmarkAccelerationReporter struct {
+	mode string
+	tx   uint64
+}
+
+func (r benchmarkAccelerationReporter) DialContext(context.Context, string, string) (net.Conn, error) {
+	return nil, errors.New("not used")
+}
+
+func (r benchmarkAccelerationReporter) AccelerationMode() string { return r.mode }
+func (r benchmarkAccelerationReporter) NegotiatedTx() uint64     { return r.tx }
 
 func TestMegabitsToBytesPerSecond(t *testing.T) {
 	for value, wanted := range map[uint64]uint64{
@@ -228,5 +243,37 @@ func TestPercentile(t *testing.T) {
 	}
 	if got := percentile(values, 0.95); got != 5 {
 		t.Fatalf("p95=%v", got)
+	}
+}
+
+func TestBenchmarkAccelerationMetadataIsDirectionExplicit(t *testing.T) {
+	reporter := benchmarkAccelerationReporter{mode: "brutal", tx: 1_875_000}
+
+	upload := benchOutput{}
+	populateAccelerationMetadata(&upload, netbench.ModeUpload, reporter)
+	if upload.TunnelSenderEndpoint != "client" ||
+		upload.LocalTxAcceleration != "brutal" ||
+		upload.PayloadSenderAcceleration != "brutal" ||
+		upload.LocalNegotiatedTxBytesSec != reporter.tx ||
+		upload.PayloadSenderNegotiatedTxBytesSec != reporter.tx {
+		t.Fatalf("upload acceleration metadata = %+v", upload)
+	}
+
+	download := benchOutput{}
+	populateAccelerationMetadata(&download, netbench.ModeDownload, reporter)
+	if download.TunnelSenderEndpoint != "relay" ||
+		download.LocalTxAcceleration != "brutal" ||
+		download.LocalNegotiatedTxBytesSec != reporter.tx {
+		t.Fatalf("download local acceleration metadata = %+v", download)
+	}
+	if download.PayloadSenderAcceleration != "" ||
+		download.PayloadSenderNegotiatedTxBytesSec != 0 {
+		t.Fatalf("download falsely attributed client Tx controller to relay: %+v", download)
+	}
+
+	direct := benchOutput{}
+	populateAccelerationMetadata(&direct, netbench.ModeDownload, nil)
+	if direct.TunnelSenderEndpoint != "" || direct.LocalTxAcceleration != "" {
+		t.Fatalf("direct metadata unexpectedly names a tunnel controller: %+v", direct)
 	}
 }

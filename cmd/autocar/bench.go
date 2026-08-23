@@ -55,16 +55,19 @@ func ensureSafeBenchmarkListener(address string, allowPublic bool) error {
 }
 
 type benchOutput struct {
-	Mode                 string    `json:"mode"`
-	Transport            string    `json:"transport"`
-	Acceleration         string    `json:"acceleration,omitempty"`
-	NegotiatedTxBytesSec uint64    `json:"negotiated_tx_bytes_per_second,omitempty"`
-	Target               string    `json:"target"`
-	Bytes                int64     `json:"bytes_per_iteration"`
-	Iterations           int       `json:"iterations"`
-	MedianMbps           float64   `json:"median_mbps"`
-	P95Mbps              float64   `json:"p95_mbps"`
-	Results              []float64 `json:"results_mbps"`
+	Mode                              string    `json:"mode"`
+	Transport                         string    `json:"transport"`
+	TunnelSenderEndpoint              string    `json:"tunnel_sender_endpoint,omitempty"`
+	LocalTxAcceleration               string    `json:"local_tx_acceleration,omitempty"`
+	LocalNegotiatedTxBytesSec         uint64    `json:"local_negotiated_tx_bytes_per_second,omitempty"`
+	PayloadSenderAcceleration         string    `json:"payload_sender_acceleration,omitempty"`
+	PayloadSenderNegotiatedTxBytesSec uint64    `json:"payload_sender_negotiated_tx_bytes_per_second,omitempty"`
+	Target                            string    `json:"target"`
+	Bytes                             int64     `json:"bytes_per_iteration"`
+	Iterations                        int       `json:"iterations"`
+	MedianMbps                        float64   `json:"median_mbps"`
+	P95Mbps                           float64   `json:"p95_mbps"`
+	Results                           []float64 `json:"results_mbps"`
 }
 
 type accelerationReporter interface {
@@ -145,10 +148,7 @@ func runBenchClient(parent context.Context, args []string) error {
 		P95Mbps:    p95,
 		Results:    results,
 	}
-	if reporter, ok := dialer.(accelerationReporter); ok {
-		output.Acceleration = reporter.AccelerationMode()
-		output.NegotiatedTxBytesSec = reporter.NegotiatedTx()
-	}
+	populateAccelerationMetadata(&output, mode, dialer)
 	if *jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
@@ -157,6 +157,22 @@ func runBenchClient(parent context.Context, args []string) error {
 	fmt.Printf("%s via %s: median %.2f Mbit/s, p95 %.2f Mbit/s (%d x %d bytes)\n",
 		output.Mode, output.Transport, output.MedianMbps, output.P95Mbps, output.Iterations, output.Bytes)
 	return nil
+}
+
+func populateAccelerationMetadata(output *benchOutput, mode byte, dialer transport.Dialer) {
+	reporter, ok := dialer.(accelerationReporter)
+	if !ok {
+		return
+	}
+	output.LocalTxAcceleration = reporter.AccelerationMode()
+	output.LocalNegotiatedTxBytesSec = reporter.NegotiatedTx()
+	if mode == netbench.ModeUpload {
+		output.TunnelSenderEndpoint = "client"
+		output.PayloadSenderAcceleration = output.LocalTxAcceleration
+		output.PayloadSenderNegotiatedTxBytesSec = output.LocalNegotiatedTxBytesSec
+		return
+	}
+	output.TunnelSenderEndpoint = "relay"
 }
 
 func percentile(sorted []float64, fraction float64) float64 {
