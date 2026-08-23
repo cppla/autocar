@@ -193,14 +193,16 @@ snapshot_controller_loss() {
   local namespace=$1
   local dropped_variable=$2
   local eligible_variable=$3
-  local counters dropped eligible
+  local counters dropped eligible snapshot_file
 
-  counters=$(ip netns exec "${namespace}" iptables -L "${CONTROLLER_LOSS_CHAIN}" \
-    --verbose --numeric --exact --line-numbers | awk '
+  snapshot_file="${ARTIFACT_DIR}/iptables-${dropped_variable,,}.txt"
+  ip netns exec "${namespace}" iptables -L "${CONTROLLER_LOSS_CHAIN}" \
+    --verbose --numeric --exact --line-numbers >"${snapshot_file}"
+  counters=$(awk '
       $4 == "DROP" { dropped += $2 }
       $4 == "RETURN" { returned += $2 }
-      END { printf "%.0f %.0f\\n", dropped, dropped + returned }
-    ')
+      END { printf "%.0f %.0f%c", dropped, dropped + returned, 10 }
+    ' "${snapshot_file}")
   read -r dropped eligible <<<"${counters}"
   if ! [[ ${dropped} =~ ^[0-9]+$ && ${eligible} =~ ^[0-9]+$ ]]; then
     echo "error: could not read deterministic-loss counters in ${namespace}" >&2
@@ -577,9 +579,13 @@ if ! tcpdump -nn -r "${FALLBACK_CAPTURE_FILE}" "udp port ${RELAY_PORT}" 2>/dev/n
   echo "error: silent-blackhole fallback capture contains no UDP attempt" >&2
   exit 1
 fi
-LIVE_UPSTREAM_DROPS=$(ip netns exec "${SERVER_NS}" iptables \
-  -L "${CONTROLLER_LOSS_CHAIN}" --verbose --numeric --exact --line-numbers | \
-  awk '$4 == "DROP" { dropped += $2 } END { printf "%.0f\\n", dropped }')
+ip netns exec "${SERVER_NS}" iptables \
+  -L "${CONTROLLER_LOSS_CHAIN}" --verbose --numeric --exact --line-numbers \
+  >"${ARTIFACT_DIR}/iptables-live-blackhole.txt"
+LIVE_UPSTREAM_DROPS=$(awk '
+  $4 == "DROP" { dropped += $2 }
+  END { printf "%.0f%c", dropped, 10 }
+' "${ARTIFACT_DIR}/iptables-live-blackhole.txt")
 if ! [[ ${LIVE_UPSTREAM_DROPS} =~ ^[0-9]+$ ]] || (( LIVE_UPSTREAM_DROPS == 0 )); then
   echo "error: silent UDP blackhole did not drop an upstream datagram" >&2
   exit 1
