@@ -11,13 +11,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cppla/autocar/internal/accel"
 	"github.com/cppla/autocar/internal/netbench"
 	"github.com/cppla/autocar/internal/security"
 )
 
 type benchmarkAccelerationReporter struct {
-	mode string
-	tx   uint64
+	mode       string
+	tx         uint64
+	remoteMode string
+	remoteTx   uint64
 }
 
 func (r benchmarkAccelerationReporter) DialContext(context.Context, string, string) (net.Conn, error) {
@@ -26,6 +29,32 @@ func (r benchmarkAccelerationReporter) DialContext(context.Context, string, stri
 
 func (r benchmarkAccelerationReporter) AccelerationMode() string { return r.mode }
 func (r benchmarkAccelerationReporter) NegotiatedTx() uint64     { return r.tx }
+func (r benchmarkAccelerationReporter) RemoteTxAcceleration() string {
+	return r.remoteMode
+}
+func (r benchmarkAccelerationReporter) RemoteNegotiatedTx() uint64 { return r.remoteTx }
+
+type benchmarkLocalReporter struct {
+	mode string
+	tx   uint64
+}
+
+func (r benchmarkLocalReporter) DialContext(context.Context, string, string) (net.Conn, error) {
+	return nil, errors.New("not used")
+}
+
+func (r benchmarkLocalReporter) AccelerationMode() string { return r.mode }
+func (r benchmarkLocalReporter) NegotiatedTx() uint64     { return r.tx }
+
+type benchmarkSelectedTransportReporter struct {
+	selected string
+}
+
+func (r benchmarkSelectedTransportReporter) DialContext(context.Context, string, string) (net.Conn, error) {
+	return nil, errors.New("not used")
+}
+
+func (r benchmarkSelectedTransportReporter) SelectedTransport() string { return r.selected }
 
 func TestMegabitsToBytesPerSecond(t *testing.T) {
 	for value, wanted := range map[uint64]uint64{
@@ -40,23 +69,6 @@ func TestMegabitsToBytesPerSecond(t *testing.T) {
 	}
 	if _, err := megabitsToBytesPerSecond(math.MaxUint64); err == nil {
 		t.Fatal("overflowing bandwidth was accepted")
-	}
-}
-
-func TestLoadOptionalSecret(t *testing.T) {
-	t.Setenv("AUTOCAR_TEST_OPTIONAL_SECRET", "")
-	value, err := loadOptionalSecret("", "AUTOCAR_TEST_OPTIONAL_SECRET", 16)
-	if err != nil || value != nil {
-		t.Fatalf("empty optional secret = %q, %v", value, err)
-	}
-	t.Setenv("AUTOCAR_TEST_OPTIONAL_SECRET", "short")
-	if _, err := loadOptionalSecret("", "AUTOCAR_TEST_OPTIONAL_SECRET", 16); err == nil {
-		t.Fatal("short optional secret was accepted")
-	}
-	t.Setenv("AUTOCAR_TEST_OPTIONAL_SECRET", strings.Repeat("x", 16))
-	value, err = loadOptionalSecret("", "AUTOCAR_TEST_OPTIONAL_SECRET", 16)
-	if err != nil || string(value) != strings.Repeat("x", 16) {
-		t.Fatalf("optional secret = %q, %v", value, err)
 	}
 }
 
@@ -236,6 +248,76 @@ func TestServerRejectsFallbackSourceLimitAboveGlobalLimit(t *testing.T) {
 	}
 }
 
+func TestPacingConfigValidation(t *testing.T) {
+	tests := []struct {
+		mode        string
+		profile     string
+		wantMode    accel.Mode
+		wantProfile accel.Profile
+		wantError   bool
+	}{
+		{mode: "", profile: "", wantMode: accel.ModeAdaptive, wantProfile: accel.ProfileBalanced},
+		{mode: " ADAPTIVE ", profile: " CONSERVATIVE ", wantMode: accel.ModeAdaptive, wantProfile: accel.ProfileConservative},
+		{mode: "reno", profile: "balanced", wantMode: accel.ModeReno, wantProfile: accel.ProfileBalanced},
+		{mode: "fixed-rate", profile: "aggressive", wantMode: accel.ModeFixedRate, wantProfile: accel.ProfileAggressive},
+		{mode: "unknown", profile: "balanced", wantError: true},
+		{mode: "adaptive", profile: "unknown", wantError: true},
+	}
+	for _, test := range tests {
+		config, err := newPacingConfig(test.mode, test.profile)
+		if test.wantError {
+			if err == nil {
+				t.Errorf("newPacingConfig(%q, %q) unexpectedly succeeded", test.mode, test.profile)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("newPacingConfig(%q, %q): %v", test.mode, test.profile, err)
+			continue
+		}
+		if config.Mode != test.wantMode || config.Profile != test.wantProfile {
+			t.Errorf("newPacingConfig(%q, %q) = %+v", test.mode, test.profile, config)
+		}
+	}
+}
+
+func TestPacingRateValidation(t *testing.T) {
+	if err := validateClientRates(accel.ModeFixedRate, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateClientRates(accel.ModeFixedRate, 1, 0); err == nil {
+		t.Fatal("fixed-rate client accepted a missing download rate")
+	}
+	if err := validateClientRates(accel.ModeAdaptive, 1, 1); err == nil {
+		t.Fatal("adaptive client accepted fixed-rate hints")
+	}
+	if err := validateServerRates(accel.ModeAdaptive, false, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateServerRates(accel.ModeAdaptive, true, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateServerRates(accel.ModeFixedRate, false, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateServerRates(accel.ModeFixedRate, false, 1, 0); err == nil {
+		t.Fatal("fixed-rate server accepted a missing direction")
+	}
+	if err := validateServerRates(accel.ModeAdaptive, false, 1, 1); err == nil {
+		t.Fatal("unused server rate maxima were accepted")
+	}
+}
+
+func TestTLSCannotSilentlyIgnoreFixedRatePacing(t *testing.T) {
+	err := validateClientPacingTransport("tls", accel.ModeFixedRate)
+	if err == nil || !strings.Contains(err.Error(), "requires --transport=quic") {
+		t.Fatalf("unexpected TLS fixed-rate result: %v", err)
+	}
+	if err := validateClientPacingTransport("auto", accel.ModeFixedRate); err != nil {
+		t.Fatalf("auto fixed-rate rejected: %v", err)
+	}
+}
+
 func TestPercentile(t *testing.T) {
 	values := []float64{1, 2, 3, 4, 5}
 	if got := percentile(values, 0.5); got != 3 {
@@ -247,13 +329,17 @@ func TestPercentile(t *testing.T) {
 }
 
 func TestBenchmarkAccelerationMetadataIsDirectionExplicit(t *testing.T) {
-	reporter := benchmarkAccelerationReporter{mode: "brutal", tx: 1_875_000}
+	reporter := benchmarkAccelerationReporter{
+		mode:       "adaptive-balanced",
+		remoteMode: "fixed-rate",
+		remoteTx:   1_875_000,
+	}
 
 	upload := benchOutput{}
 	populateAccelerationMetadata(&upload, netbench.ModeUpload, reporter)
 	if upload.TunnelSenderEndpoint != "client" ||
-		upload.LocalTxAcceleration != "brutal" ||
-		upload.PayloadSenderAcceleration != "brutal" ||
+		upload.LocalTxAcceleration != "adaptive-balanced" ||
+		upload.PayloadSenderAcceleration != "adaptive-balanced" ||
 		upload.LocalNegotiatedTxBytesSec != reporter.tx ||
 		upload.PayloadSenderNegotiatedTxBytesSec != reporter.tx {
 		t.Fatalf("upload acceleration metadata = %+v", upload)
@@ -262,18 +348,46 @@ func TestBenchmarkAccelerationMetadataIsDirectionExplicit(t *testing.T) {
 	download := benchOutput{}
 	populateAccelerationMetadata(&download, netbench.ModeDownload, reporter)
 	if download.TunnelSenderEndpoint != "relay" ||
-		download.LocalTxAcceleration != "brutal" ||
+		download.LocalTxAcceleration != "adaptive-balanced" ||
 		download.LocalNegotiatedTxBytesSec != reporter.tx {
 		t.Fatalf("download local acceleration metadata = %+v", download)
 	}
-	if download.PayloadSenderAcceleration != "" ||
-		download.PayloadSenderNegotiatedTxBytesSec != 0 {
-		t.Fatalf("download falsely attributed client Tx controller to relay: %+v", download)
+	if download.PayloadSenderAcceleration != "fixed-rate" ||
+		download.PayloadSenderNegotiatedTxBytesSec != reporter.remoteTx {
+		t.Fatalf("download remote acceleration metadata = %+v", download)
+	}
+
+	reno := benchOutput{}
+	populateAccelerationMetadata(&reno, netbench.ModeUpload, benchmarkAccelerationReporter{mode: "reno"})
+	if reno.LocalTxAcceleration != "reno" || reno.PayloadSenderAcceleration != "reno" {
+		t.Fatalf("reno acceleration metadata = %+v", reno)
+	}
+
+	localOnly := benchOutput{}
+	populateAccelerationMetadata(
+		&localOnly,
+		netbench.ModeDownload,
+		benchmarkLocalReporter{mode: "adaptive-balanced"},
+	)
+	if localOnly.TunnelSenderEndpoint != "relay" ||
+		localOnly.PayloadSenderAcceleration != "" ||
+		localOnly.PayloadSenderNegotiatedTxBytesSec != 0 {
+		t.Fatalf("download attributed local-only telemetry to the relay: %+v", localOnly)
 	}
 
 	direct := benchOutput{}
 	populateAccelerationMetadata(&direct, netbench.ModeDownload, nil)
 	if direct.TunnelSenderEndpoint != "" || direct.LocalTxAcceleration != "" {
 		t.Fatalf("direct metadata unexpectedly names a tunnel controller: %+v", direct)
+	}
+
+	selected := benchOutput{Transport: "auto", SelectedTransport: "auto"}
+	populateAccelerationMetadata(
+		&selected,
+		netbench.ModeDownload,
+		benchmarkSelectedTransportReporter{selected: "tls"},
+	)
+	if selected.Transport != "auto" || selected.SelectedTransport != "tls" {
+		t.Fatalf("selected transport metadata = %+v", selected)
 	}
 }

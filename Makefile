@@ -8,26 +8,29 @@ LDFLAGS := -s -w \
 	-X github.com/cppla/autocar/internal/version.Commit=$(COMMIT) \
 	-X github.com/cppla/autocar/internal/version.Date=$(BUILD_DATE)
 
-.PHONY: all check fmt fmt-check fork-provenance-check mod-check notices notices-check vet test race build cross-build release docker integration-netem clean
+.PHONY: all check fmt fmt-check dependency-boundary-check mod-check notices notices-check vet test race build cross-build release docker integration-netem clean
 
 all: check build
 
-check: fmt-check fork-provenance-check mod-check notices-check vet test
+check: fmt-check dependency-boundary-check mod-check notices-check vet test
 
 fmt:
 	$(GO) fmt ./...
 
 fmt-check:
-	@test -z "$$(gofmt -l .)" || { gofmt -l .; echo "Go files need formatting" >&2; exit 1; }
+	@set -eu; \
+	go_bin="$$(command -v $(GO))" || { echo "Go tool not found: $(GO)" >&2; exit 1; }; \
+	gofmt_bin="$$(dirname "$$go_bin")/gofmt"; \
+	if [ ! -x "$$gofmt_bin" ]; then echo "gofmt not found next to $$go_bin" >&2; exit 1; fi; \
+	unformatted="$$("$$gofmt_bin" -l .)" || exit $$?; \
+	if [ -n "$$unformatted" ]; then printf '%s\n' "$$unformatted"; echo "Go files need formatting" >&2; exit 1; fi
 
-fork-provenance-check:
-	./scripts/check-fork-provenance.sh
+dependency-boundary-check:
+	./scripts/check-dependency-boundary.sh
 
 mod-check:
 	$(GO) mod tidy
-	cd third_party/hysteria-core && $(GO) mod tidy
-	cd third_party/quic-go && $(GO) mod tidy
-	git diff --exit-code -- go.mod go.sum third_party/hysteria-core/go.mod third_party/hysteria-core/go.sum third_party/quic-go/go.mod third_party/quic-go/go.sum
+	git diff --exit-code -- go.mod go.sum
 
 notices:
 	$(GO) run ./tools/notices
@@ -37,8 +40,6 @@ notices-check:
 
 vet:
 	$(GO) vet ./...
-	cd third_party/hysteria-core && $(GO) vet ./...
-	cd third_party/quic-go && $(GO) vet . ./http3 ./internal/ackhandler
 
 test:
 	$(GO) test -shuffle=on -count=1 ./...

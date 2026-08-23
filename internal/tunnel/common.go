@@ -1,5 +1,5 @@
 // Package tunnel provides the encrypted, authenticated transport between an
-// AutoCar ingress and exit. Each proxied TCP connection is one independent
+// AutoCAR ingress and exit. Each proxied TCP connection is one independent
 // QUIC stream. A TCP+TLS transport using the same protocol is available when
 // UDP is unavailable.
 package tunnel
@@ -98,9 +98,27 @@ func (s *serverCore) authenticate(token []byte) bool {
 	return subtle.ConstantTimeCompare(presented[:], s.tokenHash[:]) == 1
 }
 
-// handleStream owns stream and closes it before returning. deadline is used
-// only for the request / response handshake and is cleared before relay.
-func (s *serverCore) handleStream(ctx context.Context, stream deadlineConn, authenticated func()) {
+// streamRequestOptions let a transport attach negotiated metadata and a
+// sender wrapper after authentication. Handled is reserved for requests such
+// as a QUIC DATAGRAM association that don't create a TCP relay. A handler that
+// sets Handled owns the complete response and association lifetime before it
+// returns; handleStream then performs the final stream close.
+type streamRequestOptions struct {
+	Response protocol.Response
+	Relay    deadlineConn
+	Handled  bool
+}
+
+type streamRequestHandler func(context.Context, deadlineConn, protocol.Request) streamRequestOptions
+
+// handleStream owns stream and closes it before returning. The deadline is
+// used only for the request / response handshake and is cleared before relay.
+func (s *serverCore) handleStream(
+	ctx context.Context,
+	stream deadlineConn,
+	authenticated func(),
+	handler streamRequestHandler,
+) {
 	defer finishStream(stream)
 	if err := stream.SetDeadline(time.Now().Add(s.handshakeTimeout)); err != nil {
 		return
@@ -117,6 +135,23 @@ func (s *serverCore) handleStream(ctx context.Context, stream deadlineConn, auth
 	if authenticated != nil {
 		authenticated()
 	}
+	options := streamRequestOptions{Relay: stream}
+	if handler != nil {
+		options = handler(ctx, stream, req)
+		if options.Handled {
+			return
+		}
+		if options.Relay == nil {
+			options.Relay = stream
+		}
+	}
+	if req.Network == protocol.NetworkUDP {
+		_ = protocol.WriteResponse(stream, protocol.Response{
+			Status:  protocol.StatusBadRequest,
+			Message: "datagrams unavailable on this transport",
+		})
+		return
+	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, s.dialTimeout)
 	upstream, err := s.dialer.DialContext(dialCtx, req.Network.String(), req.Address)
@@ -128,13 +163,14 @@ func (s *serverCore) handleStream(ctx context.Context, stream deadlineConn, auth
 		return
 	}
 	defer upstream.Close()
-	if err := protocol.WriteResponse(stream, protocol.Response{Status: protocol.StatusOK}); err != nil {
+	options.Response.Status = protocol.StatusOK
+	if err := protocol.WriteResponse(stream, options.Response); err != nil {
 		return
 	}
 	if err := stream.SetDeadline(time.Time{}); err != nil {
 		return
 	}
-	relay(stream, upstream)
+	relay(options.Relay, upstream)
 }
 
 type deadlineConn interface {
@@ -231,6 +267,27 @@ func serverTLSConfig(input *tls.Config) (*tls.Config, error) {
 		return nil, errors.New("tunnel: server TLS config has no certificate")
 	}
 	cfg.NextProtos = []string{protocol.ALPN}
+	getConfigForClient := cfg.GetConfigForClient
+	if getConfigForClient != nil {
+		cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			selected, err := getConfigForClient(hello)
+			if err != nil || selected == nil {
+				return selected, err
+			}
+			// crypto/tls replaces the listener Config with the callback result
+			// before version and ALPN negotiation. Clone and reapply AutoCAR's
+			// policy so a dynamic certificate selector cannot weaken the hardened
+			// parent configuration. Clearing the nested callback also prevents a
+			// returned Config from reintroducing an unwrapped policy path.
+			selected = selected.Clone()
+			selected.GetConfigForClient = nil
+			if err := requireTLS13(selected); err != nil {
+				return nil, err
+			}
+			selected.NextProtos = []string{protocol.ALPN}
+			return selected, nil
+		}
+	}
 	return cfg, nil
 }
 
@@ -245,12 +302,24 @@ func requireTLS13(cfg *tls.Config) error {
 }
 
 func openProtocol(ctx context.Context, conn deadlineConn, token, network, address string, timeout time.Duration) error {
-	if err := context.Cause(ctx); err != nil {
-		return err
-	}
 	n, err := protocol.ParseNetwork(network)
 	if err != nil {
 		return err
+	}
+	_, err = openProtocolRequest(ctx, conn, protocol.Request{
+		Network: n,
+		Token:   []byte(token),
+		Address: address,
+	}, timeout)
+	return err
+}
+
+// openProtocolRequest performs the bounded request/response exchange and
+// returns the responder's negotiated metadata. The caller owns conn on every
+// return path.
+func openProtocolRequest(ctx context.Context, conn deadlineConn, request protocol.Request, timeout time.Duration) (protocol.Response, error) {
+	if err := context.Cause(ctx); err != nil {
+		return protocol.Response{}, err
 	}
 	if timeout > 0 {
 		deadline := time.Now().Add(timeout)
@@ -258,7 +327,7 @@ func openProtocol(ctx context.Context, conn deadlineConn, token, network, addres
 			deadline = contextDeadline
 		}
 		if err := conn.SetDeadline(deadline); err != nil {
-			return err
+			return protocol.Response{}, err
 		}
 	}
 	cancelDone := make(chan struct{})
@@ -277,21 +346,24 @@ func openProtocol(ctx context.Context, conn deadlineConn, token, network, addres
 		cancelWatcherStopped = true
 	}
 	defer stopCancelWatcher()
-	if err := protocol.WriteRequest(conn, protocol.Request{Network: n, Token: []byte(token), Address: address}); err != nil {
-		return preferContextError(ctx, err)
+	if err := protocol.WriteRequest(conn, request); err != nil {
+		return protocol.Response{}, preferContextError(ctx, err)
 	}
 	response, err := protocol.ReadResponse(conn)
 	if err != nil {
-		return preferContextError(ctx, err)
+		return protocol.Response{}, preferContextError(ctx, err)
 	}
 	if response.Status != protocol.StatusOK {
-		return &RemoteError{Status: response.Status, Message: response.Message}
+		return protocol.Response{}, &RemoteError{Status: response.Status, Message: response.Message}
 	}
 	stopCancelWatcher()
 	if err := context.Cause(ctx); err != nil {
-		return err
+		return protocol.Response{}, err
 	}
-	return conn.SetDeadline(time.Time{})
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return protocol.Response{}, err
+	}
+	return response, nil
 }
 
 func preferContextError(ctx context.Context, fallback error) error {

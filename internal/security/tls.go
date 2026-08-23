@@ -14,7 +14,7 @@ import (
 )
 
 // ALPN is the protocol identifier negotiated by every autocar TLS session.
-const ALPN = "autocar/1"
+const ALPN = "autocar/2"
 
 const maxTLSMaterialSize = 4 << 20
 

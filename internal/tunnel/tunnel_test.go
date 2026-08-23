@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,244 @@ import (
 )
 
 const testToken = "correct horse battery staple"
+
+func TestQUICStreamCloseUnblocksBlockedWrite(t *testing.T) {
+	stream := &blockingQUICStream{
+		writeStarted:  make(chan struct{}),
+		writeCanceled: make(chan struct{}),
+	}
+	paceCtx, paceCancel := context.WithCancel(context.Background())
+	conn := &quicStreamConn{stream: stream, paceCtx: paceCtx, paceCancel: paceCancel}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte("blocked"))
+		writeDone <- err
+	}()
+	select {
+	case <-stream.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Write did not start")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("blocked Write succeeded after aborting Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not unblock Write")
+	}
+}
+
+func TestQUICStreamPeerCancelUnblocksPacingWait(t *testing.T) {
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	stream := &blockingQUICStream{
+		ctx:           streamCtx,
+		writeStarted:  make(chan struct{}),
+		writeCanceled: make(chan struct{}),
+	}
+	pacer := &blockingQUICWritePacer{started: make(chan struct{})}
+	conn := newQUICStreamConnWithPacer(stream, nil, pacer)
+	defer conn.Close()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte("paced"))
+		writeDone <- err
+	}()
+	select {
+	case <-pacer.started:
+	case <-time.After(time.Second):
+		t.Fatal("pacing wait did not start")
+	}
+
+	// A peer STOP_SENDING cancels quic.Stream.Context without closing the
+	// connection. The application-layer pacer must inherit that cancellation.
+	cancelStream()
+	select {
+	case err := <-writeDone:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Write error = %v, want net.ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream cancellation did not unblock pacing wait")
+	}
+	select {
+	case <-stream.writeStarted:
+		t.Fatal("Write reached the QUIC stream after its context was canceled")
+	default:
+	}
+}
+
+func TestQUICStreamUpdatedDeadlineInterruptsPendingPacingWait(t *testing.T) {
+	stream := &recordingQUICStream{}
+	pacer := &blockingQUICWritePacer{started: make(chan struct{})}
+	conn := newQUICStreamConnWithPacer(stream, nil, pacer)
+	defer conn.Close()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte("paced"))
+		writeDone <- err
+	}()
+	select {
+	case <-pacer.started:
+	case <-time.After(time.Second):
+		t.Fatal("pacing wait did not start")
+	}
+	if err := conn.SetWriteDeadline(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-writeDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Write error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("updated write deadline did not interrupt pacing wait")
+	}
+	if len(stream.writes) != 0 {
+		t.Fatalf("expired paced write reached stream: %v", stream.writes)
+	}
+}
+
+func TestQUICStreamDeadlineChangeAfterAdmissionDoesNotChargeTwice(t *testing.T) {
+	stream := &recordingQUICStream{}
+	pacer := &deadlineChangingWritePacer{}
+	conn := newQUICStreamConnWithPacer(stream, nil, pacer)
+	pacer.change = func() {
+		if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Errorf("SetWriteDeadline: %v", err)
+		}
+	}
+
+	written, err := conn.Write([]byte("admitted"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written != len("admitted") {
+		t.Fatalf("Write = %d bytes, want %d", written, len("admitted"))
+	}
+	if got := pacer.calls.Load(); got != 1 {
+		t.Fatalf("pacer admission calls = %d, want 1", got)
+	}
+}
+
+func TestQUICStreamPhysicallyChunksPacedWrites(t *testing.T) {
+	stream := &recordingQUICStream{}
+	pacer := &recordingQUICWritePacer{maxChunk: 10}
+	conn := newQUICStreamConnWithPacer(stream, nil, pacer)
+
+	written, err := conn.Write(make([]byte, 25))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written != 25 {
+		t.Fatalf("Write = %d bytes, want 25", written)
+	}
+	want := []int{10, 10, 5}
+	if !slices.Equal(pacer.waits, want) {
+		t.Fatalf("pacer chunks = %v, want %v", pacer.waits, want)
+	}
+	if !slices.Equal(stream.writes, want) {
+		t.Fatalf("physical stream writes = %v, want %v", stream.writes, want)
+	}
+}
+
+func TestNewQUICStreamConnKeepsNilPacerNil(t *testing.T) {
+	conn := newQUICStreamConn(&recordingQUICStream{}, nil, nil)
+	defer conn.Close()
+	if conn.pacer != nil {
+		t.Fatalf("nil *connectionPacer became non-nil interface %T", conn.pacer)
+	}
+}
+
+type blockingQUICStream struct {
+	ctx           context.Context
+	writeStarted  chan struct{}
+	writeCanceled chan struct{}
+	startOnce     sync.Once
+	cancelOnce    sync.Once
+}
+
+func (s *blockingQUICStream) Read([]byte) (int, error) { return 0, io.EOF }
+func (s *blockingQUICStream) Context() context.Context {
+	if s.ctx == nil {
+		return context.Background()
+	}
+	return s.ctx
+}
+func (s *blockingQUICStream) Write([]byte) (int, error) {
+	s.startOnce.Do(func() { close(s.writeStarted) })
+	<-s.writeCanceled
+	return 0, net.ErrClosed
+}
+func (s *blockingQUICStream) Close() error                     { return nil }
+func (s *blockingQUICStream) SetDeadline(time.Time) error      { return nil }
+func (s *blockingQUICStream) SetReadDeadline(time.Time) error  { return nil }
+func (s *blockingQUICStream) SetWriteDeadline(time.Time) error { return nil }
+func (s *blockingQUICStream) CancelRead(quic.StreamErrorCode)  {}
+func (s *blockingQUICStream) CancelWrite(quic.StreamErrorCode) {
+	s.cancelOnce.Do(func() { close(s.writeCanceled) })
+}
+
+type blockingQUICWritePacer struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingQUICWritePacer) wait(ctx context.Context, _ int, _ *quic.Conn) error {
+	p.once.Do(func() { close(p.started) })
+	<-ctx.Done()
+	return context.Cause(ctx)
+}
+
+func (p *blockingQUICWritePacer) maxChunkBytes() int { return 64 << 10 }
+
+type recordingQUICStream struct {
+	writes []int
+}
+
+func (s *recordingQUICStream) Read([]byte) (int, error) { return 0, io.EOF }
+func (s *recordingQUICStream) Write(p []byte) (int, error) {
+	s.writes = append(s.writes, len(p))
+	return len(p), nil
+}
+func (s *recordingQUICStream) Close() error                     { return nil }
+func (s *recordingQUICStream) Context() context.Context         { return context.Background() }
+func (s *recordingQUICStream) SetDeadline(time.Time) error      { return nil }
+func (s *recordingQUICStream) SetReadDeadline(time.Time) error  { return nil }
+func (s *recordingQUICStream) SetWriteDeadline(time.Time) error { return nil }
+func (s *recordingQUICStream) CancelRead(quic.StreamErrorCode)  {}
+func (s *recordingQUICStream) CancelWrite(quic.StreamErrorCode) {}
+
+type recordingQUICWritePacer struct {
+	maxChunk int
+	waits    []int
+}
+
+func (p *recordingQUICWritePacer) wait(_ context.Context, bytes int, _ *quic.Conn) error {
+	p.waits = append(p.waits, bytes)
+	return nil
+}
+
+func (p *recordingQUICWritePacer) maxChunkBytes() int { return p.maxChunk }
+
+type deadlineChangingWritePacer struct {
+	calls  atomic.Int64
+	change func()
+}
+
+func (p *deadlineChangingWritePacer) wait(context.Context, int, *quic.Conn) error {
+	if p.calls.Add(1) == 1 {
+		p.change()
+	}
+	return nil
+}
+
+func (p *deadlineChangingWritePacer) maxChunkBytes() int { return 64 << 10 }
 
 func TestQUICConcurrentStreamsAndReconnect(t *testing.T) {
 	targetAddress, closeTarget := startHalfCloseTarget(t)
@@ -90,6 +329,80 @@ func TestQUICConcurrentStreamsAndReconnect(t *testing.T) {
 	client.mu.Unlock()
 	if newConnection == nil || newConnection == oldConnection {
 		t.Fatal("client did not replace the closed QUIC connection")
+	}
+}
+
+func TestSharedQUICDialSurvivesFirstCallerCancellation(t *testing.T) {
+	_, clientTLS := testTLSConfigs(t)
+	client, err := NewClient(ClientConfig{
+		ServerAddress:   "127.0.0.1:4433",
+		Token:           testToken,
+		TLSConfig:       clientTLS,
+		QUICDialTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	dialStarted := make(chan struct{})
+	dialRelease := make(chan struct{})
+	dialReturned := make(chan struct{})
+	dialError := errors.New("controlled QUIC dial failure")
+	var calls atomic.Int64
+	client.dialQUIC = func(
+		ctx context.Context,
+		_ string,
+		_ *tls.Config,
+		_ *quic.Config,
+	) (*quic.Conn, error) {
+		calls.Add(1)
+		close(dialStarted)
+		defer close(dialReturned)
+		select {
+		case <-dialRelease:
+			return nil, dialError
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		}
+	}
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := client.connection(firstCtx)
+		firstResult <- err
+	}()
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("shared QUIC dial did not start")
+	}
+
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), time.Second)
+	defer cancelSecond()
+	secondResult := make(chan error, 1)
+	go func() {
+		_, err := client.connection(secondCtx)
+		secondResult <- err
+	}()
+
+	cancelFirst()
+	if err := <-firstResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-dialReturned:
+		t.Fatal("first caller cancellation terminated the shared QUIC dial")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(dialRelease)
+	if err := <-secondResult; !errors.Is(err, dialError) {
+		t.Fatalf("second caller error = %v, want controlled dial failure", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("QUIC dial calls = %d, want one shared attempt", got)
 	}
 }
 
@@ -465,13 +778,13 @@ func TestUntrustedServerCertificateIsRejected(t *testing.T) {
 	}
 }
 
-func TestHardenedQUICConfigDisablesReplayableAndUnusedFeatures(t *testing.T) {
+func TestHardenedQUICConfigDisablesReplayableFeaturesAndEnablesDatagrams(t *testing.T) {
 	client := hardenedQUICClientConfig(&quic.Config{Allow0RTT: true, EnableDatagrams: true})
-	if client.Allow0RTT || client.EnableDatagrams || client.MaxIncomingStreams != -1 || client.MaxIncomingUniStreams != -1 {
+	if client.Allow0RTT || !client.EnableDatagrams || client.MaxIncomingStreams != -1 || client.MaxIncomingUniStreams != -1 {
 		t.Fatalf("unsafe client QUIC config: %#v", client)
 	}
 	server := hardenedQUICServerConfig(&quic.Config{Allow0RTT: true, EnableDatagrams: true, MaxIncomingStreams: 9999}, 8)
-	if server.Allow0RTT || server.EnableDatagrams || server.MaxIncomingStreams != 8 || server.MaxIncomingUniStreams != -1 {
+	if server.Allow0RTT || !server.EnableDatagrams || server.MaxIncomingStreams != 8 || server.MaxIncomingUniStreams != -1 {
 		t.Fatalf("unsafe server QUIC config: %#v", server)
 	}
 	if server.KeepAlivePeriod != 0 {
@@ -883,13 +1196,18 @@ func startQUICStreamBlackhole(t *testing.T, tlsConfig *tls.Config) string {
 			if err != nil {
 				return
 			}
-			if _, err := protocol.ReadRequest(stream); err != nil {
+			request, err := protocol.ReadRequest(stream)
+			if err != nil {
 				stream.CancelRead(streamCanceled)
 				stream.CancelWrite(streamCanceled)
 				return
 			}
 			if streamNumber == 0 {
-				if err := protocol.WriteResponse(stream, protocol.Response{Status: protocol.StatusOK}); err != nil {
+				if err := protocol.WriteResponse(stream, protocol.Response{
+					Status: protocol.StatusOK,
+					TxMode: request.TxMode, TxProfile: request.TxProfile,
+					RxMode: protocol.PacingAdaptive, RxProfile: protocol.ProfileBalanced,
+				}); err != nil {
 					return
 				}
 				_ = stream.Close()

@@ -57,6 +57,7 @@ func ensureSafeBenchmarkListener(address string, allowPublic bool) error {
 type benchOutput struct {
 	Mode                              string    `json:"mode"`
 	Transport                         string    `json:"transport"`
+	SelectedTransport                 string    `json:"selected_transport"`
 	TunnelSenderEndpoint              string    `json:"tunnel_sender_endpoint,omitempty"`
 	LocalTxAcceleration               string    `json:"local_tx_acceleration,omitempty"`
 	LocalNegotiatedTxBytesSec         uint64    `json:"local_negotiated_tx_bytes_per_second,omitempty"`
@@ -66,13 +67,26 @@ type benchOutput struct {
 	Bytes                             int64     `json:"bytes_per_iteration"`
 	Iterations                        int       `json:"iterations"`
 	MedianMbps                        float64   `json:"median_mbps"`
+	P05Mbps                           float64   `json:"p05_mbps"`
 	P95Mbps                           float64   `json:"p95_mbps"`
+	MedianDurationMS                  float64   `json:"median_duration_ms"`
+	P95DurationMS                     float64   `json:"p95_duration_ms"`
 	Results                           []float64 `json:"results_mbps"`
+	DurationsMS                       []float64 `json:"durations_ms"`
 }
 
 type accelerationReporter interface {
 	AccelerationMode() string
 	NegotiatedTx() uint64
+}
+
+type remoteAccelerationReporter interface {
+	RemoteTxAcceleration() string
+	RemoteNegotiatedTx() uint64
+}
+
+type selectedTransportReporter interface {
+	SelectedTransport() string
 }
 
 func runBenchClient(parent context.Context, args []string) error {
@@ -123,6 +137,9 @@ func runBenchClient(parent context.Context, args []string) error {
 	}
 
 	results := make([]float64, 0, *iterations)
+	durations := make([]float64, 0, *iterations)
+	var measuredMetadata benchmarkAccelerationMetadata
+	metadataObserved := false
 	for i := 0; i < *warmup+*iterations; i++ {
 		ctx, cancel := context.WithTimeout(parent, *timeout)
 		result, err := netbench.Run(ctx, dialer, *target, mode, *size)
@@ -132,47 +149,111 @@ func runBenchClient(parent context.Context, args []string) error {
 		}
 		if i >= *warmup {
 			results = append(results, result.Mbps())
+			durations = append(durations, float64(result.Duration)/float64(time.Millisecond))
+			currentMetadata, currentObserved := readAccelerationMetadata(mode, dialer)
+			if len(results) == 1 {
+				measuredMetadata = currentMetadata
+				metadataObserved = currentObserved
+			} else if currentObserved != metadataObserved || currentMetadata != measuredMetadata {
+				return errors.New("benchmark selected transport or sender metadata changed between measured iterations; use an explicit transport or run each path separately")
+			}
 		}
 	}
 	sorted := append([]float64(nil), results...)
 	sort.Float64s(sorted)
+	sortedDurations := append([]float64(nil), durations...)
+	sort.Float64s(sortedDurations)
 	median := percentile(sorted, 0.5)
+	p05 := percentile(sorted, 0.05)
 	p95 := percentile(sorted, 0.95)
 	output := benchOutput{
-		Mode:       strings.ToLower(*modeText),
-		Transport:  transportName,
-		Target:     *target,
-		Bytes:      *size,
-		Iterations: *iterations,
-		MedianMbps: median,
-		P95Mbps:    p95,
-		Results:    results,
+		Mode:              strings.ToLower(*modeText),
+		Transport:         transportName,
+		SelectedTransport: transportName,
+		Target:            *target,
+		Bytes:             *size,
+		Iterations:        *iterations,
+		MedianMbps:        median,
+		P05Mbps:           p05,
+		P95Mbps:           p95,
+		MedianDurationMS:  percentile(sortedDurations, 0.5),
+		P95DurationMS:     percentile(sortedDurations, 0.95),
+		Results:           results,
+		DurationsMS:       durations,
 	}
-	populateAccelerationMetadata(&output, mode, dialer)
+	if metadataObserved {
+		measuredMetadata.apply(&output)
+	}
 	if *jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(output)
 	}
-	fmt.Printf("%s via %s: median %.2f Mbit/s, p95 %.2f Mbit/s (%d x %d bytes)\n",
-		output.Mode, output.Transport, output.MedianMbps, output.P95Mbps, output.Iterations, output.Bytes)
+	policy := ""
+	if output.SelectedTransport != output.Transport {
+		policy = ", policy " + output.Transport
+	}
+	fmt.Printf("%s via %s%s: median %.2f Mbit/s, p05 %.2f Mbit/s, p95 %.1f ms (%d x %d bytes)\n",
+		output.Mode, output.SelectedTransport, policy, output.MedianMbps, output.P05Mbps, output.P95DurationMS, output.Iterations, output.Bytes)
 	return nil
 }
 
-func populateAccelerationMetadata(output *benchOutput, mode byte, dialer transport.Dialer) {
-	reporter, ok := dialer.(accelerationReporter)
-	if !ok {
-		return
+type benchmarkAccelerationMetadata struct {
+	selectedTransport                 string
+	tunnelSenderEndpoint              string
+	localTxAcceleration               string
+	localNegotiatedTxBytesSec         uint64
+	payloadSenderAcceleration         string
+	payloadSenderNegotiatedTxBytesSec uint64
+}
+
+func readAccelerationMetadata(mode byte, dialer transport.Dialer) (benchmarkAccelerationMetadata, bool) {
+	local, hasLocal := dialer.(accelerationReporter)
+	remote, hasRemote := dialer.(remoteAccelerationReporter)
+	selected, hasSelected := dialer.(selectedTransportReporter)
+	if !hasLocal && !hasRemote && !hasSelected {
+		return benchmarkAccelerationMetadata{}, false
 	}
-	output.LocalTxAcceleration = reporter.AccelerationMode()
-	output.LocalNegotiatedTxBytesSec = reporter.NegotiatedTx()
+	metadata := benchmarkAccelerationMetadata{}
+	if hasSelected {
+		metadata.selectedTransport = selected.SelectedTransport()
+	}
+	if hasLocal {
+		metadata.localTxAcceleration = local.AccelerationMode()
+		metadata.localNegotiatedTxBytesSec = local.NegotiatedTx()
+	}
 	if mode == netbench.ModeUpload {
-		output.TunnelSenderEndpoint = "client"
-		output.PayloadSenderAcceleration = output.LocalTxAcceleration
-		output.PayloadSenderNegotiatedTxBytesSec = output.LocalNegotiatedTxBytesSec
-		return
+		metadata.tunnelSenderEndpoint = "client"
+		if hasLocal {
+			metadata.payloadSenderAcceleration = metadata.localTxAcceleration
+			metadata.payloadSenderNegotiatedTxBytesSec = metadata.localNegotiatedTxBytesSec
+		}
+		return metadata, true
 	}
-	output.TunnelSenderEndpoint = "relay"
+	metadata.tunnelSenderEndpoint = "relay"
+	if hasRemote {
+		metadata.payloadSenderAcceleration = remote.RemoteTxAcceleration()
+		metadata.payloadSenderNegotiatedTxBytesSec = remote.RemoteNegotiatedTx()
+	}
+	return metadata, true
+}
+
+func (m benchmarkAccelerationMetadata) apply(output *benchOutput) {
+	if m.selectedTransport != "" {
+		output.SelectedTransport = m.selectedTransport
+	}
+	output.TunnelSenderEndpoint = m.tunnelSenderEndpoint
+	output.LocalTxAcceleration = m.localTxAcceleration
+	output.LocalNegotiatedTxBytesSec = m.localNegotiatedTxBytesSec
+	output.PayloadSenderAcceleration = m.payloadSenderAcceleration
+	output.PayloadSenderNegotiatedTxBytesSec = m.payloadSenderNegotiatedTxBytesSec
+}
+
+func populateAccelerationMetadata(output *benchOutput, mode byte, dialer transport.Dialer) {
+	metadata, ok := readAccelerationMetadata(mode, dialer)
+	if ok {
+		metadata.apply(output)
+	}
 }
 
 func percentile(sorted []float64, fraction float64) float64 {

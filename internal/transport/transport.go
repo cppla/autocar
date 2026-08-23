@@ -5,8 +5,14 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net"
 )
+
+// ErrPacketQueueFull means a best-effort datagram was not accepted because a
+// bounded local transport queue is full. Datagram frontends may drop that
+// packet and keep the association alive; other send errors are terminal.
+var ErrPacketQueueFull = errors.New("transport: packet send queue is full")
 
 // Dialer creates remote TCP connections through an authenticated tunnel.
 type Dialer interface {

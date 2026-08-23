@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cppla/autocar/internal/accel"
 	"github.com/cppla/autocar/internal/protocol"
 	"github.com/cppla/autocar/internal/transport"
 	quic "github.com/quic-go/quic-go"
@@ -36,6 +37,37 @@ type QUICServerConfig struct {
 	// MaxConnections bounds accepted QUIC connections, including authenticated
 	// idle sessions. Zero uses a conservative default.
 	MaxConnections int
+	// MaxClientConnections bounds concurrent QUIC sessions per source IPv4 or
+	// IPv6 /64. Zero uses a conservative default no larger than MaxConnections.
+	MaxClientConnections int
+	// Pacing controls the relay-to-client application sender. MaxTx is the
+	// relay sender's fixed rate or negotiation ceiling; MaxRx caps an accepted
+	// client-to-relay fixed rate. Rates are bytes per second.
+	Pacing           PacingConfig
+	MaxTx            uint64
+	MaxRx            uint64
+	AllowClientRates bool
+	// UDPResolver resolves datagram destinations. When nil, a Dialer that
+	// implements UDPResolver is preferred before the system resolver is used.
+	UDPResolver UDPResolver
+	// MaxUDPSessions bounds live UDP associations across all QUIC connections.
+	MaxUDPSessions int
+	// MaxClientUDPSessions bounds live UDP associations per source IPv4 or
+	// IPv6 /64.
+	MaxClientUDPSessions int
+	// MaxUDPDestinations bounds the numeric destinations authorized by one UDP
+	// association.
+	MaxUDPDestinations int
+	// UDPReceiveQueue bounds complete client datagrams awaiting one session's
+	// UDP socket worker and connection-wide outbound datagrams awaiting QUIC.
+	UDPReceiveQueue int
+	// UDPReassemblyTTL is the fixed lifetime of an incomplete fragmented UDP
+	// message. Duplicate fragments do not extend it.
+	UDPReassemblyTTL time.Duration
+	// MaxUDPReassemblyMessages and MaxUDPReassemblyBytes bound incomplete
+	// messages on each QUIC connection.
+	MaxUDPReassemblyMessages int
+	MaxUDPReassemblyBytes    int
 }
 
 // QUICServer accepts long-lived QUIC connections and relays each bidirectional
@@ -57,6 +89,12 @@ type QUICServer struct {
 	connMu    sync.Mutex
 	conns     map[*quic.Conn]struct{}
 	connSem   chan struct{}
+	clients   *sourceConnectionLimiter
+	udp       *serverUDPManager
+	pacing    PacingConfig
+	maxTx     uint64
+	maxRx     uint64
+	allowRate bool
 }
 
 // ListenQUIC binds the UDP listener. Call Serve to accept traffic.
@@ -72,12 +110,33 @@ func ListenQUIC(config QUICServerConfig) (*QUICServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	udp, err := newServerUDPManager(config, core.dialer, core.dialTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := newServerPacingNegotiator(config.Pacing, config.MaxTx, config.MaxRx, config.AllowClientRates); err != nil {
+		return nil, err
+	}
 	if config.MaxConnections < 0 {
 		return nil, errors.New("tunnel: maximum QUIC connections cannot be negative")
 	}
 	maxConnections := config.MaxConnections
 	if maxConnections == 0 {
 		maxConnections = defaultMaxConnections
+	}
+	maxClientConnections := config.MaxClientConnections
+	if maxClientConnections < 0 {
+		return nil, errors.New("tunnel: maximum QUIC client connections cannot be negative")
+	}
+	if maxClientConnections == 0 {
+		maxClientConnections = min(defaultMaxClientConnections, maxConnections)
+	}
+	if maxClientConnections > maxConnections {
+		return nil, fmt.Errorf(
+			"tunnel: maximum QUIC client connections (%d) exceeds maximum connections (%d)",
+			maxClientConnections,
+			maxConnections,
+		)
 	}
 	quicConfig := hardenedQUICServerConfig(config.QUICConfig, cap(core.sem))
 	listener, err := quic.ListenAddr(config.Address, tlsConfig, quicConfig)
@@ -86,12 +145,18 @@ func ListenQUIC(config QUICServerConfig) (*QUICServer, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &QUICServer{
-		listener: listener,
-		core:     core,
-		ctx:      ctx,
-		cancel:   cancel,
-		conns:    make(map[*quic.Conn]struct{}),
-		connSem:  make(chan struct{}, maxConnections),
+		listener:  listener,
+		core:      core,
+		ctx:       ctx,
+		cancel:    cancel,
+		conns:     make(map[*quic.Conn]struct{}),
+		connSem:   make(chan struct{}, maxConnections),
+		clients:   newSourceConnectionLimiter(maxClientConnections),
+		udp:       udp,
+		pacing:    config.Pacing,
+		maxTx:     config.MaxTx,
+		maxRx:     config.MaxRx,
+		allowRate: config.AllowClientRates,
 	}, nil
 }
 
@@ -103,7 +168,7 @@ func hardenedQUICServerConfig(input *quic.Config, maxStreams int) *quic.Config {
 		cfg = input.Clone()
 	}
 	cfg.Allow0RTT = false
-	cfg.EnableDatagrams = false
+	cfg.EnableDatagrams = true
 	cfg.MaxIncomingUniStreams = -1
 	if cfg.MaxIncomingStreams <= 0 || cfg.MaxIncomingStreams > int64(maxStreams) {
 		cfg.MaxIncomingStreams = int64(maxStreams)
@@ -179,23 +244,42 @@ func (s *QUICServer) Serve(ctx context.Context) error {
 			_ = conn.CloseWithError(connectionRejected, "connection limit reached")
 			continue
 		}
+		sourceKey := tlsSourceKey(conn.RemoteAddr())
+		if !s.clients.acquire(sourceKey) {
+			<-s.connSem
+			s.lifecycle.Unlock()
+			_ = conn.CloseWithError(connectionRejected, "per-source connection limit reached")
+			continue
+		}
 		s.connMu.Lock()
 		s.conns[conn] = struct{}{}
 		s.connMu.Unlock()
 		s.wg.Add(1)
 		s.lifecycle.Unlock()
-		go s.serveConnection(conn)
+		go s.serveConnection(conn, sourceKey)
 	}
 }
 
-func (s *QUICServer) serveConnection(conn *quic.Conn) {
+func (s *QUICServer) serveConnection(conn *quic.Conn, sourceKey string) {
 	defer s.wg.Done()
 	defer func() { <-s.connSem }()
+	defer s.clients.release(sourceKey)
 	defer func() {
 		s.connMu.Lock()
 		delete(s.conns, conn)
 		s.connMu.Unlock()
 	}()
+	pacing, err := newServerPacingNegotiator(s.pacing, s.maxTx, s.maxRx, s.allowRate)
+	if err != nil {
+		_ = conn.CloseWithError(connectionRejected, "pacing unavailable")
+		return
+	}
+	datagrams, err := newServerDatagramDispatcher(conn, s.udp, sourceKey, pacing.pacer)
+	if err != nil {
+		_ = conn.CloseWithError(connectionRejected, "datagram dispatcher unavailable")
+		return
+	}
+	defer datagrams.Close()
 
 	// QUIC authentication is carried by the first valid stream request rather
 	// than the TLS handshake. Bound the pre-authentication lifetime so a remote
@@ -225,7 +309,7 @@ func (s *QUICServer) serveConnection(conn *quic.Conn) {
 		if err != nil {
 			return
 		}
-		wrapped := newQUICStreamConn(stream, conn.LocalAddr(), conn.RemoteAddr())
+		wrapped := newQUICStreamConn(stream, conn, pacing.pacer)
 		s.lifecycle.Lock()
 		if s.closing {
 			s.lifecycle.Unlock()
@@ -247,7 +331,20 @@ func (s *QUICServer) serveConnection(conn *quic.Conn) {
 			// A QUIC stream has an independent lifecycle. In particular, the
 			// peer's STOP_SENDING cancels stream.Context without killing sibling
 			// streams, allowing an abandoned CONNECT to cancel DNS/dial promptly.
-			s.core.handleStream(stream.Context(), wrapped, markAuthenticated)
+			handler := func(ctx context.Context, requestStream deadlineConn, request protocol.Request) streamRequestOptions {
+				response, negotiateErr := pacing.negotiate(request)
+				if negotiateErr != nil {
+					_ = protocol.WriteResponse(requestStream, protocol.Response{
+						Status: protocol.StatusBadRequest, Message: "invalid pacing metadata",
+					})
+					return streamRequestOptions{Handled: true}
+				}
+				if request.Network == protocol.NetworkUDP {
+					return datagrams.handleRequest(ctx, requestStream, request, response)
+				}
+				return streamRequestOptions{Response: response, Relay: requestStream}
+			}
+			s.core.handleStream(stream.Context(), wrapped, markAuthenticated, handler)
 		}()
 	}
 }
@@ -296,6 +393,22 @@ type ClientConfig struct {
 	// FallbackCooldown controls how long a failed QUIC path is bypassed before
 	// one caller probes it again. It defaults to 30 seconds.
 	FallbackCooldown time.Duration
+	// Pacing controls the client-to-relay application sender. MaxTx is the
+	// requested fixed sender rate and MaxRx is the requested relay sender rate,
+	// both in bytes per second.
+	Pacing PacingConfig
+	MaxTx  uint64
+	MaxRx  uint64
+	// MaxUDPSessions bounds live UDP associations on the shared QUIC
+	// connection. UDPReceiveQueue bounds complete responses awaiting each
+	// PacketConn consumer and connection-wide outbound datagrams awaiting QUIC.
+	MaxUDPSessions  int
+	UDPReceiveQueue int
+	// UDPReassemblyTTL, MaxUDPReassemblyMessages and
+	// MaxUDPReassemblyBytes bound incomplete server responses.
+	UDPReassemblyTTL         time.Duration
+	MaxUDPReassemblyMessages int
+	MaxUDPReassemblyBytes    int
 }
 
 // Client is a concurrent transport.Dialer backed by one lazily established,
@@ -305,23 +418,39 @@ type Client struct {
 	token            string
 	tlsConfig        *tls.Config
 	quicConfig       *quic.Config
+	dialQUIC         func(context.Context, string, *tls.Config, *quic.Config) (*quic.Conn, error)
 	handshakeTimeout time.Duration
 	dialTimeout      time.Duration
 	primaryTimeout   time.Duration
 	fallback         *TLSClient
 	fallbackCooldown time.Duration
+	pacing           PacingConfig
+	maxTx            uint64
+	maxRx            uint64
+	txMode           protocol.PacingMode
+	txProfile        protocol.PacingProfile
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	mu      sync.Mutex
 	conn    *quic.Conn
+	pacer   *connectionPacer
 	dialing *quicDialAttempt
 	closed  bool
 	// primaryFailedAt and primaryProbing implement a small circuit breaker.
 	// They are guarded by mu together with the QUIC connection state.
-	primaryFailedAt time.Time
-	primaryProbing  bool
+	primaryFailedAt   time.Time
+	primaryProbing    bool
+	localMode         string
+	localRate         uint64
+	remoteMode        string
+	remoteRate        uint64
+	selectedTransport string
+
+	udpConfig      clientUDPConfig
+	udpMu          sync.Mutex
+	udpDispatchers map[*quic.Conn]*clientDatagramDispatcher
 }
 
 type quicDialAttempt struct {
@@ -342,6 +471,21 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if config.HandshakeTimeout < 0 || config.QUICDialTimeout < 0 || config.TLSDialTimeout < 0 || config.PrimaryAttemptTimeout < 0 || config.FallbackCooldown < 0 {
 		return nil, errors.New("tunnel: timeouts cannot be negative")
 	}
+	if config.MaxTx > protocol.MaxRate || config.MaxRx > protocol.MaxRate {
+		return nil, errors.New("tunnel: pacing rate exceeds protocol maximum")
+	}
+	mode := config.Pacing.Mode
+	if mode == "" {
+		mode = accel.ModeAdaptive
+	}
+	if mode != accel.ModeFixedRate && config.MaxTx != 0 {
+		return nil, errors.New("tunnel: MaxTx requires fixed-rate client pacing")
+	}
+	basePacer, err := newConnectionPacer(config.Pacing, config.MaxTx)
+	if err != nil {
+		return nil, err
+	}
+	txMode, txProfile, _ := basePacer.metadata()
 	tlsConfig, err := clientTLSConfig(config.TLSConfig, config.ServerAddress)
 	if err != nil {
 		return nil, err
@@ -358,17 +502,30 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if primaryTimeout == 0 {
 		primaryTimeout = 5 * time.Second
 	}
+	udpConfig, err := normalizeClientUDPConfig(config)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		address:          config.ServerAddress,
 		token:            config.Token,
 		tlsConfig:        tlsConfig,
 		quicConfig:       hardenedQUICClientConfig(config.QUICConfig),
+		dialQUIC:         quic.DialAddr,
 		handshakeTimeout: handshakeTimeout,
 		dialTimeout:      dialTimeout,
 		primaryTimeout:   primaryTimeout,
+		pacing:           config.Pacing,
+		maxTx:            config.MaxTx,
+		maxRx:            config.MaxRx,
+		txMode:           txMode,
+		txProfile:        txProfile,
 		ctx:              ctx,
 		cancel:           cancel,
+		udpConfig:        udpConfig,
+		udpDispatchers:   make(map[*quic.Conn]*clientDatagramDispatcher),
+		localMode:        basePacer.label(),
 	}
 	if config.FallbackAddress != "" {
 		fallbackCooldown := config.FallbackCooldown
@@ -405,7 +562,7 @@ func hardenedQUICClientConfig(input *quic.Config) *quic.Config {
 	// DialAddr (not DialAddrEarly) and this explicit setting guarantee that
 	// CONNECT requests are never sent as replayable 0-RTT data.
 	cfg.Allow0RTT = false
-	cfg.EnableDatagrams = false
+	cfg.EnableDatagrams = true
 	cfg.MaxIncomingStreams = -1
 	cfg.MaxIncomingUniStreams = -1
 	if cfg.HandshakeIdleTimeout == 0 {
@@ -443,12 +600,21 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	if err != nil {
 		return nil, err
 	}
+	request := protocol.Request{
+		Network: n, Token: []byte(c.token), Address: address,
+		MaxTx: c.maxTx, MaxRx: c.maxRx,
+		TxMode: c.txMode, TxProfile: c.txProfile,
+	}
 	// Validate the complete request before any network activity.
-	if err := protocol.WriteRequest(io.Discard, protocol.Request{Network: n, Token: []byte(c.token), Address: address}); err != nil {
+	if err := protocol.WriteRequest(io.Discard, request); err != nil {
 		return nil, err
 	}
 	if c.fallback != nil && !c.shouldTryPrimary(time.Now()) {
-		return c.fallback.DialContext(ctx, network, address)
+		fallbackConn, fallbackErr := c.fallback.DialContext(ctx, network, address)
+		if fallbackErr == nil {
+			c.recordFallback()
+		}
+		return fallbackConn, fallbackErr
 	}
 
 	// In auto mode the primary budget covers the whole QUIC attempt, not just
@@ -499,9 +665,15 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 			c.invalidate(conn)
 			continue
 		}
-		wrapped := newQUICStreamConn(stream, conn.LocalAddr(), conn.RemoteAddr())
-		err = openProtocol(primaryCtx, wrapped, c.token, network, address, c.handshakeTimeout)
+		wrapped := newQUICStreamConn(stream, conn, c.connectionPacer(conn))
+		var response protocol.Response
+		response, err = openProtocolRequest(primaryCtx, wrapped, request, c.handshakeTimeout)
 		if err == nil {
+			if err = c.acceptPacingResponse(conn, response, 0, false); err != nil {
+				_ = wrapped.Close()
+				primaryErr = fmt.Errorf("tunnel: invalid pacing response: %w", err)
+				break
+			}
 			c.primarySucceeded()
 			return wrapped, nil
 		}
@@ -539,6 +711,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		c.primaryFailed(time.Now())
 		fallbackConn, fallbackErr := c.fallback.DialContext(ctx, network, address)
 		if fallbackErr == nil {
+			c.recordFallback()
 			return fallbackConn, nil
 		}
 		return nil, errors.Join(primaryErr, fmt.Errorf("tunnel: TLS fallback: %w", fallbackErr))
@@ -589,6 +762,118 @@ func (c *Client) primaryProbeFinished() {
 	c.mu.Unlock()
 }
 
+func (c *Client) acceptPacingResponse(conn *quic.Conn, response protocol.Response, sessionID uint32, assignedSession bool) error {
+	if err := c.validatePacingResponse(response, sessionID, assignedSession); err != nil {
+		return err
+	}
+	pacer := c.connectionPacer(conn)
+	if pacer == nil {
+		return net.ErrClosed
+	}
+	if response.MaxTx != 0 {
+		if err := pacer.setFixedRate(response.MaxTx); err != nil {
+			return err
+		}
+	}
+	localMode, localProfile, _ := pacer.metadata()
+	if localMode != response.TxMode || localProfile != response.TxProfile {
+		return errors.New("response changed the client sender identity")
+	}
+	remoteMode := pacingModeName(response.RxMode, response.RxProfile)
+	if remoteMode == "" {
+		return errors.New("response contains an unknown relay sender")
+	}
+	c.mu.Lock()
+	c.localMode = pacingModeName(localMode, localProfile)
+	c.localRate = response.MaxTx
+	c.remoteMode = remoteMode
+	c.remoteRate = response.MaxRx
+	c.selectedTransport = "quic"
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Client) validatePacingResponse(response protocol.Response, sessionID uint32, assignedSession bool) error {
+	if assignedSession && response.SessionID == 0 {
+		return errors.New("response omitted the assigned session ID")
+	}
+	if !assignedSession && response.SessionID != sessionID {
+		return errors.New("response contains the wrong session ID")
+	}
+	if response.TxMode == protocol.PacingUnspecified || response.TxProfile == protocol.ProfileUnspecified ||
+		response.RxMode == protocol.PacingUnspecified || response.RxProfile == protocol.ProfileUnspecified {
+		return errors.New("response omitted sender pacing metadata")
+	}
+	if (response.MaxTx != 0) != (response.TxMode == protocol.PacingFixedRate) {
+		return errors.New("response client rate and sender mode disagree")
+	}
+	if (response.MaxRx != 0) != (response.RxMode == protocol.PacingFixedRate) {
+		return errors.New("response relay rate and sender mode disagree")
+	}
+	if response.TxMode != c.txMode || response.TxProfile != c.txProfile {
+		return errors.New("response changed the client sender identity")
+	}
+	if c.maxTx == 0 && response.MaxTx != 0 {
+		return errors.New("response introduced an unrequested client fixed rate")
+	}
+	if c.maxTx != 0 && (response.MaxTx == 0 || response.MaxTx > c.maxTx) {
+		return errors.New("response client rate is not a valid cap of the requested rate")
+	}
+	if c.maxRx != 0 && (response.MaxRx == 0 || response.MaxRx > c.maxRx) {
+		return errors.New("response relay rate is not a valid cap of the requested rate")
+	}
+	return nil
+}
+
+func (c *Client) recordFallback() {
+	c.mu.Lock()
+	c.localMode = "tls-fallback"
+	c.localRate = 0
+	c.remoteMode = "tls-fallback"
+	c.remoteRate = 0
+	c.selectedTransport = "tls"
+	c.mu.Unlock()
+}
+
+// SelectedTransport reports the authenticated path used by the most recent
+// successful stream or datagram association.
+func (c *Client) SelectedTransport() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.selectedTransport
+}
+
+// AccelerationMode reports the sender policy used by the most recent
+// successful client-to-relay path.
+func (c *Client) AccelerationMode() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.localMode
+}
+
+// NegotiatedTx reports the effective client-to-relay fixed rate in bytes/s.
+func (c *Client) NegotiatedTx() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.localRate
+}
+
+// RemoteTxAcceleration reports the authenticated relay sender used by the
+// most recent successful QUIC stream. It is directionally distinct from the
+// client's local sender.
+func (c *Client) RemoteTxAcceleration() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.remoteMode
+}
+
+// RemoteNegotiatedTx reports the effective relay-to-client fixed rate.
+func (c *Client) RemoteNegotiatedTx() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.remoteRate
+}
+
 func (c *Client) connection(ctx context.Context) (*quic.Conn, error) {
 	for {
 		c.mu.Lock()
@@ -601,64 +886,74 @@ func (c *Client) connection(ctx context.Context) (*quic.Conn, error) {
 			c.mu.Unlock()
 			return conn, nil
 		}
-		if c.dialing != nil {
-			attempt := c.dialing
-			c.mu.Unlock()
-			select {
-			case <-attempt.done:
-				if attempt.err != nil {
-					return nil, attempt.err
+		attempt := c.dialing
+		if attempt == nil {
+			// A connection attempt is shared transport state, so its lifetime is
+			// derived from the client rather than from whichever caller happened to
+			// arrive first. Every caller still waits with its own context below.
+			dialCtx, cancel := context.WithTimeout(c.ctx, c.dialTimeout)
+			attempt = &quicDialAttempt{done: make(chan struct{}), cancel: cancel}
+			c.dialing = attempt
+			go c.runQUICDial(attempt, dialCtx)
+		}
+		c.mu.Unlock()
+
+		select {
+		case <-attempt.done:
+			if attempt.err != nil {
+				if err := contextError(ctx); err != nil {
+					return nil, err
 				}
-				continue
-			case <-ctx.Done():
-				return nil, context.Cause(ctx)
-			case <-c.ctx.Done():
-				return nil, net.ErrClosed
+				return nil, attempt.err
 			}
-		}
-
-		dialCtx, cancel := context.WithTimeout(ctx, c.dialTimeout)
-		attempt := &quicDialAttempt{done: make(chan struct{}), cancel: cancel}
-		c.dialing = attempt
-		c.mu.Unlock()
-
-		conn, err := quic.DialAddr(dialCtx, c.address, c.tlsConfig.Clone(), c.quicConfig.Clone())
-		cancel()
-
-		c.mu.Lock()
-		c.dialing = nil
-		if err == nil && !c.closed {
-			c.conn = conn
-		} else if conn != nil {
-			_ = conn.CloseWithError(applicationShutdown, "client closed")
-		}
-		if err != nil {
-			attempt.err = fmt.Errorf("tunnel: dial QUIC: %w", err)
-			// Publish the open circuit before waking waiters. Otherwise every
-			// caller waiting on the same failed UDP handshake could start its
-			// own sequential timeout before DialContext records the failure.
-			if c.fallback != nil && ctx.Err() == nil && !c.closed {
-				c.primaryFailedAt = time.Now()
-				c.primaryProbing = false
-			}
-		}
-		close(attempt.done)
-		closed := c.closed
-		c.mu.Unlock()
-		if closed {
+			continue
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-c.ctx.Done():
 			return nil, net.ErrClosed
 		}
-		if attempt.err != nil {
-			return nil, attempt.err
-		}
-		return conn, nil
 	}
+}
+
+func (c *Client) runQUICDial(attempt *quicDialAttempt, dialCtx context.Context) {
+	defer attempt.cancel()
+	conn, err := c.dialQUIC(dialCtx, c.address, c.tlsConfig.Clone(), c.quicConfig.Clone())
+	var pacer *connectionPacer
+	if err == nil {
+		pacer, err = newConnectionPacer(c.pacing, c.maxTx)
+		if err != nil {
+			_ = conn.CloseWithError(applicationShutdown, "pacing unavailable")
+		}
+	}
+
+	c.mu.Lock()
+	if c.dialing == attempt {
+		c.dialing = nil
+	}
+	if err == nil && !c.closed {
+		c.conn = conn
+		c.pacer = pacer
+	} else if conn != nil {
+		_ = conn.CloseWithError(applicationShutdown, "client closed")
+	}
+	if err != nil {
+		attempt.err = fmt.Errorf("tunnel: dial QUIC: %w", err)
+		// Publish the open circuit before waking waiters. Otherwise callers
+		// waiting on the same failed UDP handshake could each pay another timeout.
+		if c.fallback != nil && !c.closed && c.ctx.Err() == nil {
+			c.primaryFailedAt = time.Now()
+			c.primaryProbing = false
+		}
+	}
+	close(attempt.done)
+	c.mu.Unlock()
 }
 
 func (c *Client) invalidate(conn *quic.Conn) {
 	c.mu.Lock()
 	if c.conn == conn {
 		c.conn = nil
+		c.pacer = nil
 	}
 	c.mu.Unlock()
 	_ = conn.CloseWithError(applicationShutdown, "reconnecting")
@@ -678,48 +973,210 @@ func (c *Client) Close() error {
 	}
 	conn := c.conn
 	c.conn = nil
+	c.pacer = nil
 	c.mu.Unlock()
 	if conn != nil {
 		_ = conn.CloseWithError(applicationShutdown, "client closed")
 	}
+	c.closeDatagramDispatchers()
 	if c.fallback != nil {
 		return c.fallback.Close()
 	}
 	return nil
 }
 
+func (c *Client) connectionPacer(conn *quic.Conn) *connectionPacer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != conn {
+		return nil
+	}
+	return c.pacer
+}
+
+type quicStream interface {
+	io.ReadWriteCloser
+	Context() context.Context
+	SetDeadline(time.Time) error
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+	CancelRead(quic.StreamErrorCode)
+	CancelWrite(quic.StreamErrorCode)
+}
+
+type quicWritePacer interface {
+	wait(context.Context, int, *quic.Conn) error
+	maxChunkBytes() int
+}
+
 type quicStreamConn struct {
-	stream *quic.Stream
-	local  net.Addr
-	remote net.Addr
-	once   sync.Once
+	stream               quicStream
+	conn                 *quic.Conn
+	pacer                quicWritePacer
+	local                net.Addr
+	remote               net.Addr
+	once                 sync.Once
+	paceCtx              context.Context
+	paceCancel           context.CancelFunc
+	deadlineMu           sync.Mutex
+	writeDeadline        time.Time
+	deadlineGeneration   uint64
+	activePaceGeneration uint64
+	activePaceCancel     context.CancelFunc
 
 	writeMu      sync.Mutex
+	writeStateMu sync.Mutex
 	writeClosed  bool
 	writeAborted bool
 }
 
-func newQUICStreamConn(stream *quic.Stream, local, remote net.Addr) *quicStreamConn {
-	return &quicStreamConn{stream: stream, local: local, remote: remote}
+func newQUICStreamConn(stream quicStream, conn *quic.Conn, pacer *connectionPacer) *quicStreamConn {
+	var writePacer quicWritePacer
+	if pacer != nil {
+		writePacer = pacer
+	}
+	return newQUICStreamConnWithPacer(stream, conn, writePacer)
 }
 
-func (c *quicStreamConn) Read(p []byte) (int, error)         { return c.stream.Read(p) }
-func (c *quicStreamConn) Write(p []byte) (int, error)        { return c.stream.Write(p) }
-func (c *quicStreamConn) LocalAddr() net.Addr                { return c.local }
-func (c *quicStreamConn) RemoteAddr() net.Addr               { return c.remote }
-func (c *quicStreamConn) SetDeadline(t time.Time) error      { return c.stream.SetDeadline(t) }
-func (c *quicStreamConn) SetReadDeadline(t time.Time) error  { return c.stream.SetReadDeadline(t) }
-func (c *quicStreamConn) SetWriteDeadline(t time.Time) error { return c.stream.SetWriteDeadline(t) }
-func (c *quicStreamConn) CloseWrite() error {
+func newQUICStreamConnWithPacer(stream quicStream, conn *quic.Conn, pacer quicWritePacer) *quicStreamConn {
+	paceCtx, paceCancel := context.WithCancel(stream.Context())
+	var local, remote net.Addr
+	if conn != nil {
+		local = conn.LocalAddr()
+		remote = conn.RemoteAddr()
+	}
+	return &quicStreamConn{
+		stream: stream, conn: conn, pacer: pacer,
+		local: local, remote: remote,
+		paceCtx: paceCtx, paceCancel: paceCancel,
+	}
+}
+
+func (c *quicStreamConn) Read(p []byte) (int, error) { return c.stream.Read(p) }
+func (c *quicStreamConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	c.writeStateMu.Lock()
+	closed := c.writeClosed || c.writeAborted
+	c.writeStateMu.Unlock()
+	if closed {
+		return 0, net.ErrClosed
+	}
+	chunkSize := len(p)
+	if c.pacer != nil {
+		maxChunk := c.pacer.maxChunkBytes()
+		if maxChunk > 0 && chunkSize > maxChunk {
+			chunkSize = maxChunk
+		}
+	}
+	for written := 0; written < len(p); {
+		end := written + chunkSize
+		if end > len(p) {
+			end = len(p)
+		}
+		chunk := p[written:end]
+		if c.pacer != nil {
+			if err := c.waitForPacing(len(chunk)); err != nil {
+				if c.paceCtx.Err() != nil {
+					return written, net.ErrClosed
+				}
+				return written, err
+			}
+		}
+		n, err := c.stream.Write(chunk)
+		written += n
+		if err != nil {
+			return written, err
+		}
+		if n != len(chunk) {
+			return written, io.ErrShortWrite
+		}
+	}
+	if len(p) == 0 {
+		return c.stream.Write(p)
+	}
+	return len(p), nil
+}
+
+func (c *quicStreamConn) waitForPacing(bytes int) error {
+	for {
+		c.deadlineMu.Lock()
+		generation := c.deadlineGeneration
+		deadline := c.writeDeadline
+		baseCtx, cancelActive := context.WithCancel(c.paceCtx)
+		waitCtx := baseCtx
+		cancelDeadline := func() {}
+		if !deadline.IsZero() {
+			waitCtx, cancelDeadline = context.WithDeadline(baseCtx, deadline)
+		}
+		c.activePaceGeneration = generation
+		c.activePaceCancel = cancelActive
+		c.deadlineMu.Unlock()
+
+		err := c.pacer.wait(waitCtx, bytes, c.conn)
+		cancelDeadline()
+		cancelActive()
+
+		c.deadlineMu.Lock()
+		deadlineChanged := generation != c.deadlineGeneration
+		if c.activePaceGeneration == generation {
+			c.activePaceCancel = nil
+		}
+		c.deadlineMu.Unlock()
+		contextInterrupted := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		if deadlineChanged && c.paceCtx.Err() == nil && contextInterrupted {
+			// net.Conn deadlines apply to pending I/O. Re-enter the wait with
+			// the newly installed deadline instead of treating an extension or
+			// clear as a spurious write failure.
+			continue
+		}
+		return err
+	}
+}
+
+func (c *quicStreamConn) LocalAddr() net.Addr  { return c.local }
+func (c *quicStreamConn) RemoteAddr() net.Addr { return c.remote }
+func (c *quicStreamConn) SetDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	c.writeDeadline = t
+	c.deadlineGeneration++
+	if c.activePaceCancel != nil {
+		c.activePaceCancel()
+	}
+	err := c.stream.SetDeadline(t)
+	c.deadlineMu.Unlock()
+	return err
+}
+func (c *quicStreamConn) SetReadDeadline(t time.Time) error { return c.stream.SetReadDeadline(t) }
+func (c *quicStreamConn) SetWriteDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	c.writeDeadline = t
+	c.deadlineGeneration++
+	if c.activePaceCancel != nil {
+		c.activePaceCancel()
+	}
+	err := c.stream.SetWriteDeadline(t)
+	c.deadlineMu.Unlock()
+	return err
+}
+func (c *quicStreamConn) CloseWrite() error {
+	c.paceCancel()
+	// quic-go requires SendStream.Close and Write to be serialized. An orderly
+	// half-close may therefore wait for the current Write; the aborting Close
+	// path below uses CancelWrite without this mutex to unblock a stalled Write.
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.writeStateMu.Lock()
 	if c.writeAborted {
+		c.writeStateMu.Unlock()
 		return net.ErrClosed
 	}
 	if c.writeClosed {
+		c.writeStateMu.Unlock()
 		return nil
 	}
 	c.writeClosed = true
+	c.writeStateMu.Unlock()
 	return c.stream.Close()
 }
 func (c *quicStreamConn) CloseRead() error {
@@ -728,16 +1185,22 @@ func (c *quicStreamConn) CloseRead() error {
 }
 func (c *quicStreamConn) Close() error {
 	c.once.Do(func() {
+		c.paceCancel()
 		c.stream.CancelRead(streamCanceled)
-		c.writeMu.Lock()
-		if !c.writeClosed {
-			c.writeAborted = true
+		// CancelWrite must happen without waiting for writeMu: a flow-controlled
+		// stream.Write holds that mutex while blocked, and net.Conn.Close is
+		// required to unblock it.
+		c.writeStateMu.Lock()
+		shouldCancelWrite := !c.writeClosed
+		c.writeAborted = true
+		c.writeStateMu.Unlock()
+		if shouldCancelWrite {
 			c.stream.CancelWrite(streamCanceled)
 		}
-		c.writeMu.Unlock()
 	})
 	return nil
 }
 
 var _ transport.Dialer = (*Client)(nil)
+var _ transport.PacketDialer = (*Client)(nil)
 var _ net.Conn = (*quicStreamConn)(nil)

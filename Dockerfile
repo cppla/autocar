@@ -12,9 +12,6 @@ WORKDIR /src
 RUN apk add --no-cache ca-certificates
 
 COPY go.mod go.sum ./
-# Local replace directives are resolved during go mod download, so make the
-# audited module forks available before dependency resolution.
-COPY third_party ./third_party
 RUN go mod download
 
 COPY . .

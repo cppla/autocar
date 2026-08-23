@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -14,61 +13,51 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cppla/autocar/internal/accel"
 	"github.com/cppla/autocar/internal/config"
-	"github.com/cppla/autocar/internal/hy2"
 	"github.com/cppla/autocar/internal/security"
 	"github.com/cppla/autocar/internal/transport"
 	"github.com/cppla/autocar/internal/tunnel"
 )
 
 type tunnelFlags struct {
-	server                  string
-	fallback                string
-	mode                    string
-	serverName              string
-	caFile                  string
-	systemRoots             bool
-	clientCert              string
-	clientKey               string
-	tokenFile               string
-	dialTimeout             time.Duration
-	primaryTimeout          time.Duration
-	openTimeout             time.Duration
-	fallbackTTL             time.Duration
-	congestion              string
-	bbrProfile              string
-	uploadMbps              uint64
-	downloadMbps            uint64
-	disableLossCompensation bool
-	fastOpen                bool
-	obfsPasswordFile        string
-	disableChromeParrot     bool
-	maxPendingOpens         int
+	server         string
+	fallback       string
+	mode           string
+	serverName     string
+	caFile         string
+	systemRoots    bool
+	clientCert     string
+	clientKey      string
+	tokenFile      string
+	dialTimeout    time.Duration
+	primaryTimeout time.Duration
+	openTimeout    time.Duration
+	fallbackTTL    time.Duration
+	pacing         string
+	pacingProfile  string
+	uploadMbps     uint64
+	downloadMbps   uint64
 }
 
 func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
 	fs.StringVar(&flags.server, "server", "", "relay host:port (required)")
 	fs.StringVar(&flags.fallback, "fallback-server", "", "TCP/TLS relay host:port; defaults to --server")
-	fs.StringVar(&flags.mode, "transport", "auto", "transport: auto, hy2 (or quic), legacy-quic, or tls")
+	fs.StringVar(&flags.mode, "transport", "auto", "transport: auto, quic, or tls")
 	fs.StringVar(&flags.serverName, "server-name", "", "TLS certificate DNS name; defaults to relay host")
 	fs.StringVar(&flags.caFile, "ca", "", "PEM trust anchor for the relay certificate")
 	fs.BoolVar(&flags.systemRoots, "system-roots", false, "trust the operating-system CA set instead of --ca")
 	fs.StringVar(&flags.clientCert, "client-cert", "", "optional mTLS client certificate PEM")
 	fs.StringVar(&flags.clientKey, "client-key", "", "optional mTLS client private key PEM")
 	fs.StringVar(&flags.tokenFile, "token-file", "", "0600 shared-token file; otherwise AUTOCAR_TOKEN")
-	fs.DurationVar(&flags.dialTimeout, "dial-timeout", 5*time.Second, "legacy QUIC/TLS network dial timeout")
+	fs.DurationVar(&flags.dialTimeout, "dial-timeout", 5*time.Second, "QUIC/TLS network dial timeout")
 	fs.DurationVar(&flags.primaryTimeout, "quic-attempt-timeout", 5*time.Second, "entire QUIC phase budget before auto-mode TLS fallback")
 	fs.DurationVar(&flags.openTimeout, "open-timeout", 15*time.Second, "overall remote stream open timeout")
 	fs.DurationVar(&flags.fallbackTTL, "fallback-cooldown", 30*time.Second, "time to prefer TLS after a QUIC path failure")
-	fs.StringVar(&flags.congestion, "congestion", hy2.CongestionBBR, "QUIC congestion controller: bbr or reno; configured bandwidth selects Brutal")
-	fs.StringVar(&flags.bbrProfile, "bbr-profile", hy2.BBRStandard, "BBR profile: conservative, standard, or aggressive")
-	fs.Uint64Var(&flags.uploadMbps, "upload-mbps", 0, "known client upload capacity in Mbit/s; nonzero requests negotiated Brutal")
-	fs.Uint64Var(&flags.downloadMbps, "download-mbps", 0, "known client download capacity in Mbit/s; nonzero requests negotiated Brutal")
-	fs.BoolVar(&flags.disableLossCompensation, "disable-loss-compensation", false, "disable Brutal ACK/loss-rate compensation")
-	fs.BoolVar(&flags.fastOpen, "fast-open", false, "return before the exit dial response (lower setup latency, weaker immediate error reporting)")
-	fs.StringVar(&flags.obfsPasswordFile, "obfs-password-file", "", "0600 Salamander password file; otherwise optional AUTOCAR_OBFS_PASSWORD")
-	fs.BoolVar(&flags.disableChromeParrot, "disable-chrome-parrot", false, "disable Hysteria's Chrome QUIC fingerprint (diagnostics or Ed25519 relay certificates)")
-	fs.IntVar(&flags.maxPendingOpens, "max-pending-opens", 256, "maximum in-flight Hysteria TCP stream opens")
+	fs.StringVar(&flags.pacing, "pacing", "adaptive", "QUIC application pacing: adaptive, reno, or fixed-rate")
+	fs.StringVar(&flags.pacingProfile, "pacing-profile", "balanced", "adaptive pacing profile: conservative, balanced, or aggressive")
+	fs.Uint64Var(&flags.uploadMbps, "upload-mbps", 0, "client-to-relay fixed pacing rate in Mbit/s")
+	fs.Uint64Var(&flags.downloadMbps, "download-mbps", 0, "relay-to-client fixed pacing rate in Mbit/s")
 }
 
 type closeDialer interface {
@@ -80,18 +69,18 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 	if flags.server == "" {
 		return nil, errors.New("--server is required")
 	}
-	mode := strings.ToLower(flags.mode)
-	if mode != "auto" && mode != "hy2" && mode != "quic" && mode != "legacy-quic" && mode != "tls" {
-		return nil, fmt.Errorf("invalid --transport %q; want auto, hy2, quic, legacy-quic, or tls", flags.mode)
+	mode := strings.ToLower(strings.TrimSpace(flags.mode))
+	if mode != "auto" && mode != "quic" && mode != "tls" {
+		return nil, fmt.Errorf("invalid --transport %q; want auto, quic, or tls", flags.mode)
 	}
 	if flags.dialTimeout <= 0 || flags.openTimeout <= 0 {
 		return nil, errors.New("--dial-timeout and --open-timeout must be positive")
 	}
-	if flags.maxPendingOpens <= 0 || flags.maxPendingOpens > 65536 {
-		return nil, errors.New("--max-pending-opens must be between 1 and 65536")
-	}
 	if mode == "auto" && (flags.primaryTimeout <= 0 || flags.primaryTimeout >= flags.openTimeout) {
 		return nil, errors.New("auto mode requires 0 < --quic-attempt-timeout < --open-timeout so TLS fallback retains time")
+	}
+	if mode != "auto" && flags.fallback != "" {
+		return nil, errors.New("--fallback-server is valid only with --transport=auto")
 	}
 	if flags.caFile != "" && flags.systemRoots {
 		return nil, errors.New("--ca and --system-roots are mutually exclusive")
@@ -153,38 +142,28 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--download-mbps: %w", err)
 	}
-	obfuscationKey, err := loadOptionalSecret(flags.obfsPasswordFile, "AUTOCAR_OBFS_PASSWORD", 16)
+	pacing, err := newPacingConfig(flags.pacing, flags.pacingProfile)
 	if err != nil {
-		return nil, fmt.Errorf("load obfuscation password: %w", err)
+		return nil, err
 	}
-	newAcceleratedClient := func() (*hy2.Client, error) {
-		return hy2.NewClient(hy2.ClientConfig{
-			ServerAddress:           flags.server,
-			Token:                   token,
-			TLSConfig:               tlsConfig,
-			Congestion:              flags.congestion,
-			BBRProfile:              flags.bbrProfile,
-			MaxTx:                   upload,
-			MaxRx:                   download,
-			DisableLossCompensation: flags.disableLossCompensation,
-			FastOpen:                flags.fastOpen,
-			ObfuscationKey:          obfuscationKey,
-			DisableChromeParrot:     flags.disableChromeParrot,
-			OpenTimeout:             flags.openTimeout,
-			MaxPendingOpens:         flags.maxPendingOpens,
-		})
+	if err := validateClientRates(pacing.Mode, upload, download); err != nil {
+		return nil, err
+	}
+	if err := validateClientPacingTransport(mode, pacing.Mode); err != nil {
+		return nil, err
 	}
 
 	switch mode {
-	case "hy2", "quic":
-		return newAcceleratedClient()
-	case "legacy-quic":
+	case "quic":
 		return tunnel.NewClient(tunnel.ClientConfig{
 			ServerAddress:    flags.server,
 			Token:            token,
 			TLSConfig:        tlsConfig,
 			HandshakeTimeout: flags.openTimeout,
 			QUICDialTimeout:  flags.dialTimeout,
+			Pacing:           pacing,
+			MaxTx:            upload,
+			MaxRx:            download,
 		})
 	case "tls":
 		return tunnel.NewTLSClient(tunnel.TLSClientConfig{
@@ -199,41 +178,72 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 		if fallback == "" {
 			fallback = flags.server
 		}
-		primary, err := newAcceleratedClient()
-		if err != nil {
-			return nil, err
-		}
-		fallbackDialer, err := tunnel.NewTLSClient(tunnel.TLSClientConfig{
-			ServerAddress:    fallback,
-			Token:            token,
-			TLSConfig:        tlsConfig,
-			HandshakeTimeout: flags.openTimeout,
-			DialTimeout:      flags.dialTimeout,
+		return tunnel.NewClient(tunnel.ClientConfig{
+			ServerAddress:         flags.server,
+			FallbackAddress:       fallback,
+			Token:                 token,
+			TLSConfig:             tlsConfig,
+			HandshakeTimeout:      flags.openTimeout,
+			QUICDialTimeout:       flags.dialTimeout,
+			TLSDialTimeout:        flags.dialTimeout,
+			PrimaryAttemptTimeout: flags.primaryTimeout,
+			FallbackCooldown:      flags.fallbackTTL,
+			Pacing:                pacing,
+			MaxTx:                 upload,
+			MaxRx:                 download,
 		})
-		if err != nil {
-			_ = primary.Close()
-			return nil, err
-		}
-		auto, err := hy2.NewAutoClient(hy2.AutoConfig{
-			Primary:        primary,
-			Fallback:       fallbackDialer,
-			AttemptTimeout: flags.primaryTimeout,
-			Cooldown:       flags.fallbackTTL,
-			OnFallback: func(primaryErr error) {
-				slog.Warn("QUIC path unavailable; using authenticated TLS fallback",
-					"error", primaryErr,
-					"cooldown", flags.fallbackTTL)
-			},
-		})
-		if err != nil {
-			_ = primary.Close()
-			_ = fallbackDialer.Close()
-			return nil, err
-		}
-		return auto, nil
 	default:
 		panic("unreachable transport mode")
 	}
+}
+
+func newPacingConfig(modeText, profileText string) (tunnel.PacingConfig, error) {
+	mode := accel.Mode(strings.ToLower(strings.TrimSpace(modeText)))
+	if mode == "" {
+		mode = accel.ModeAdaptive
+	}
+	switch mode {
+	case accel.ModeAdaptive, accel.ModeReno, accel.ModeFixedRate:
+	default:
+		return tunnel.PacingConfig{}, fmt.Errorf(
+			"invalid --pacing %q; want adaptive, reno, or fixed-rate",
+			modeText,
+		)
+	}
+
+	profile := accel.Profile(strings.ToLower(strings.TrimSpace(profileText)))
+	if profile == "" {
+		profile = accel.ProfileBalanced
+	}
+	switch profile {
+	case accel.ProfileConservative, accel.ProfileBalanced, accel.ProfileAggressive:
+	default:
+		return tunnel.PacingConfig{}, fmt.Errorf(
+			"invalid --pacing-profile %q; want conservative, balanced, or aggressive",
+			profileText,
+		)
+	}
+	return tunnel.PacingConfig{Mode: mode, Profile: profile}, nil
+}
+
+func validateClientRates(mode accel.Mode, upload, download uint64) error {
+	if mode == accel.ModeFixedRate {
+		if upload == 0 || download == 0 {
+			return errors.New("--pacing=fixed-rate requires nonzero --upload-mbps and --download-mbps")
+		}
+		return nil
+	}
+	if upload != 0 || download != 0 {
+		return errors.New("--upload-mbps and --download-mbps require --pacing=fixed-rate")
+	}
+	return nil
+}
+
+func validateClientPacingTransport(transportMode string, pacingMode accel.Mode) error {
+	if transportMode == "tls" && pacingMode == accel.ModeFixedRate {
+		return errors.New("--pacing=fixed-rate requires --transport=quic or --transport=auto")
+	}
+	return nil
 }
 
 func megabitsToBytesPerSecond(value uint64) (uint64, error) {
@@ -242,20 +252,6 @@ func megabitsToBytesPerSecond(value uint64) (uint64, error) {
 		return 0, errors.New("value is too large")
 	}
 	return value * bitsPerMegabit / 8, nil
-}
-
-func loadOptionalSecret(path, envName string, minimumLength int) ([]byte, error) {
-	if path == "" && os.Getenv(envName) == "" {
-		return nil, nil
-	}
-	value, err := config.LoadSecret(path, envName)
-	if err != nil {
-		return nil, err
-	}
-	if len(value) < minimumLength {
-		return nil, fmt.Errorf("secret must be at least %d bytes", minimumLength)
-	}
-	return []byte(value), nil
 }
 
 func parseDeniedPorts(value string) ([]uint16, error) {

@@ -53,12 +53,12 @@ func TestReplacementLabelIsCheckoutIndependent(t *testing.T) {
 	if got := replacementLabel(root, &listedModule{Path: outside}); got != "local replacement" {
 		t.Fatalf("outside replacement = %q", got)
 	}
-	if got := replacementLabel(root, &listedModule{Path: "example.com/fork", Version: "v1.2.3"}); got != "example.com/fork v1.2.3" {
+	if got := replacementLabel(root, &listedModule{Path: "example.com/module", Version: "v1.2.3"}); got != "example.com/module v1.2.3" {
 		t.Fatalf("module replacement = %q", got)
 	}
 }
 
-func TestRenderUsesSafeMarkdownFenceAndProvenance(t *testing.T) {
+func TestRenderUsesSafeMarkdownFenceAndReplacementMetadata(t *testing.T) {
 	generated, err := render([]dependency{{
 		Path:        "example.com/dependency",
 		Version:     "v1.0.0",
@@ -73,7 +73,7 @@ func TestRenderUsesSafeMarkdownFenceAndProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(generated)
-	for _, required := range []string{"````text", "example.com/dependency", "./third_party/dependency", "Brutal code provenance"} {
+	for _, required := range []string{"````text", "example.com/dependency", "./third_party/dependency"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("generated notice does not contain %q", required)
 		}

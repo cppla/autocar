@@ -428,6 +428,12 @@ func runSOCKSUDPAssociation(
 				continue
 			}
 			if err := upstream.Send(payload, target); err != nil {
+				if errors.Is(err, transport.ErrPacketQueueFull) {
+					// QUIC DATAGRAM is unreliable. Local queue pressure drops this
+					// packet, not the authenticated UDP association.
+					signalActivity()
+					continue
+				}
 				return
 			}
 			signalActivity()

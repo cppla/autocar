@@ -4,7 +4,7 @@
 
 <h1 align="center">AutoCAR</h1>
 
-<p align="center">安全、可测量的 Go 双端自适应网络加速器</p>
+<p align="center">安全、可测量、拥有独立协议实现的 Go 双端网络加速器</p>
 
 <p align="center">
   <a href="https://github.com/cppla/autocar/actions/workflows/ci.yml"><img src="https://github.com/cppla/autocar/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -13,39 +13,38 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e.svg" alt="MIT License"></a>
 </p>
 
-AutoCAR 在本地提供 SOCKS5、HTTP 和 HTTPS Proxy，在远端安全地解析域名并连接目标。默认链路采用 Hysteria v2.12.1 的 HTTP/3-over-QUIC 核心；认证完成后，每个方向独立使用真实的用户态 BBRv1-derived controller，或在双方明确配置带宽后使用 Brutal。UDP 不可达时，新建 TCP 流会自动切换到独立的 TLS 1.3/TCP 回退链路。
+AutoCAR 在本地提供 SOCKS5、HTTP 和 HTTPS Proxy，在远端解析并连接目标。TCP 流复用一条长期 QUIC 连接，SOCKS5 UDP 通过有界 QUIC DATAGRAM 会话传输；UDP 不可达时，`auto` 模式会把新 TCP 流切换到独立的 TLS 1.3/TCP 通道。
 
-它是 split proxy，不把原始 TCP 包套进 UDP，因此不会产生 TCP-over-TCP 的双重可靠传输。目标是改善高 RTT、随机丢包、短连接和多并发场景；稳定、低时延的直连仍可能更快，请始终在真实路径上测量。
+AutoCAR 采用独立协议与实现。Hysteria v2 仅作为公开设计参考；项目不包含
+其源码，也不兼容其 wire protocol。项目使用上游 `quic-go`，身份验证、
+`autocar/2` 协议、TCP/UDP framing、速率协商、pacing、熔断回退和资源边界
+均由 AutoCAR 实现。
 
-## 已实现的加速机制
+## 借鉴什么，实际实现什么
 
-| 来源/目标 | AutoCAR 中的实现 | 边界 |
+| 公开设计目标 | AutoCAR 的独立实现 | 不作出的承诺 |
 | --- | --- | --- |
-| Hysteria v2 | 基于官方 core v2.12.1 的可审计安全加固 fork、HTTP/3 多流、QUIC DATAGRAM、Fast Open、Chrome QUIC 指纹、HTTP/3 cover、可选 Salamander | 不包含实验性的 Gecko、Mimic、端口跳跃或 TUN/TProxy |
-| BBR | 用户态 BBRv1-derived delivery-rate 与 min-RTT/BDP 模型、delivery-rate × gain pacing，以及 `STARTUP → DRAIN → PROBE_BW → PROBE_RTT`；支持 conservative/standard/aggressive profile | 不是 Linux 内核 BBR，也不是 BBRv2/BBRv3；QUIC Initial/握手阶段仍由 quic-go 默认 Reno 发送，认证后才切换 |
-| ServerSpeeder/LotServer 的公开目标 | 双端独立发送控制；对端发送标准 QUIC ACK，本端据此估算 RTT、delivery rate 与 loss；RFC 9002 packet/time threshold、PTO、热连接状态复用 | 只与公开目标部分对齐；没有复制 Zeta-TCP 的专有预测/逐包概率算法，也不是内核透明 TCP、FEC、抢先重传或包复制 |
-| 高丢包固定带宽 | 双方协商 `min(发送端上限, 接收端上限)` 后启用 Brutal；根据 ACK/loss 采样补偿并 pacing | 必须显式填准确带宽；会争抢共享链路，默认关闭 |
+| Hysteria v2 的长连接、多流和 DATAGRAM 思路 | TLS 1.3 QUIC 热连接；每个 TCP 流独立；自有 `ACDG` UDP 分片/重组；真实 TCP/TLS fallback | 不提供 Hysteria 兼容模式、HTTP/3 cover、Salamander、Chrome 指纹或 Fast Open |
+| BBR 的带宽/RTT 模型思想 | `adaptive` 在应用发送层观察 quic-go 的累计发送、丢失、min RTT 和 smoothed RTT，以有界的近似 delivery-rate 窗口和 pacing gain 调节写入 | 不是 Linux BBR，也不替换 quic-go 的拥塞窗口、ACK、重传或底层 Reno 控制器 |
+| ServerSpeeder/LotServer 的公开体验目标 | 双端独立 sender pacing、热连接状态复用、有界流式回压、QUIC 标准丢失恢复 | 不复制任何专有预测算法，不做内核透明代理、FEC、抢先重传或包复制 |
+| 已知容量链路的固定发送 | 双方通过 AutoCAR v2 协商显式上限，使用有界 token bucket | 不称为 Brutal；不是不可绕过的流量 policer，也不保证对其他流公平 |
 
-默认值是 `bbr + standard`，客户端上下行带宽均为 `0`，且服务端默认忽略客户端带宽提示，所以不会无意启用 Brutal。详细机制、参数和诚实的声明边界见 [加速设计](docs/ACCELERATION.md)。
+默认 `adaptive-balanced` 是一个 **BBR-inspired 应用层 pacer**。底层 QUIC 仍由上游 quic-go 的拥塞控制和 RFC 9002 recovery 保证安全性；`reno` 模式只是关闭 AutoCAR 应用层 pacing，用作底层基线。完整边界见 [加速设计](docs/ACCELERATION.md)。
 
-Fast Open 默认关闭；只有显式设置 `--fast-open` 才会让首批应用数据与远端拨号响应重叠。这样能减少一次等待，但目标拒绝等错误可能延迟到第一次读取时才返回。
+## 安全与代理能力
 
-## 代理与安全
+- SOCKS5 CONNECT 与 UDP ASSOCIATE、HTTP absolute-form/CONNECT、可选本地 HTTPS Proxy。
+- TLS 1.3、正常的 X.509 SAN/链验证、强制共享令牌、可选 mTLS；没有跳过证书验证的开关。
+- 服务端先解析域名，再对数字 IP、端口、特殊用途地址、私网和自定义 CIDR 执行出口策略，避免二次 DNS rebinding。
+- QUIC 连接、并发流、待打开请求、UDP 会话、分片重组字节、HTTP 头和出口 socket 都有上限。
+- `auto` 模式用冷却熔断器限制新 TCP 流因 UDP 黑洞反复等待；fallback 只承载
+  TCP。SOCKS5 UDP 在 `auto` 中仍只尝试 QUIC，QUIC 不可用时 association 会失败。
 
-- SOCKS5：CONNECT 和 UDP ASSOCIATE；UDP 通过 QUIC DATAGRAM 双向传输。
-- HTTP Proxy：absolute-form HTTP 和 CONNECT。
-- HTTPS Proxy：本地代理监听器自身使用 TLS 1.3。
-- 隧道安全：TLS 1.3、正常 X.509 SAN/链验证、强制共享令牌、可选 mTLS；不存在 `skip verify` 开关。
-- 远端出口：域名由服务端解析，每个 TCP/UDP 目标都经过端口、CIDR、特殊用途地址及 DNS rebinding/SSRF 检查，只使用已批准的数字 IP。
-- 资源防护：握手期/已接受的 QUIC 连接、TCP handler、UDP session、双向/单向 stream、HTTP 头和出口 socket 均有硬上限；连接、TCP handler 与 UDP session 还具有跨 QUIC 会话的来源配额（IPv4 地址或 IPv6 `/64`）。TLS/TCP 回退从 accept 到中继结束也有独立的全局与来源连接配额。未认证连接与 TCP 请求头有 deadline，恶意 UDP 分片在分配重组状态前即受限。
-- 可达性：QUIC 失败后对新流使用真实 TLS/TCP，并通过熔断冷却避免 UDP 黑洞造成重复等待。
-- 抗主动探测：默认未认证请求表现为普通 HTTP/3 页面，客户端启用 Chrome QUIC 指纹；受限网络可选择 Salamander 包混淆。
-
-TLS 保护机密性、完整性和服务端身份；应用仍应使用 HTTPS、SSH 等端到端协议，因为中继知道目标地址，也能看到目标侧明文。网络观察者仍可能看到端点 IP、流量大小和时序。HTTP/3 cover、Salamander 与 TCP 回退提高抗误识别和可达性，但项目不承诺“不可检测”或“永不封锁”。
+中继知道目标地址，也可能看到目标侧明文；应用仍应使用 HTTPS、SSH 等端到端协议。AutoCAR 不承诺流量不可识别，也不承诺任何路径一定比直连更快。
 
 ## 快速开始
 
-需要 Go 1.25 或更高版本。
+需要 Go 1.25 或更高版本：
 
 ```bash
 git clone https://github.com/cppla/autocar.git
@@ -53,37 +52,35 @@ cd autocar
 go build -trimpath -o autocar ./cmd/autocar
 ```
 
-在服务端生成令牌和包含真实域名/IP SAN 的证书：
+生成独立令牌与含真实 SAN 的证书：
 
 ```bash
 ./autocar token --out token
-./autocar cert \
-  --hosts relay.example.com,203.0.113.10 \
-  --cert server.crt \
-  --key server.key
+./autocar cert --hosts relay.example.com,203.0.113.10 --cert server.crt --key server.key
 ```
 
-通过可信带外通道把 `token` 与 `server.crt` 复制到客户端；`server.key` 只留在服务端。启动服务端（UDP 与 TCP 可使用相同端口号）：
-
-`autocar cert` 生成与默认 Chrome QUIC 指纹兼容的 ECDSA P-256 证书。若使用外部证书，应选择 ECDSA P-256/P-384 或 RSA；Ed25519 服务端证书需要所有 Hysteria 客户端显式设置 `--disable-chrome-parrot`，否则 TLS 握手会失败并给出提示。
+服务端的 UDP 与 TCP 可以使用相同端口号；这里先使用非特权端口：
 
 ```bash
 ./autocar server \
-  --listen :443 \
-  --tcp-listen :443 \
+  --listen :8443 \
+  --tcp-listen :8443 \
   --cert server.crt \
   --key server.key \
   --token-file token
 ```
 
-启动客户端：
+客户端：
 
 ```bash
 ./autocar client \
-  --server relay.example.com:443 \
+  --server relay.example.com:8443 \
   --ca server.crt \
   --token-file token
 ```
+
+生产环境若直接绑定 `443`，应给服务进程最小的 `CAP_NET_BIND_SERVICE` 能力，
+或在主机/容器外层做端口映射；不要仅为绑定低端口而以 root 运行整个中继。
 
 默认入口：
 
@@ -93,122 +90,82 @@ go build -trimpath -o autocar ./cmd/autocar
 | HTTP Proxy | `127.0.0.1:8080` | `curl --proxy http://127.0.0.1:8080 https://example.com` |
 | HTTPS Proxy | 默认关闭 | 使用 `--https`、`--proxy-cert`、`--proxy-key` 开启 |
 
-`socks5h` 会把域名交给远端解析。AutoCAR 不伪造目标证书，也不解密应用到目标站点之间的 HTTPS。
+`socks5h` 会把域名交给远端。AutoCAR 不伪造目标证书，也不解密目标 HTTPS。
 
-## 选择 BBR 或 Brutal
-
-一般部署直接使用默认 BBR。可按链路偏好选择 profile：
+## Pacing 模式
 
 ```bash
+# 默认：温和探测带宽并根据 RTT/loss 收敛
+./autocar client [连接参数] --pacing adaptive --pacing-profile balanced
+
 # 共享链路更保守
-./autocar client [其他参数] --bbr-profile conservative
+./autocar client [连接参数] --pacing adaptive --pacing-profile conservative
 
-# Startup 更激进；必须先在自己的链路做公平性与排队延迟测试
-./autocar client [其他参数] --bbr-profile aggressive
+# 不使用 AutoCAR 应用层 pacing；观察当前 quic-go/Reno 基线
+./autocar client [连接参数] --pacing reno
 ```
 
-只有已知真实链路容量时才配置 Brutal。官方客户端会在每个方向取声明值与服务端协商上限中的较小值：
+只有测得真实容量时才使用 `fixed-rate`。该模式只在 QUIC 路径上协商；上传和下载
+按方向协商，服务端上限优先：
 
 ```bash
-# 服务端：每个认证会话最高上传 100 Mbit/s、下载 300 Mbit/s
-./autocar server [其他参数] \
-  --allow-client-bandwidth \
-  --max-upload-mbps 100 \
-  --max-download-mbps 300
+./autocar server [服务端参数] \
+  --pacing fixed-rate \
+  --max-upload-mbps 80 \
+  --max-download-mbps 250 \
+  --allow-client-rates
 
-# 客户端：本地链路实测上限
-./autocar client [其他参数] \
-  --upload-mbps 80 \
-  --download-mbps 250
+./autocar client [连接参数] \
+  --transport quic \
+  --pacing fixed-rate \
+  --upload-mbps 60 \
+  --download-mbps 200
 ```
 
-服务端只有显式设置 `--allow-client-bandwidth` 且同时提供两个有限协商上限时才接受 Brutal 提示；默认会强制 BBR/Reno。配置高于实际容量会造成排队、丢包和浪费。上述值是协议协商与 pacing 目标，不是针对恶意客户端的流量整形器；需要不可绕过的限速时，应在主机或云网络层配置 policer。Brutal 不是 Reno/CUBIC 公平模式，共享网络应保留默认 BBR。
+错误的固定速率会制造队列和丢包。`--transport=auto` 的 TCP/TLS fallback 不保留
+QUIC pacing；需要严格的 fixed-rate 语义时应显式使用 `--transport=quic`。协议 pacing
+不能约束恶意客户端；硬限速必须使用主机或云网络 policer。
 
-## HTTP/3 cover 与 Salamander
+## 本地入口与出口策略
 
-默认模式是标准 HTTP/3 cover：错误令牌或普通探测会得到中性网页，客户端模拟 Chrome QUIC 的可见参数。若 UDP 被按 QUIC 特征干扰，可在两端配置同一条独立强密码：
+无认证入口只能绑定环回。SOCKS5 用户名密码和 HTTP Basic 在本地这一跳是明文；跨主机应开启 HTTPS Proxy。客户端信任方式必须二选一：`--ca <PEM>` 或显式 `--system-roots`。mTLS 使用服务端 `--client-ca` 与客户端 `--client-cert/--client-key`。
 
-```bash
-./autocar token --out obfs-password
-
-./autocar server [其他参数] --obfs-password-file obfs-password
-./autocar client [其他参数] --obfs-password-file obfs-password
-```
-
-也可通过 `AUTOCAR_OBFS_PASSWORD` 提供。Salamander 只是包级混淆，真正的认证与加密仍由 TLS 1.3 完成。启用后线上形态不再是标准 HTTP/3，因此应在“HTTP/3 cover”和“Salamander”之间按网络环境选择，而不是同时宣传两种外观。
-
-## 本地代理认证与 mTLS
-
-无认证入口只能绑定环回。SOCKS5 用户名密码和 HTTP Basic 在本地这一跳是明文；跨主机使用应开启 HTTPS Proxy，不要把明文入口直接暴露到公网。
-
-```bash
-export AUTOCAR_PROXY_USER=alice
-export AUTOCAR_PROXY_PASSWORD='replace-with-a-long-random-secret'
-
-./autocar client [中继参数] \
-  --socks 127.0.0.1:1080 \
-  --http 127.0.0.1:8080
-```
-
-客户端信任方式必须二选一：`--ca <PEM>` 固定私有 CA/自签名证书，或显式使用 `--system-roots`。证书名称与连接地址不一致时设置 `--server-name`。mTLS 使用服务端 `--client-ca` 与客户端 `--client-cert/--client-key`；共享令牌仍保留为第二层授权。
-
-## 出口策略
-
-默认拒绝环回、私网、链路本地、多播、未指定地址、IANA 特殊用途地址，以及端口 `25,465,587`。`--allow-private` 仅允许 RFC1918/ULA/CGNAT，仍不会开放环回或云元数据等特殊地址。`--deny-cidrs` 与 `--deny-ports` 可进一步收紧策略。
-
-生产环境还应使用主机/云防火墙限制中继 UDP/TCP 端口，给 UDP 设置每源速率与突发上限，并优先启用 mTLS。完整 systemd、容器、防火墙和升级说明见 [部署指南](docs/DEPLOYMENT.md)。
+默认拒绝环回、链路本地、多播、未指定和 IANA 特殊用途地址，以及端口 `25,465,587`。`--allow-private` 仅允许 RFC1918、ULA 和 CGNAT；`--deny-cidrs`、`--deny-ports` 可进一步收紧。
 
 ## 兼容性
 
-当前默认 QUIC wire protocol 是 Hysteria v2.12.1。`--transport=hy2` 与 `--transport=quic` 等价；旧 AutoCAR 自定义 QUIC v1 可临时使用客户端 `--transport=legacy-quic` 配合服务端 `--quic-engine=legacy`。TLS/TCP fallback 继续使用 AutoCAR protocol v1。一次 UDP 端口不能同时运行两种 QUIC wire protocol，升级时必须协调两端或使用不同端口。
+当前协议 ALPN 是 `autocar/2`。它与 Hysteria v2、旧 AutoCAR v1 都不兼容；升级必须同时更新两端或临时使用不同端口进行迁移。`client --transport` 仅接受 `auto`、`quic`、`tls`；`bench-client` 另提供 `direct` 对照路径。
 
-## 性能验证
-
-内置基准会在相同目标、负载和链路条件下比较 direct、hy2/QUIC 与 TLS：
-
-```bash
-./autocar bench-server
-
-./autocar bench-client \
-  --transport direct \
-  --target target.example:9000 \
-  --bytes 8388608 --iterations 7 --warmup 2 --json
-
-./autocar bench-client \
-  --transport quic \
-  --server relay.example.com:443 \
-  --ca server.crt --token-file token \
-  --target target.example:9000 \
-  --bytes 8388608 --iterations 7 --warmup 2 --json
-```
-
-Linux `netem` 套件分别验证客户端上传与中继下载在高 RTT/确定性丢包下 BBR 相对 Reno 的收益、Brutal 双向固定速率窗口、热连接短 payload 数据阶段、错误证书/令牌、静默 UDP 黑洞后的 TLS 回退，以及抓包中不存在明文 sentinel：
-
-```bash
-make build
-sudo ./scripts/netem-integration.sh ./bin/autocar
-```
-
-`make release` 生成四个平台的发布归档；每个归档都同时包含可执行文件、AutoCAR 的 `LICENSE` 和完整的 `THIRD_PARTY_NOTICES.md`，不会发布缺少许可文件的裸二进制。
-
-CI 中预先声明的窄场景回归门只证明被测试机制在该 profile 下工作，不代表所有生产网络都会加速。方法、指标和扩展矩阵见 [基准说明](docs/BENCHMARK.md)。
-
-## 开发
+## 验证
 
 ```bash
 go test ./...
 go test -race ./...
 go vet ./...
+
+make build
+sudo ./scripts/netem-integration.sh ./bin/autocar
 ```
 
-- [加速机制与边界](docs/ACCELERATION.md)
-- [架构](docs/ARCHITECTURE.md)
-- [Wire protocol](docs/PROTOCOL.md)
-- [部署指南](docs/DEPLOYMENT.md)
-- [基准方法](docs/BENCHMARK.md)
-- [安全策略](SECURITY.md)
-- [第三方许可](THIRD_PARTY_NOTICES.md)
+该特权套件要求 Linux、nft-backed `iptables`（`iptables --version` 包含
+`(nf_tables)`）和 `ethtool`；legacy iptables backend 会被明确拒绝。
+
+netem 套件的背景随机损失由两端 `tc netem` 出口 qdisc 生成。pacing 丢包证明
+改用 nft-backed iptables，在接收端 INPUT 对每 N 个符合条件的、长度至少 1,000 字节的
+QUIC UDP 数据报丢弃 1 个：上传在 relay INPUT，下载在 client INPUT。它不模拟
+ACK/握手小包损失，但既保持方向语义，也避免 sender OUTPUT `DROP` 让 nft-backed
+iptables 下的 UDP `sendmsg` 直接返回 `EPERM`。有损阶段只硬验证协商、sender、计数和
+传输可进展；fixed-rate 精度使用另一个无确定性丢包的阶段。CI 不把一次 runner
+的 adaptive/Reno 吞吐胜负当作算法证明。详见 [基准说明](docs/BENCHMARK.md)。
+
+`scripts/` 中：
+
+- `check-dependency-boundary.sh` 拒绝已知 Hysteria/apernet 模块、local replace 和已知外部源码目录进入构建图；
+- `govulncheck.sh` 安装固定版本的扫描器并检查可达漏洞；
+- `netem-integration.sh` 创建 Linux network namespace、延迟/丢包链路并保存诊断工件。
+
+更多文档：[加速机制](docs/ACCELERATION.md)、[架构](docs/ARCHITECTURE.md)、[协议](docs/PROTOCOL.md)、[部署](docs/DEPLOYMENT.md)、[基准](docs/BENCHMARK.md)、[安全](SECURITY.md)。
 
 ## License
 
-AutoCAR 使用 MIT 许可证，见 [LICENSE](LICENSE)。实际链接的全部 Go 依赖及其根级许可、通知和专利声明见自动生成的 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+AutoCAR 使用 MIT 许可证。实际构建依赖及其许可见自动生成的 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

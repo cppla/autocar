@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,6 +156,65 @@ func TestSOCKS5UDPAssociateDropsFragmentsAndWrongSourcePort(t *testing.T) {
 	}
 	if string(payload) != "response" || source != "192.0.2.9:5353" {
 		t.Fatalf("downstream packet = %q from %q", payload, source)
+	}
+}
+
+func TestSOCKS5UDPAssociateSurvivesUpstreamQueuePressure(t *testing.T) {
+	recorded := newRecordingPacketConn()
+	upstream := &queueFullOncePacketConn{
+		recordingPacketConn: recorded,
+		firstRejected:       make(chan struct{}),
+	}
+	dialer := testPacketDialer{
+		Dialer: directDialer(),
+		dialPacket: func(context.Context) (transport.PacketConn, error) {
+			return upstream, nil
+		},
+	}
+	server, proxyAddress, stopProxy := startSOCKS5(t, Config{Dialer: dialer})
+	defer stopProxy(server)
+
+	control := dialTCP(t, proxyAddress)
+	defer control.Close()
+	socksGreeting(t, control, nil)
+	mustWrite(t, control, ipv4SOCKSRequest(socksCommandUDP, net.IPv4zero, 0))
+	reply, relayAddress := readSOCKSReplyAddress(t, control)
+	if reply != socksReplySucceeded {
+		t.Fatalf("reply = %d, want success", reply)
+	}
+
+	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	first, err := buildSOCKSUDPDatagram([]byte("dropped under pressure"), "example.com:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.WriteToUDP(first, relayAddress); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-upstream.firstRejected:
+	case <-time.After(time.Second):
+		t.Fatal("first datagram did not encounter queue pressure")
+	}
+
+	second, err := buildSOCKSUDPDatagram([]byte("association survived"), "example.com:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.WriteToUDP(second, relayAddress); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case sent := <-recorded.sends:
+		if string(sent.payload) != "association survived" {
+			t.Fatalf("second upstream payload = %q", sent.payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queue pressure tore down the UDP association")
 	}
 }
 
@@ -545,6 +605,20 @@ type recordingPacketConn struct {
 type limitedPacketConn struct {
 	*recordingPacketConn
 	limit int
+}
+
+type queueFullOncePacketConn struct {
+	*recordingPacketConn
+	attempts      atomic.Int64
+	firstRejected chan struct{}
+}
+
+func (c *queueFullOncePacketConn) Send(payload []byte, address string) error {
+	if c.attempts.Add(1) == 1 {
+		close(c.firstRejected)
+		return transport.ErrPacketQueueFull
+	}
+	return c.recordingPacketConn.Send(payload, address)
 }
 
 func (c *limitedPacketConn) MaxPayloadSize() int { return c.limit }

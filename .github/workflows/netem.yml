@@ -17,7 +17,7 @@ concurrency:
 jobs:
   integration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -25,7 +25,11 @@ jobs:
           go-version: 1.27.x
           cache: true
       - name: Install network test tools
-        run: sudo apt-get update && sudo apt-get install --yes iproute2 iptables tcpdump curl
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 iptables ethtool tcpdump curl
+          sudo update-alternatives --set iptables /usr/sbin/iptables-nft
+          iptables --version | grep -F '(nf_tables)'
       - name: Build
         run: make build
       - name: Run namespace and netem suite

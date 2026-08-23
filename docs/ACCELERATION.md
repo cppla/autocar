@@ -1,201 +1,151 @@
-# Acceleration design
+# AutoCAR acceleration model
 
-AutoCAR combines three public design families without claiming to be a drop-in
-replacement for any of them:
+AutoCAR implements an independent application protocol and sender-pacing layer.
+Hysteria v2 is a public design reference; AutoCAR does not include its source and
+the two wire protocols are incompatible. The design draws on these public ideas:
 
-| Design family | What AutoCAR adopts | What AutoCAR does not claim |
-| --- | --- | --- |
-| Hysteria v2 | HTTP/3 over QUIC, a persistent multiplexed session, Fast Open, negotiated Brutal, QUIC DATAGRAM, Chrome-oriented handshake shaping, HTTP/3 cover handling, and optional Salamander | Port hopping, Mimic, a user-facing ECH setup, or invisibility |
-| BBR | A real userspace BBRv1-derived delivery-rate/minimum-RTT model, delivery-rate × gain pacing, a BDP-based congestion window, and the four BBR phases | Linux kernel TCP BBR, BBRv2, or BBRv3 |
-| ServerSpeeder/LotServer/Zeta-TCP objectives | Standard QUIC ACK-driven estimates in both directions, paced sending, warm state, standard early loss detection, PTO probes, and independent multiplexed streams | Proprietary prediction, proactive or redundant retransmission, FEC, transparent TCP interception, or protocol compatibility |
+- Hysteria v2 demonstrates the value of a persistent multiplexed QUIC session,
+  independent streams and unreliable datagrams on difficult paths. AutoCAR
+  implements those goals with its own `autocar/2` and `ACDG` formats on official
+  upstream quic-go.
+- BBR's public model separates estimated bottleneck bandwidth from propagation
+  RTT and uses pacing to avoid filling queues. AutoCAR uses that insight in a
+  deliberately smaller application-layer estimator.
+- ServerSpeeder/LotServer are treated only as public product goals: keep warm
+  state, pace independently in both directions and improve loss-path usability.
+  AutoCAR does not reproduce any proprietary Zeta-TCP algorithm.
 
-The implementation comes from an in-tree, security-hardened fork of the pinned
-MIT-licensed Hysteria v2.12.1 core and its QUIC fork. AutoCAR adds admission
-before TCP handlers and UDP defragmentation state, finite fragment bounds, and
-exit policy around it. It does not copy the GPL `tcp-brutal` project. See
-[the patch record](../third_party/hysteria-core/AUTOCAR_PATCHES.md) and
-[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+References: [Hysteria protocol documentation](https://v2.hysteria.network/docs/developers/Protocol/),
+[Google's BBR paper](https://research.google/pubs/bbr-congestion-based-congestion-control/),
+and the [IETF BBR draft](https://datatracker.ietf.org/doc/html/draft-ietf-ccwg-bbr).
 
-## BBR mode (the default)
+## Layering
 
-Leaving client `--upload-mbps=0 --download-mbps=0` selects the configured
-model controller. `--congestion=bbr --bbr-profile=standard` is the default on
-both endpoints.
-
-This is a real BBRv1-derived sender, not the old quic-go default controller
-under a different name. For traffic sent by each endpoint it:
-
-1. samples delivered bytes over send/ACK intervals to estimate bottleneck
-   delivery rate;
-2. tracks the minimum observed RTT, expiring the estimate periodically so the
-   path can be remeasured;
-3. derives the bandwidth-delay product, approximately
-   `delivery_rate * min_rtt`;
-4. applies a pacing gain to the estimated delivery rate; and
-5. bounds in-flight data with a congestion-window gain around the BDP, with
-   loss-recovery limits when packets are declared lost.
-
-QUIC Initial and handshake packets precede Hysteria authentication and use
-quic-go's default Reno controller. The authenticated client and relay install
-their configured BBR, Reno, or negotiated Brutal sender for application data;
-no claim is made that BBR accelerates the unauthenticated handshake itself.
-
-The BBR state machine is:
-
-| Phase | Purpose |
-| --- | --- |
-| STARTUP | Increase pacing quickly while delivery bandwidth continues to grow |
-| DRAIN | Pace below the estimate to remove the queue accumulated during STARTUP |
-| PROBE_BW | Cycle pacing gains around the bandwidth estimate to look for new capacity while controlling the queue |
-| PROBE_RTT | Temporarily reduce in-flight data to refresh the minimum-RTT model |
-
-In the pinned implementation, the PROBE_BW gain cycle is `1.25, 0.75, 1, 1,
-1, 1, 1, 1`. The minimum-RTT sample expires after 10 seconds; PROBE_RTT lasts
-at least 200 ms after the in-flight target is reached. These are implementation
-details of the pinned version and may change only with an explicit dependency
-upgrade and review.
-
-### Profiles
-
-Profiles change how quickly BBR probes and how conservatively it handles an
-overshot path. They do not change the Hysteria wire protocol.
-
-| Profile | STARTUP pacing gain | STARTUP CWND gain | Steady CWND gain | Growth rounds | Intended use |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `conservative` | 2.25 | 1.75 | 1.75 | 2 | Shallow buffers, shared access links, or latency-sensitive paths; enables drain-to-target, overshoot detection, and estimate safeguards |
-| `standard` | 2.885 | 2.0 | 2.0 | 3 | General default |
-| `aggressive` | 3.0 | 2.25 | 2.5 | 4 | Controlled high-BDP paths; allows more startup ACK aggregation and queue pressure |
-
-Choose the profile independently on the client and relay because each setting
-controls only that endpoint's sender. `--congestion=reno` is available as a
-diagnostic/fairness baseline. Client bandwidth hints are ignored by default.
-They can select Brutal only after the relay operator explicitly enables
-`--allow-client-bandwidth` with finite ceilings in both directions.
-
-BBR is model-based, not magic. A bad route, insufficient relay capacity,
-policing, CPU saturation, or an already optimal direct route can erase any
-benefit. BBRv1 can also compete aggressively with loss-based flows and can
-build queues on paths where its model is inaccurate.
-
-## Brutal mode (explicit bandwidth only)
-
-Brutal is selected direction by direction when the client provides a non-zero
-capacity and the relay explicitly allows client bandwidth with two finite
-ceilings. AutoCAR deliberately has no "guess a large number" default.
-
-| Traffic direction | Client hint | Relay negotiation ceiling |
-| --- | --- | --- |
-| Client to relay / upload | `--upload-mbps` | `--max-upload-mbps` |
-| Relay to client / download | `--download-mbps` | `--max-download-mbps` |
-
-The relay opt-in rejects a zero ceiling. A zero client hint means unknown
-capacity and therefore keeps BBR/Reno for that direction. With two non-zero
-values, the lower value wins. The negotiated value is a sender pacing target,
-not a throughput guarantee.
-
-Example for a measured 20 Mbit/s upload and 100 Mbit/s download:
-
-```sh
-# Relay policy for each authenticated client
-autocar server [server options] \
-  --allow-client-bandwidth \
-  --max-upload-mbps=20 \
-  --max-download-mbps=100
-
-# Client's measured access-link capacities
-autocar client [client options] \
-  --upload-mbps=20 \
-  --download-mbps=100
+```text
+application write
+      │
+      ▼
+AutoCAR adaptive / fixed-rate / bypass admission
+      │
+      ▼
+quic-go stream or DATAGRAM
+      │
+      ▼
+quic-go congestion control, ACK processing, loss recovery and encryption
 ```
 
-The sender keeps five one-second ACK/loss sample slots. After at least 50
-packet samples, it computes `ack_rate = ACKed / (ACKed + lost)` and clamps the
-rate to a minimum of `0.8`. Pacing is approximately
-`negotiated_rate / ack_rate`; therefore loss compensation is capped at about
-`1 / 0.8 = 1.25x`. Its congestion window is approximately two smoothed RTTs
-of that compensated rate. `--disable-loss-compensation` fixes the ACK rate at
-one; set it on both endpoints if compensation must be disabled in both
-directions.
+This distinction is essential. AutoCAR can delay application writes, but it
+cannot enlarge quic-go's congestion window, mark packets acknowledged, or
+change retransmission decisions. `adaptive` is therefore **BBR-inspired
+pacing**, not a QUIC BBR implementation. The transport controller remains the
+hard safety bound.
 
-Brutal intentionally keeps sending near the declared rate instead of backing
-off like a conventional congestion-fair controller. It can harm other users,
-trigger policers, and waste bandwidth when the entered value exceeds the real
-bottleneck. Use it only on a link you control or have permission to reserve,
-enter a conservative measured capacity, and configure relay negotiation
-ceilings. These values are not a non-bypassable traffic policer; use host or
-cloud shaping for hard limits. Keep the zero-bandwidth BBR default on shared or
-unknown networks.
+## `adaptive`
 
-## Loss recovery and dual-ended feedback
+The controller samples cumulative connection statistics exposed by quic-go:
 
-Congestion control and retransmission are separate layers. BBR and Brutal
-consume the same QUIC ACK/loss events; neither replaces QUIC loss detection.
-The pinned QUIC transport follows RFC 9002 with:
+- bytes sent and bytes declared lost;
+- minimum RTT;
+- smoothed RTT;
+- sample time.
 
-- packet-threshold loss after three newer packet numbers are acknowledged;
-- time-threshold loss at 9/8 of the relevant RTT estimate; and
-- probe timeout (PTO) packets with exponential backoff when acknowledgements
-  stop arriving.
+For each valid interval it computes an approximate delivered rate from the
+sent/lost deltas. A bounded eight-sample maximum is the bandwidth estimate.
+The target starts from 64 Mbit/s, applies the selected pacing gain, and is then
+reduced when either RTT inflation or interval loss crosses a profile threshold.
+Every target is clamped to configured minimum and maximum rates.
 
-Both client and relay are QUIC senders and receivers. Each receiver sends
-standard QUIC ACK frames; the sender combines their packet numbers and timing
-with its local send history to estimate RTT and delivery rate, while RFC 9002
-declares losses. That is the concrete dual-ended feedback mechanism behind
-AutoCAR's "reverse-control" goal. It is auditable standard QUIC behavior, not
-an assertion that AutoCAR reconstructed Zeta-TCP's private algorithm.
+This is intentionally not a full BBR state machine. In particular AutoCAR has
+no transport-visible BDP congestion window, ACK aggregation model, ProbeRTT
+drain, ECN policy, inflight bounds or BBRv2/BBRv3 logic. Calling it “real BBR”
+would be inaccurate.
 
-QUIC retransmits lost reliable stream frames, but does not retransmit QUIC
-DATAGRAM payloads. AutoCAR adds no speculative retransmission or FEC. Adding
-redundancy without a measured policy could amplify congestion and would
-require a separate protocol and fairness review.
+Profiles tune application-layer probe/retreat behavior:
 
-## Short-flow and multiplexing gains
+| Profile | Pacing gain | RTT response | Loss response | Intended use |
+| --- | ---: | --- | --- | --- |
+| `conservative` | 1.00 | earliest/strongest | earliest/strongest | shared or shallow-buffer paths |
+| `balanced` | 1.08 | middle | middle | default |
+| `aggressive` | 1.18 | latest/weakest | latest/weakest | measured private paths only |
 
-While the current long-lived QUIC session remains connected, it keeps TLS,
-RTT, path-MTU, and controller state warm. Each new TCP proxy flow opens a
-stream instead of a new end-to-end TCP connection between the AutoCAR
-endpoints. A reconnect creates a fresh session and therefore starts cold; no
-TLS resumption or congestion/PMTU state is claimed across reconnects. Fast
-Open is disabled by default; when explicitly enabled, it lets the first bytes
-be written before the exit-dial response reaches the client.
+The defaults are operational starting points, not universal optima. A queueing
+delay test matters at least as much as bulk throughput.
 
-These mechanisms are most visible for sequential short operations on a
-high-RTT path. Independent QUIC streams also prevent a lost ordered byte in one
-logical flow from imposing TCP-style application head-of-line blocking on all
-other logical flows. They do not remove propagation delay or make the final
-relay-to-destination TCP handshake disappear.
+## `reno`
 
-## Hysteria traffic-shaping features
+`reno` bypasses AutoCAR's application-layer admission. It does not implement
+Reno itself; the pinned quic-go v0.61.0 transport selects Reno for its default
+sender. This mode therefore measures that actual upstream baseline and is useful
+for A/B tests or for operators who do not want an additional application pacing
+layer. A future quic-go upgrade must reverify this label before release.
 
-- **HTTP/3 cover:** without packet obfuscation, unauthenticated requests see a
-  neutral HTTP/3 service rather than a distinctive tunnel error.
-- **Chrome parrot:** enabled by default, it selects Hysteria/quic-go handshake
-  traits including Chrome-oriented connection-ID behavior. It is a fingerprint
-  reduction, not proof that all traffic is identical to a browser. Its
-  Chrome-compatible signature list requires an ECDSA P-256/P-384 or RSA relay
-  certificate; Ed25519 requires `--disable-chrome-parrot` on the client.
-- **Salamander:** an optional shared secret wraps UDP packets before QUIC. It
-  changes the observable packet form, so normal HTTP/3 cover probing is no
-  longer available in that mode.
-- **TLS/TCP fallback:** `auto` gives new TCP flows a real encrypted TCP path
-  when UDP is unavailable. UDP associations have no TCP fallback.
+## `fixed-rate`
 
-AutoCAR does not currently expose port hopping, Hysteria Mimic, or ECH
-provisioning. It cannot promise resistance to endpoint blocking, statistical
-traffic analysis, global observation, or traffic-volume correlation.
+`fixed-rate` is a bounded token bucket with a finite burst. It is enabled only
+with an explicit, positive byte rate. A request larger than the burst is split
+into bounded admission chunks, and cancellation or a write deadline interrupts
+the wait.
 
-## How to verify a deployment
+Fixed-rate negotiation and pacing exist only on the QUIC path. An explicit TLS
+transport cannot select this mode. In `auto`, a new TCP flow that falls back to
+TLS is unpaced and has no QUIC rate metadata; use `--transport=quic` whenever
+fixed-rate behavior is required rather than best effort.
 
-Run the repository's netem suite first, then repeat the matrix in
-[BENCHMARK.md](BENCHMARK.md) on the intended route. At minimum compare:
+Rates are negotiated independently:
 
-1. direct, BBR `conservative`, BBR `standard`, and BBR `aggressive` with both
-   bandwidth hints zero;
-2. Brutal with truthful capacities and relay caps;
-3. download and upload, short and bulk payloads, and concurrency greater than
-   one; and
-4. clean, delayed, lossy, and reordered path profiles.
+- client to relay: client upload request, capped by the relay receive policy;
+- relay to client: relay sender policy, optionally capped by the client's
+  download request when the relay explicitly accepts client hints.
 
-Retain raw results, packet captures without payload secrets, CPU data, and the
-exact build/configuration. A result from one narrow CI profile is evidence for
-that profile only, not a universal acceleration claim.
+The response reports the effective sender mode/profile and both selected rates.
+Benchmark telemetry uses the response for the download direction; it never
+pretends that the client's local controller sent a relay-originated payload.
+
+Fixed-rate mode does not compensate by dividing by observed ACK ratio. It is
+AutoCAR's bounded token-bucket design, with its own `fixed-rate` name and
+semantics rather than a Brutal controller. It is also not an enforcement
+boundary: a modified client can bypass its local pacer. Use `tc`, nftables or a
+cloud policer for non-bypassable limits.
+
+## Warm state and multiplexing
+
+One authenticated QUIC connection carries many independent TCP streams and UDP
+associations. Reusing TLS, RTT and transport recovery state avoids repeating a
+full setup for every local proxy flow. Stream backpressure is direct: AutoCAR
+does not insert an unbounded userspace queue between proxy and destination.
+
+The sender controller is connection-scoped, so concurrent streams share the
+same path observations and aggregate rate. The two endpoints still pace their
+own sending directions independently.
+
+## UDP
+
+UDP uses QUIC DATAGRAM rather than a reliable stream. AutoCAR's own `ACDG`
+format carries session ID, message ID, direction, destination/source address and
+fragment metadata. Logical payloads are limited to 4,096 bytes. Reassembly has
+fixed message, byte, fragment and TTL bounds; conflicting fragments purge the
+assembly. Loss remains loss—AutoCAR does not retransmit UDP datagrams.
+
+## What CI proves
+
+The Linux namespace suite verifies:
+
+- the expected endpoint is the payload sender;
+- the reported sender mode/profile and negotiated rate match that direction;
+- deterministic pacing-proof loss drops every Nth eligible QUIC UDP datagram of
+  at least 1,000 bytes at the receiver INPUT hook; background random `tc netem`
+  loss remains a qdisc impairment;
+- the lossy stage proves negotiated identity, counters and positive transfer
+  progress, while a separate loss-free stage checks fixed-rate accuracy after
+  warmup;
+- no `sendmsg: operation not permitted` regression occurs;
+- TLS fallback, certificate/token failure and plaintext-capture checks work.
+
+The deterministic rule intentionally excludes small ACK and handshake packets.
+The suite requires the nft-backed `iptables` frontend plus `ethtool`; it disables
+GRO/GSO/TSO before interpreting packet counters.
+
+It records adaptive versus reno throughput but does not require one noisy
+GitHub runner sample to exceed the other by a magic ratio. Such a gate is both
+flaky and scientifically weak. Production claims require repeated trials,
+confidence intervals, queue-delay measurements and multiple loss/RTT models.

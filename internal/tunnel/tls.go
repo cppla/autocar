@@ -168,7 +168,7 @@ func (s *TLSServer) serveTLSConnection(ctx context.Context, conn *tls.Conn, sour
 	if err != nil || conn.ConnectionState().NegotiatedProtocol != protocol.ALPN {
 		return
 	}
-	s.core.handleStream(ctx, conn, nil)
+	s.core.handleStream(ctx, conn, nil, nil)
 }
 
 type sourceConnectionLimiter struct {
@@ -285,6 +285,9 @@ type TLSClient struct {
 	conns  map[*trackedTLSConn]struct{}
 }
 
+// SelectedTransport identifies the concrete path for benchmark telemetry.
+func (c *TLSClient) SelectedTransport() string { return "tls" }
+
 // NewTLSClient creates a TCP+TLS fallback dialer.
 func NewTLSClient(config TLSClientConfig) (*TLSClient, error) {
 	if config.ServerAddress == "" {
@@ -358,7 +361,7 @@ func (c *TLSClient) DialContext(ctx context.Context, network, address string) (n
 	}
 	if tlsConn.ConnectionState().NegotiatedProtocol != protocol.ALPN {
 		_ = tlsConn.Close()
-		return nil, errors.New("tunnel: TLS fallback did not negotiate autocar/1")
+		return nil, errors.New("tunnel: TLS fallback did not negotiate autocar/2")
 	}
 	if err := openProtocol(dialCtx, tlsConn, c.token, network, address, c.handshakeTimeout); err != nil {
 		_ = tlsConn.Close()

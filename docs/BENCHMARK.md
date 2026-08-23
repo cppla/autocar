@@ -1,230 +1,179 @@
-# Benchmarking AutoCAR
+# Benchmark methodology
 
-AutoCAR includes a deterministic TCP source/sink so direct and relayed paths
-can move the same payload. It reports payload goodput in decimal Mbit/s. The
-tool is for repeatable comparisons; no single result proves that a relay or a
-controller is faster on every network.
+AutoCAR includes a payload benchmark and a privileged Linux namespace suite.
+The goal is to detect regressions and identify the sender that was actually
+tested—not to manufacture a universal “acceleration percentage.”
 
-## Basic comparison
+## Payload benchmark
 
-The benchmark server defaults to `127.0.0.1:9000`:
+Start the bounded target:
 
-```sh
-autocar bench-server
+```bash
+./autocar bench-server --listen 127.0.0.1:9000
 ```
 
-A remote-path comparison requires explicit non-loopback opt-in:
+Measure direct and tunneled paths with the same payload, warmup and iterations:
 
-```sh
-autocar bench-server \
-  --listen=0.0.0.0:9000 \
-  --allow-public-benchmark
+```bash
+./autocar bench-client \
+  --transport direct \
+  --target 127.0.0.1:9000 \
+  --mode download --bytes 8388608 --warmup 2 --iterations 7 --json
+
+./autocar bench-client \
+  --transport quic \
+  --server relay.example.com:443 --ca server.crt --token-file token \
+  --target target.example:9000 \
+  --mode download --bytes 8388608 --warmup 2 --iterations 7 --json
 ```
 
-`bench-server` has no authentication. A remote caller can make it send or
-receive substantial traffic up to its limits. Restrict port 9000 to the test
-client and relay with host/cloud firewalls, use the smallest practical
-`--max-bytes` and `--max-connections`, and stop it after the test.
+JSON contains raw `results_mbps` and `durations_ms`, plus `median_mbps`,
+`p05_mbps`, `p95_mbps`, `median_duration_ms` and `p95_duration_ms`. The throughput
+p95 is the upper tail; use throughput p05 or duration p95 to discuss slow runs.
+The selected transport and sender metadata must remain identical across all
+measured iterations or the command fails. `transport` is the requested policy
+(`auto`, `quic`, `tls` or `direct`); `selected_transport` records the actual
+measured path (`quic`, `tls` or `direct`). Do not treat `transport: "auto"` as
+evidence that QUIC carried the payload. The output also separates:
 
-Measure the direct route:
+- `local_tx_acceleration`: the client's current sender;
+- `payload_sender_acceleration`: the sender of the measured payload;
+- negotiated rates for each of those identities;
+- `tunnel_sender_endpoint`: `client` for upload, `relay` for download.
 
-```sh
-autocar bench-client \
-  --transport=direct \
-  --target=bench.example.com:9000 \
-  --mode=download --bytes=8388608 \
-  --warmup=1 --iterations=7 --json
-```
+Direct and explicit `tls` runs omit acceleration fields. When `auto` selects
+TLS, it reports `selected_transport: "tls"`, a `tls-fallback` sender label and a
+zero negotiated rate; adaptive/reno/fixed-rate labels describe QUIC only.
 
-Measure the default Hysteria v2/BBR path through an already running relay:
+For download, payload sender metadata comes from the authenticated relay
+response. Copying the client's local label into this field would be a false
+test, because the client is sending only request/control bytes.
 
-```sh
-autocar bench-client \
-  --transport=hy2 \
-  --server=relay.example.com:443 \
-  --ca=relay-ca.crt \
-  --token-file=relay-token \
-  --congestion=bbr --bbr-profile=standard \
-  --upload-mbps=0 --download-mbps=0 \
-  --target=bench.example.com:9000 \
-  --mode=download --bytes=8388608 \
-  --warmup=1 --iterations=7 --json
-```
+The per-iteration timer starts after the tunnel/direct connection is opened and
+the 16-byte benchmark request is written; it covers payload transfer and the
+one-byte completion acknowledgement, not tunnel setup. In particular, a short
+flow ratio is a warm-payload diagnostic rather than a connection-establishment
+benchmark.
 
-`--transport=quic` is an alias for `hy2`. Use `--transport=tls` to characterize
-the TCP/TLS fallback and `--transport=legacy-quic` only against a relay started
-with `--quic-engine=legacy`. For `auto`, the JSON transport label describes the
-configured mode rather than the path used by each individual flow; select an
-explicit transport for performance comparisons.
+## Namespace topology
 
-Repeat with `--mode=upload`. The timer begins after the benchmark request
-header is written and ends after the payload plus one-byte completion
-acknowledgement. Connection and tunnel-stream setup occur before that timer.
-Measure a complete real application operation separately when user-perceived
-latency matters.
+`scripts/netem-integration.sh` creates two isolated network namespaces joined by
+a veth pair: the client is in one, while the relay and bounded benchmark target
+are co-located in the server namespace. Traffic therefore crosses a real
+namespace boundary in both directions, but the suite does not claim a third
+target hop. It runs the real binary and uses real TLS/token files. The initial
+smoke/throughput stage applies symmetric random loss on each veth egress with
+`tc netem`; this is ordinary qdisc path loss and is not used as a controller
+identity proof.
 
-For Hysteria output, `local_tx_acceleration` and
-`local_negotiated_tx_bytes_per_second` always describe the client's
-client-to-relay sender. `tunnel_sender_endpoint` identifies which endpoint
-sends benchmark payload on the tunnel. Only an upload can therefore populate
-`payload_sender_acceleration` from the client process. A download names the
-relay as sender but deliberately does not mislabel the client's controller as
-relay telemetry; record the relay configuration or collect relay-side
-telemetry separately.
+The separate lossy pacing proof removes that random loss and uses the nft-backed
+`iptables` frontend to apply deterministic, tuple-scoped loss only at the
+**receiver's INPUT hook**. It drops every Nth eligible QUIC UDP datagram whose
+matched packet length is at least 1,000 bytes:
 
-## Controller matrix
+| Measurement | Payload sender | Loss hook |
+| --- | --- | --- |
+| upload | client | relay INPUT |
+| download | relay | client INPUT |
 
-Do not compare only one controller on one path. A useful minimum matrix is:
+For those eligible large data packets this is one-way loss observed at the
+receiver. Small ACK and handshake packets are intentionally outside this model.
+Putting the rule at INPUT also avoids a Linux implementation trap: with
+nft-backed iptables, a local sender OUTPUT `DROP` may propagate a policy error to
+the UDP socket and make `sendmsg(2)` return `EPERM`. That tests local firewall
+rejection, not congestion or packet loss. The suite therefore also rejects logs
+containing `operation not permitted`.
 
-| Mode | Client flags | Relay flags | Question answered |
-| --- | --- | --- | --- |
-| Direct | `--transport=direct` | none | What does the unrelayed route deliver? |
-| BBR conservative | `--congestion=bbr --bbr-profile=conservative`, bandwidths zero | matching BBR/profile, caps zero | Does a cautious model reduce queue/loss cost? |
-| BBR standard | `--congestion=bbr --bbr-profile=standard`, bandwidths zero | matching BBR/profile, caps zero | Default model result |
-| BBR aggressive | `--congestion=bbr --bbr-profile=aggressive`, bandwidths zero | matching BBR/profile, caps zero | Is extra startup pressure useful or harmful? |
-| Brutal | truthful non-zero `--upload-mbps` and `--download-mbps` | `--allow-client-bandwidth` plus explicit non-zero negotiation ceilings | Does a reserved/controlled link benefit from a fixed negotiated rate? |
-| Reno | `--congestion=reno`, bandwidths zero | `--congestion=reno`, caps zero | Loss-based baseline |
-| TLS fallback | `--transport=tls` | TCP listener enabled | What is the reachability path's cost? |
+A later fallback scenario uses separate tuple-scoped rules that drop all QUIC
+UDP at both receiver INPUT hooks. It is a silent-blackhole state-machine test,
+not part of the every-Nth pacing-loss model.
 
-For Brutal, both relay caps and client measurements should be written into the
-result metadata. An inflated capacity is not an optimization: it changes the
-experiment into an unfair overload test. BBR profiles control the sender at
-the endpoint where the flag is set, so record both endpoint configurations.
+Rules are scoped to the QUIC tuple and inspected through exact eligible and DROP
+packet counters. The script checks `DROP == floor(eligible / N)` and fails if the
+selected direction did not actually drop packets. It disables GRO/GSO/TSO before
+interpreting those counters. The lossy stage gates protocol identity, sender
+direction, exact counters and positive progress; fixed-rate accuracy is checked
+separately with the deterministic rules empty.
 
-For every row, exercise at least:
+## CI gates
 
-- download and upload;
-- short, medium, and bulk payloads;
-- one flow and several concurrent flows; and
-- clean, high-RTT, random-loss, burst-loss, and reordered profiles.
+The namespace script's deterministic hard checks cover:
 
-## Fair-test checklist
+1. wrong-CA and wrong-token failures;
+2. no plaintext sentinel in a tunnel capture;
+3. direct, QUIC and TLS TCP payload transfer;
+4. an initial QUIC failure and a live receiver-side QUIC blackhole both reach
+   authenticated TLS fallback within declared timing bounds;
+5. upload reports the client sender; download reports the relay sender;
+6. `adaptive-balanced`, `reno` and `fixed-rate` labels match the negotiated
+   response, not merely CLI input;
+7. loss-free fixed-rate aggregate goodput falls in a declared tolerant window
+   around each asymmetric effective rate;
+8. every lossy mode/direction has exact positive receiver INPUT eligible and
+   DROP counters;
+9. no sender-side `EPERM`/`operation not permitted` regression.
 
-1. Pin the AutoCAR commit, Go version, module versions, configuration, client,
-   relay, and benchmark target.
-2. Keep the direct and tunneled destinations identical. Document both physical
-   routes and relay placement; a relay can improve routing or add a detour.
-3. Alternate test order, declare warmups, run enough iterations, and retain
-   every raw result rather than only the best value.
-4. Record RTT, random and burst loss, reordering, MTU, configured link rate,
-   CPU, memory, and time of day. Confirm neither endpoint is CPU-limited.
-5. Report median plus all individual results. The emitted `p95_mbps` is the
-   95th percentile of goodput, where larger is better; it is not latency p95.
-6. Distinguish a warm shared QUIC connection from fresh direct TCP flows, and
-   state whether setup is timed. Warm payload-phase goodput is useful evidence,
-   but it is not the same metric as end-to-end short-flow latency.
-7. Repeat on the intended production path. Emulation catches regressions but
-   cannot reproduce every queue, middlebox, policer, or competing flow.
+The fixed-rate accuracy value is total equal-size payload bytes divided by total
+measured transfer time (equivalently the harmonic mean of the per-iteration
+goodputs), not the median. The default accepted target ratio is `0.82–1.08` after
+one warmup and three measured 4 MiB transfers; environment variables can change
+those declared inputs and bounds.
 
-Why Hysteria/QUIC can help: streams reuse a warm authenticated connection and
-its BBR delivery/RTT model; pacing uses estimated delivery rate and its gain
-while the congestion window uses the inferred BDP; explicitly enabled
-Fast Open can overlap the target response with initial writes; unrelated
-streams avoid TCP-style cross-flow head-of-line blocking. Why it may not help:
-the relay adds work and distance, the relay-to-destination leg is still a new
-socket, and a clean direct TCP route may already fill the bottleneck.
+The Go integration tests, rather than the namespace script, cover TLS 1.3 and
+ALPN selection, SOCKS5 UDP/session cleanup, shared QUIC-connection reuse and
+reconnect, and the cooldown's single-probe behavior. Keeping those claims
+separate prevents a passing namespace run from being mistaken for coverage it
+does not execute.
 
-## Reproducible Linux netem suite
+Adaptive and reno measurements are saved as artifacts, but CI does not require
+`adaptive >= reno × 1.10`. That ratio is unstable under shared GitHub runners,
+offload behavior, fixed test ordering, short samples and deterministic drop
+phase. It can both reject correct code and accept a mislabeled controller.
 
-The root-only integration script creates isolated client and relay network
-namespaces connected by a veth pair. Its current test matrix is:
+## Loss models
 
-| Stage | Path profile | Cases | Pass condition |
-| --- | --- | --- | --- |
-| Bulk observation | 35 ms one-way delay on both interfaces, 0.5% independent loss each direction, 50 Mbit/s each direction | direct, Hysteria v2 (`quic` alias), TLS | every median is positive; ratios are retained |
-| Controller gate | same 35 ms/50 Mbit/s path without random loss; a resettable receiver `INPUT` `iptables statistic nth` rule drops the 200th, 400th, … large sender datagram (0.5%); two warmups and five measured 4 MiB uploads/downloads | client-sender BBR/Reno and 15 Mbit/s Brutal; separate GSO-disabled BBR/Reno relay senders plus the capped Brutal relay sender | upload and download BBR/Reno equal-byte aggregate-goodput ratios are at least 1.10; every rule has non-zero counters and exactly `floor(eligible/200)` drops; Brutal upload and download each stay within 80%–115% of the declared target |
-| Cold fallback | same delay/rate, random loss removed, unused UDP port | `auto` Hysteria attempt followed by TLS | first command completes within finite deadlines |
-| Warm payload-phase gate | same delay/rate, loss-free, sequential 128 KiB downloads; timing excludes dial, tunnel-stream open, and request header | fresh direct TCP payload phases vs warm Hysteria v2 payload phases | Hysteria median/direct median is at least 1.10; this is not an end-to-end operation-latency claim |
-| Authentication | controlled namespace path | wrong CA and wrong token | both are rejected for the expected reason |
-| Live UDP failure | first proxy request over Hysteria, then both receivers silently blackhole the established UDP path in `INPUT` while TCP remains available | new TCP proxy flow in `auto` | pcap contains a UDP attempt followed by TCP/TLS, a receiver DROP counter is non-zero, the log contains a timeout-class QUIC failure and no `sendmsg EPERM`, and the flow completes within 10 seconds |
-| Confidentiality smoke | pcap of Hysteria and fallback links | unique HTTP plaintext sentinel | sentinel is absent from both captures |
+The default CI case is deliberately narrow and reproducible. A serious
+evaluation should sweep at least:
 
-The source and sink benchmark is TCP. SOCKS5 UDP ASSOCIATE, source validation,
-datagram framing, and policy behavior are covered by Go integration tests; a
-production UDP workload should also be measured with an application-specific
-loss/jitter metric rather than TCP goodput.
+- RTT: 10, 50, 100, 200 and 400 ms;
+- random loss: 0, 0.1, 1, 3, 5 and 10 percent;
+- correlated/burst loss with several correlation lengths;
+- bottleneck rates and queue sizes around the expected BDP;
+- one and many concurrent streams;
+- upload and download independently;
+- competing Reno/BBR traffic and queue-delay impact.
 
-Run the suite on Linux with `iproute2`, `iptables`, `tcpdump`, `curl`, Python 3,
-and root privileges:
+Use at least two warmups and 10–30 measured iterations in randomized order.
+Report median, dispersion/confidence interval, p95 completion time, retransmitted
+bytes, loss counter, CPU and peak queue delay. A single ratio without these
+details is not a defensible result.
 
-```sh
+## Running locally
+
+The suite requires Linux root privileges plus network namespace, `tc`,
+**nft-backed** `iptables`, `ethtool`, `tcpdump` and `curl` support. It deliberately
+refuses the legacy iptables backend because its error/counter behavior is not the
+regression being proved:
+
+```bash
 make build
-sudo ./scripts/netem-integration.sh ./bin/autocar
+iptables --version   # output must include: (nf_tables)
+sudo AUTOCAR_ARTIFACT_DIR="$PWD/artifacts/netem" \
+  ./scripts/netem-integration.sh "$PWD/bin/autocar"
 ```
 
-Override the declared profile explicitly:
+Artifacts include JSON measurements, endpoint logs, rule counters and packet
+captures. A failed job should be diagnosed from those facts before changing a
+performance threshold.
 
-```sh
-sudo env \
-  AUTOCAR_NETEM_DELAY_MS=50 \
-  AUTOCAR_NETEM_LOSS=1% \
-  AUTOCAR_NETEM_RATE=25mbit \
-  AUTOCAR_BENCH_BYTES=4194304 \
-  AUTOCAR_BENCH_ITERATIONS=9 \
-  AUTOCAR_BENCH_WARMUP=2 \
-  AUTOCAR_CONTROLLER_DROP_EVERY=200 \
-  AUTOCAR_CONTROLLER_BYTES=4194304 \
-  AUTOCAR_CONTROLLER_ITERATIONS=5 \
-  AUTOCAR_CONTROLLER_WARMUP=2 \
-  AUTOCAR_SHORT_FLOW_BYTES=131072 \
-  AUTOCAR_SHORT_FLOW_ITERATIONS=9 \
-  AUTOCAR_SHORT_FLOW_WARMUP=3 \
-  AUTOCAR_MIN_SHORT_FLOW_RATIO=1.10 \
-  AUTOCAR_MIN_BBR_RENO_RATIO=1.10 \
-  AUTOCAR_MIN_BRUTAL_TARGET_RATIO=0.80 \
-  AUTOCAR_MAX_BRUTAL_TARGET_RATIO=1.15 \
-  AUTOCAR_ARTIFACT_DIR="$PWD/artifacts/netem" \
-  ./scripts/netem-integration.sh ./bin/autocar
-```
+## Interpretation
 
-The script writes raw JSON, a summary, process logs, and packet captures under
-`artifacts/netem`. It also retains `iptables --version`, including the
-legacy/nft backend marker, and the actual per-case eligible/DROP counters. The
-GitHub Actions netem workflow publishes the directory even when diagnosis is
-needed.
+AutoCAR is a split proxy. A comparison against direct TCP includes different
+protocols, endpoints, encryption work and often different congestion control;
+it cannot isolate the application pacer alone. `adaptive` versus `reno` on the
+same AutoCAR QUIC path is the closer A/B comparison, but it still shares one
+underlying quic-go controller.
 
-## What the CI gate proves
-
-The generic bulk path measurements are observations rather than a universal
-speed claim. The controller and warm-payload gates are narrow and declared in
-advance. On the deterministic-loss path, two warmups precede five measured
-transfers, and both client-side uploads and relay-side downloads with BBR must
-beat their Reno baselines by at least 1.10. The receiver-side matcher is reset
-before every controller run. `--packet N-1` makes the Nth eligible datagram the
-first drop rather than the first QUIC Initial, and a following counter rule
-proves both the eligible denominator and exactly `floor(eligible/N)` drops.
-Controller senders disable UDP GSO so a matched packet is one QUIC datagram
-rather than a host-dependent batch.
-
-Negotiated Brutal is exercised in both directions. Each equal-byte aggregate
-goodput must remain between 80% and 115% of its truthful 15 Mbit/s target. The
-lower bound rejects a controller that cannot sustain its declared rate; the
-upper bound rejects a mislabeled/no-op Brutal path that is actually sending at
-the 50 Mbit/s emulated link rate. The client JSON proves its upload controller
-and negotiated rate. The download gate uses the separately configured relay
-sender, while the raw client JSON intentionally labels only local Tx state.
-
-On the loss-free high-RTT path, sequential warm Hysteria 128 KiB payload
-phases must beat fresh direct TCP payload phases by at least 1.10. Because the
-timer starts after dial and the request header, this checks warm data-phase
-goodput, not complete short-flow setup or user-perceived latency. These checks
-demonstrate the selected mechanisms under those profiles only.
-
-Controller acceptance uses aggregate goodput across equal-size measured
-transfers. This is the harmonic mean of the per-transfer Mbit/s values and is
-equivalent to total bytes divided by total transfer time. Medians remain in the
-artifacts for distribution context, but they do not discard a genuine slow
-loss-recovery transfer from the acceptance result.
-
-Do not lower `AUTOCAR_MIN_SHORT_FLOW_RATIO` or
-`AUTOCAR_MIN_BBR_RENO_RATIO`, widen the Brutal window, or publish a CI ratio as
-a universal production claim merely to hide a regression. Fixed nth loss is
-repeatable but is not identical packet-number loss across controllers: packet
-sizes and retransmissions can change the later sequence. BBR profile quality,
-Brutal fairness, burst loss, reordering, ECN/AQM, concurrent sessions,
-sustained high-loss behavior, and real-route improvement need the broader
-retained matrix above.
-
-The pcap sentinel assertion is a regression smoke test, not a cryptographic
-proof. TLS 1.3, verified X.509, token authentication, optional mTLS, and the
-threat model remain the security basis.
+Results apply only to the stated topology and build. Stable low-latency paths
+may favor direct traffic or bypass mode. Publish raw measurements and the exact
+commit instead of generalizing a favorable sample.

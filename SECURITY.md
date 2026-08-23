@@ -7,113 +7,115 @@ security fixes.
 
 ## Reporting a vulnerability
 
-Please do not open a public issue for a suspected vulnerability. Use GitHub's
-private vulnerability reporting feature for this repository. Include the
-affected version, reproduction steps, impact, and any suggested mitigation.
+Do not open a public issue for a suspected vulnerability. Use GitHub private
+vulnerability reporting for this repository and include the affected commit,
+reproduction, impact and suggested mitigation.
 
-## Security guarantees and limits
+## Guarantees
 
-AutoCAR protects the client-to-relay hop with authenticated TLS 1.3. QUIC
-always uses TLS 1.3; the TCP fallback uses TLS 1.3 explicitly. The client never
-offers an option to skip certificate verification. A private CA or a publicly
-trusted certificate must be configured, and mutual TLS can be required by the
-server.
+AutoCAR protects the client-to-relay hop with authenticated TLS 1.3. QUIC and
+TCP fallback use the `autocar/2` ALPN. The client rejects `InsecureSkipVerify`;
+a pinned/private CA or explicitly selected system roots are required. The relay
+may additionally require mTLS. QUIC 0-RTT is disabled so tokens and requests are
+not replayable early data.
 
-The tunnel protects payload confidentiality and integrity against passive
-observers and active network attackers, assuming the configured CA, private
-keys, token, endpoints, operating systems, and dependencies are not
-compromised. It does not hide endpoint IP addresses, packet sizes, timing, or
-the fact that UDP or TLS is in use. The relay can observe destination metadata
-and any destination traffic that is itself unencrypted. End-to-end HTTPS
-remains encrypted between the application and the destination.
+Assuming the endpoints, configured trust roots, private keys, relay token and
+dependencies are not compromised, TLS provides confidentiality, integrity and
+relay identity against network attackers. End-to-end HTTPS remains encrypted
+between the application and destination.
 
-No transport can guarantee that a network operator will not rate-limit or
-block it. AutoCAR's default UDP service is valid HTTP/3 and returns a neutral
-cover page to unauthenticated probes; the client uses Hysteria's Chrome QUIC
-fingerprint. Optional Salamander changes packet appearance with a separate
-pre-shared key, but it is obfuscation rather than encryption. It must never be
-treated as a substitute for TLS certificate verification, the relay token or
-mTLS. When UDP is unavailable, new TCP flows can use the standards-compliant
-TLS/TCP fallback. None of these mechanisms is an undetectability guarantee.
+## Limits
 
-The default Chrome-parroting ClientHello intentionally follows a signature
-scheme list that omits Ed25519. Relay certificates should therefore use ECDSA
-P-256/P-384 (`autocar cert` emits P-256) or RSA. An Ed25519 relay certificate is
-supported only when the client explicitly uses `--disable-chrome-parrot`; a
-matching handshake failure includes this guidance. This switch does not relax
-certificate-chain or hostname verification.
+AutoCAR does not hide endpoint IPs, packet size, timing or the use of QUIC/TLS.
+It has no HTTP cover page, browser-fingerprint imitation or packet obfuscation,
+and makes no undetectability guarantee. The relay sees destination metadata and
+any destination protocol that lacks its own encryption.
 
-The relay blocks private, loopback, link-local, multicast, and unspecified
-destinations by default, and denies common SMTP submission ports. Operators
-should keep these defaults unless they fully trust every authenticated client.
-Deployment-specific control-plane and metadata ranges can be added with
-`--deny-cidrs`, especially before enabling private destinations.
+The relay is an authenticated proxy, not a tenant sandbox. Application limits
+reduce accidental and straightforward resource exhaustion but do not replace
+host firewall, cgroup, file-descriptor, memory, CPU and per-source rate limits.
 
-The same policy is applied to every UDP datagram destination after remote DNS
-resolution; only the approved numeric address is used for the actual send. A
-logical UDP session remembers at most 256 successfully written numeric
-destinations. Once full, it rejects new destinations without evicting existing
-ones; failed writes never authorize replies. This bounds memory while retaining
-valid delayed-reply filtering semantics.
-The local SOCKS5 UDP relay accepts datagrams only from the IP of its associated
-TCP control connection. A concrete `UDP ASSOCIATE` address must equal that peer;
-a domain is resolved under the dial timeout and must include the peer address.
-The relay pins the requested non-zero port, or the first valid source port when
-the request uses port zero. SOCKS fragmentation is not reassembled and is
-dropped.
+Application-layer pacing is cooperative. An authenticated modified client can
+ignore its local rate. Use a host or cloud policer for security/accounting
+limits. Negotiated adaptive/fixed-rate pacing applies only to QUIC; a TCP flow
+taken by `auto`'s TLS fallback is unpaced and must not be treated as a quota.
 
-The Hysteria core exposes a deliberately smaller TLS configuration surface than
-Go's `tls.Config`. AutoCAR copies server-name/root verification,
-`VerifyPeerCertificate` on the client, certificate selection, strict mTLS, and
-ECH fields that the core supports. It rejects unsupported security-sensitive
-policies before binding or dialing, including `VerifyConnection`, server
-`GetConfigForClient`/`VerifyPeerCertificate`, custom verification clocks or
-curve policies, custom server ticket handling, and client-authentication modes
-other than no certificate or `RequireAndVerifyClientCert`. TLS 1.2-only fields
-such as `CipherSuites` and renegotiation are irrelevant to QUIC/TLS 1.3 and do
-not cause rejection. The client session cache in the shared CLI TLS config is
-used by the per-flow TCP fallback; Hysteria instead keeps a long-lived QUIC
-session.
+## Destination policy
 
-The relay ignores client-supplied bandwidth hints by default, preventing an
-authenticated client from forcing the relay sender into an unbounded Brutal
-rate. `--allow-client-bandwidth` is an explicit operator opt-in and is rejected
-unless finite upload and download negotiation ceilings are both configured.
+The relay resolves names itself and gives the underlying dialer only approved
+numeric addresses. By default it rejects:
 
-Application limits do not replace host-level denial-of-service controls. The
-hardened Hysteria fork caps accepted QUIC sessions globally and per source key,
-including cover traffic, after Retry and before handshake allocation. It also
-caps active TCP handlers globally and per source key across QUIC connections
-before they can wait for a target header. Header
-reads have a finite deadline. Unauthenticated HTTP/3 connections must complete
-authentication within `--handshake-timeout`, and `--max-uni-streams` gives their
-unidirectional control streams a separate small bound. HTTP request headers are
-capped at 16 KiB before allocation. UDP session admission is global and shared
-per authenticated source key across QUIC connections, and occurs before
-allocating defragmentation state;
-fragment count and total reassembled bytes are fixed and bounded.
-`--max-outbound-tcp` and `--max-outbound-udp` separately cap active target
-sockets, while `--max-streams` remains a per-QUIC-connection protocol limit.
-Clients behind one NAT share `--max-client-connections`,
-`--max-client-fallback-connections`, `--max-client-tcp-handlers`, and
-`--max-client-udp-sessions`; the global caps
-remain authoritative if a peer can rotate source addresses.
-Resource keys are an IPv4 address or a masked IPv6 `/64`, so rotating IPv6
-interface identifiers does not create new buckets. A legitimate NAT or routed
-IPv6 `/64` shares its bucket by design.
-The relay requires QUIC Retry source-address validation before allocating a
-bounded handshake slot. Initial packets still consume kernel/network work, so production
-relays should apply firewall rate and burst limits per source, bound file
-descriptors and memory with the service manager, and monitor UDP traffic and
-authentication failures.
+- loopback, link-local, multicast and unspecified addresses;
+- private/ULA/CGNAT addresses unless explicitly enabled;
+- IANA translation, documentation, benchmarking, reserved and other
+  special-purpose ranges;
+- SMTP submission ports 25, 465 and 587;
+- operator-supplied denied CIDRs and ports.
 
-On the client, connection setup is single-flight and `--max-pending-opens`
-bounds stream-open workers whose upstream Hysteria API has no context-aware
-variant. Caller deadlines still return immediately; late connections are
-closed, and their slot is retained until the underlying call actually exits.
+This prevents an approved name from being resolved a second time into a local
+service. `--allow-private` never permits loopback, link-local or built-in
+special-use/control-plane ranges. Operators should add provider-specific
+metadata/control-plane addresses to `--deny-cidrs` before serving untrusted
+clients.
 
-TLS private-key files must be regular files and mode `0600` on Unix. Shared
-relay tokens, local-proxy passwords and Salamander passwords must contain at
-least 16 bytes; use the bundled `autocar token` command to generate independent
-high-entropy values. Do not reuse the relay authentication token as the
-Salamander password.
+The same resolver policy applies to every UDP destination. A UDP association
+records a bounded set of successfully requested numeric destinations and
+forwards replies only from that set; unsolicited packets are dropped.
+
+## SOCKS5 UDP boundary
+
+The local UDP relay accepts packets only from the IP of its associated TCP
+control connection. A concrete UDP ASSOCIATE address must match that peer; a
+domain must resolve to it. A nonzero requested source port is pinned, while port
+zero pins the first valid sender. RFC 1928 UDP fragments are dropped rather than
+silently combined.
+
+The tunnel logical payload limit is 4,096 bytes. Every AutoCAR fragment carries
+its own address metadata. Fragment count, incomplete messages, buffered bytes
+and TTL are bounded before attacker-controlled allocation; conflicting
+fragments purge the assembly.
+
+## Authentication and error handling
+
+Tokens must be 16–1,024 bytes. The relay hashes the bounded presented token and
+uses a constant-time digest comparison. It authenticates every stream before
+destination resolution or UDP session allocation. Invalid requests receive
+bounded, neutral errors; resolver and operating-system details are not exposed.
+
+On Unix, the TLS private key must be a regular file with mode exactly `0600`.
+Token and password files must be regular and have no group/other permission bits
+(`0600` or stricter). Each file and its parent directory must be readable and
+traversable by the actual runtime user; a root-owned `0600` secret is not usable
+by an unprivileged `autocar` service. Generate independent high-entropy secrets
+with `autocar token`; do not reuse relay, local proxy and other credentials.
+
+## Resource controls
+
+- QUIC and TLS listeners have global and per-source connection limits. IPv4 is
+  keyed by address; IPv6 is grouped by `/64` to resist interface-ID rotation.
+- QUIC pre-authentication lifetime, protocol headers and destination dials have
+  deadlines.
+- Concurrent tunnel streams and UDP sessions are admitted before starting
+  attacker-controlled work.
+- UDP incomplete reassembly has strict count/byte limits and a fixed TTL.
+  Destination authorization maps have a strict count bound and live for their
+  UDP association; an association ends with its control stream or connection.
+- Client connection establishment is single-flight; fallback has a bounded
+  attempt and cooldown so a UDP blackhole cannot multiply dial workers.
+- Shutdown closes active transports and unblocks stream and packet receive
+  goroutines.
+
+Legitimate users behind one NAT or IPv6 `/64` share per-source quotas. Global
+limits remain authoritative if an attacker rotates addresses. QUIC Initial
+packets still cost kernel/network work, so public relays should enforce
+firewall-level source rate and burst limits.
+
+## Dependency boundary
+
+AutoCAR builds on official upstream quic-go and independently maintained
+protocol code. A targeted CI boundary rejects known Hysteria/apernet modules and
+imports, local module replacements and known external-source directory paths.
+That regression check is not a universal provenance or license detector. CI also
+runs tests, race detection, vet, CodeQL, a reachable vulnerability scan and
+privileged namespace integration tests. These checks reduce risk but are not a
+formal audit.

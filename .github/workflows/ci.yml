@@ -30,9 +30,9 @@ jobs:
       - name: Verify formatting
         if: matrix.go == '1.27.x'
         run: make fmt-check
-      - name: Verify local-fork provenance
+      - name: Verify dependency boundary
         if: matrix.go == '1.27.x'
-        run: make fork-provenance-check
+        run: make dependency-boundary-check
       - name: Verify module files
         if: matrix.go == '1.27.x'
         run: make mod-check
@@ -43,17 +43,6 @@ jobs:
         run: make vet
       - name: Test with coverage
         run: go test -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
-      - name: Test hardened Hysteria module
-        working-directory: third_party/hysteria-core
-        run: go test -shuffle=on -count=1 ./...
-      - name: Test hardened QUIC core, HTTP/3, and RFC 9002 recovery
-        working-directory: third_party/quic-go
-        run: |
-          go test -shuffle=on -count=1 . -run '^TestServerCancelsConnContextWhenConnectionIDGenerationFails$'
-          go test -shuffle=on -count=1 ./http3 ./internal/ackhandler
-      - name: Test Chrome fingerprint, datagrams, and path MTU discovery
-        working-directory: third_party/quic-go
-        run: go test -shuffle=on -count=1 ./integrationtests/self -run '^(TestChromeParrot|TestDatagram(Negotiation|SizeLimit)|TestPathMTUDiscovery)'
       - name: Upload coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -71,14 +60,6 @@ jobs:
           go-version: 1.27.x
           cache: true
       - run: make race
-      - name: Race-test hardened Hysteria resource limits
-        working-directory: third_party/hysteria-core
-        run: go test -race -shuffle=on -count=1 ./client ./server ./internal/frag ./internal/protocol ./internal/congestion/...
-      - name: Race-test hardened QUIC admission and loss recovery
-        working-directory: third_party/quic-go
-        run: |
-          go test -race -shuffle=on -count=1 . -run '^TestServerCancelsConnContextWhenConnectionIDGenerationFails$'
-          go test -race -shuffle=on -count=1 ./http3 ./internal/ackhandler
 
   vulnerability-scan:
     name: Reachable vulnerability scan
@@ -132,7 +113,11 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist/package
-          go build -trimpath -o "dist/package/${{ matrix.binary }}" ./cmd/autocar
+          BUILD_VERSION="ci-${GITHUB_SHA:0:12}"
+          BUILD_DATE="$(git show -s --format=%cI HEAD)"
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/cppla/autocar/internal/version.Version=${BUILD_VERSION} -X github.com/cppla/autocar/internal/version.Commit=${GITHUB_SHA} -X github.com/cppla/autocar/internal/version.Date=${BUILD_DATE}" \
+            -o "dist/package/${{ matrix.binary }}" ./cmd/autocar
           cp LICENSE THIRD_PARTY_NOTICES.md dist/package/
           if [ "${{ matrix.goos }}" = "windows" ]; then
             (cd dist/package && zip -q -X "../${{ matrix.archive }}" "${{ matrix.binary }}" LICENSE THIRD_PARTY_NOTICES.md)

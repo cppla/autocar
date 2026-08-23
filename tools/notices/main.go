@@ -295,8 +295,6 @@ func render(dependencies []dependency) ([]byte, error) {
 		}
 	}
 
-	output.WriteString("\n## Brutal code provenance\n\n")
-	output.WriteString("AutoCAR's negotiated Brutal controller is provided by the MIT-licensed Hysteria core module identified above. AutoCAR does not vendor, import, or copy the GPL-licensed `tcp-brutal` implementation. Similar terminology describes a traffic-control strategy and does not imply source-code provenance.\n")
 	return output.Bytes(), nil
 }
 
