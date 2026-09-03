@@ -329,6 +329,41 @@ func TestQUICDatagramConfigValidation(t *testing.T) {
 	}
 }
 
+func TestQUICDatagramCustomServerLimitsApplied(t *testing.T) {
+	serverTLS, _ := testTLSConfigs(t)
+	server, err := ListenQUIC(QUICServerConfig{
+		Address:                  "127.0.0.1:0",
+		Token:                    testToken,
+		TLSConfig:                serverTLS,
+		MaxUDPSessions:           11,
+		MaxClientUDPSessions:     3,
+		MaxUDPDestinations:       7,
+		UDPReceiveQueue:          13,
+		UDPReassemblyTTL:         17 * time.Second,
+		MaxUDPReassemblyMessages: 19,
+		MaxUDPReassemblyBytes:    23 << 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	if got := cap(server.udp.slots); got != 11 {
+		t.Fatalf("global UDP sessions = %d, want 11", got)
+	}
+	if got := server.udp.clients.limit; got != 3 {
+		t.Fatalf("per-source UDP sessions = %d, want 3", got)
+	}
+	config := server.udp.config
+	if config.maxDestinations != 7 ||
+		config.receiveQueue != 13 ||
+		config.reassemblyTTL != 17*time.Second ||
+		config.reassemblyMessages != 19 ||
+		config.reassemblyBytes != 23<<10 {
+		t.Fatalf("custom UDP limits not applied: %+v", config)
+	}
+}
+
 type testUDPResolvingDialer struct {
 	resolveCalls atomic.Int64
 }

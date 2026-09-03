@@ -2,8 +2,10 @@
 
 ## Supported versions
 
-Until the first stable release, only the latest commit on `main` receives
-security fixes.
+The latest stable release in the `v1.x` series and the latest commit on `main`
+receive security fixes. Versions before `v1.0.0` and development snapshots are
+not supported. This policy will be updated when a later major series is
+released.
 
 ## Reporting a vulnerability
 

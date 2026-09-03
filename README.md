@@ -10,6 +10,7 @@
   <a href="https://github.com/cppla/autocar/actions/workflows/ci.yml"><img src="https://github.com/cppla/autocar/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/cppla/autocar/actions/workflows/codeql.yml"><img src="https://github.com/cppla/autocar/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
   <a href="https://github.com/cppla/autocar/actions/workflows/netem.yml"><img src="https://github.com/cppla/autocar/actions/workflows/netem.yml/badge.svg" alt="netem integration"></a>
+  <a href="https://github.com/cppla/autocar/actions/workflows/fuzz.yml"><img src="https://github.com/cppla/autocar/actions/workflows/fuzz.yml/badge.svg" alt="scheduled fuzzing"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e.svg" alt="MIT License"></a>
 </p>
 
@@ -39,12 +40,16 @@ AutoCAR 采用独立协议与实现。Hysteria v2 仅作为公开设计参考；
 - QUIC 连接、并发流、待打开请求、UDP 会话、分片重组字节、HTTP 头和出口 socket 都有上限。
 - `auto` 模式用冷却熔断器限制新 TCP 流因 UDP 黑洞反复等待；fallback 只承载
   TCP。SOCKS5 UDP 在 `auto` 中仍只尝试 QUIC，QUIC 不可用时 association 会失败。
+- 客户端在实际成功完成 QUIC→TLS 切换或 QUIC 路径恢复时记录固定枚举的
+  `event`/`reason`；该事件路径不包含令牌、完整目标、relay 地址或原始错误文本。
+  回调按状态提交顺序异步串行分发，待处理队列有界并在拥塞时合并中间事件；此时
+  并发安全的 `Snapshot` 是最终状态依据。最近完成的路径与 QUIC 熔断健康状态彼此独立。
 
 中继知道目标地址，也可能看到目标侧明文；应用仍应使用 HTTPS、SSH 等端到端协议。AutoCAR 不承诺流量不可识别，也不承诺任何路径一定比直连更快。
 
 ## 快速开始
 
-需要 Go 1.25 或更高版本：
+需要 Go 1.25.13 或更高版本：
 
 ```bash
 git clone https://github.com/cppla/autocar.git
@@ -78,6 +83,25 @@ go build -trimpath -o autocar ./cmd/autocar
   --ca server.crt \
   --token-file token
 ```
+
+在启动本地代理前，可用同一组隧道参数做一次真实端到端探测：
+
+```bash
+./autocar doctor \
+  --server relay.example.com:8443 \
+  --ca server.crt \
+  --token-file token \
+  --transport auto \
+  --target example.com:443
+```
+
+`doctor` 不以“本地端口已监听”代替中继健康。它会通过经过证书和令牌认证的
+隧道实际打开一次目标 TCP 连接，再报告真正选中的 `quic` 或 `tls`、客户端与
+中继端 pacing、协商后的双向固定速率和耗时。加 `--json` 可得到稳定的机器可读
+结果；失败 JSON 只包含稳定错误码和脱敏说明，原始网络错误、远端消息及本地路径仅在
+人类输出的诊断日志中出现。退出码 `0` 表示探测成功，`1` 表示网络/认证/目标探测
+失败，`2` 表示参数或本地配置错误。成功只证明该 TCP 路径此刻可用，不代表目标应用
+协议正确或链路更快。
 
 生产环境若直接绑定 `443`，应给服务进程最小的 `CAP_NET_BIND_SERVICE` 能力，
 或在主机/容器外层做端口映射；不要仅为绑定低端口而以 root 运行整个中继。
@@ -143,6 +167,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 
+make integration-docker
 make build
 sudo ./scripts/netem-integration.sh ./bin/autocar
 ```
@@ -161,6 +186,7 @@ iptables 下的 UDP `sendmsg` 直接返回 `EPERM`。有损阶段只硬验证协
 `scripts/` 中：
 
 - `check-dependency-boundary.sh` 拒绝已知 Hysteria/apernet 模块、local replace 和已知外部源码目录进入构建图；
+- `docker-integration.sh` 在隔离容器网络中验证 QUIC、TLS、自动回退、`doctor`、错误令牌拒绝和非 root 只读运行；
 - `govulncheck.sh` 安装固定版本的扫描器并检查可达漏洞；
 - `netem-integration.sh` 创建 Linux network namespace、延迟/丢包链路并保存诊断工件。
 

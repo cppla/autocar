@@ -38,6 +38,7 @@ type tunnelFlags struct {
 	pacingProfile  string
 	uploadMbps     uint64
 	downloadMbps   uint64
+	eventHandler   tunnel.ClientEventHandler
 }
 
 func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
@@ -152,6 +153,10 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 	if err := validateClientPacingTransport(mode, pacing.Mode); err != nil {
 		return nil, err
 	}
+	eventHandler := flags.eventHandler
+	if eventHandler == nil {
+		eventHandler = logTunnelEvent
+	}
 
 	switch mode {
 	case "quic":
@@ -164,6 +169,7 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 			Pacing:           pacing,
 			MaxTx:            upload,
 			MaxRx:            download,
+			EventHandler:     eventHandler,
 		})
 	case "tls":
 		return tunnel.NewTLSClient(tunnel.TLSClientConfig{
@@ -191,6 +197,7 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 			Pacing:                pacing,
 			MaxTx:                 upload,
 			MaxRx:                 download,
+			EventHandler:          eventHandler,
 		})
 	default:
 		panic("unreachable transport mode")
@@ -295,7 +302,10 @@ func parseDeniedPrefixes(value string) ([]netip.Prefix, error) {
 				return nil, fmt.Errorf("invalid denied CIDR %q", part)
 			}
 		}
-		prefix = prefix.Masked()
+		prefix, err = security.NormalizeDeniedPrefix(prefix)
+		if err != nil {
+			return nil, fmt.Errorf("invalid denied CIDR %q: %w", part, err)
+		}
 		if _, exists := seen[prefix]; exists {
 			continue
 		}

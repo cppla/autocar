@@ -34,6 +34,10 @@ type QUICServerConfig struct {
 	HandshakeTimeout     time.Duration
 	DialTimeout          time.Duration
 	MaxConcurrentStreams int
+	// StreamAdmission optionally shares the active-stream budget with other
+	// server transports. When set, MaxConcurrentStreams must be zero or equal
+	// to the admission limit. Nil preserves the independent-server behavior.
+	StreamAdmission *StreamAdmission
 	// MaxConnections bounds accepted QUIC connections, including authenticated
 	// idle sessions. Zero uses a conservative default.
 	MaxConnections int
@@ -89,6 +93,7 @@ type QUICServer struct {
 	connMu    sync.Mutex
 	conns     map[*quic.Conn]struct{}
 	connSem   chan struct{}
+	streamSem chan struct{}
 	clients   *sourceConnectionLimiter
 	udp       *serverUDPManager
 	pacing    PacingConfig
@@ -106,7 +111,14 @@ func ListenQUIC(config QUICServerConfig) (*QUICServer, error) {
 	if err != nil {
 		return nil, err
 	}
-	core, err := newServerCore(config.Token, config.Dialer, config.HandshakeTimeout, config.DialTimeout, config.MaxConcurrentStreams)
+	core, err := newServerCoreWithAdmission(
+		config.Token,
+		config.Dialer,
+		config.HandshakeTimeout,
+		config.DialTimeout,
+		config.MaxConcurrentStreams,
+		config.StreamAdmission,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +163,7 @@ func ListenQUIC(config QUICServerConfig) (*QUICServer, error) {
 		cancel:    cancel,
 		conns:     make(map[*quic.Conn]struct{}),
 		connSem:   make(chan struct{}, maxConnections),
+		streamSem: make(chan struct{}, cap(core.sem)),
 		clients:   newSourceConnectionLimiter(maxClientConnections),
 		udp:       udp,
 		pacing:    config.Pacing,
@@ -316,10 +329,14 @@ func (s *QUICServer) serveConnection(conn *quic.Conn, sourceKey string) {
 			_ = wrapped.Close()
 			return
 		}
-		if !s.core.acquire() {
+		select {
+		case s.streamSem <- struct{}{}:
+		default:
 			s.lifecycle.Unlock()
 			_ = wrapped.SetDeadline(time.Now().Add(time.Second))
-			_ = protocol.WriteResponse(wrapped, protocol.Response{Status: protocol.StatusBusy, Message: "server busy"})
+			_ = protocol.WriteResponse(wrapped, protocol.Response{
+				Status: protocol.StatusBusy, Message: "server busy",
+			})
 			finishStream(wrapped)
 			continue
 		}
@@ -327,7 +344,7 @@ func (s *QUICServer) serveConnection(conn *quic.Conn, sourceKey string) {
 		s.lifecycle.Unlock()
 		go func() {
 			defer s.wg.Done()
-			defer s.core.release()
+			defer func() { <-s.streamSem }()
 			// A QUIC stream has an independent lifecycle. In particular, the
 			// peer's STOP_SENDING cancels stream.Context without killing sibling
 			// streams, allowing an abandoned CONNECT to cancel DNS/dial promptly.
@@ -409,6 +426,11 @@ type ClientConfig struct {
 	UDPReassemblyTTL         time.Duration
 	MaxUDPReassemblyMessages int
 	MaxUDPReassemblyBytes    int
+	// EventHandler receives low-cardinality fallback and recovery transitions.
+	// Events never contain relay addresses, destinations, credentials, or raw
+	// error strings. Callbacks are dispatched asynchronously, serialized in
+	// transition order, and should return promptly so observations stay current.
+	EventHandler ClientEventHandler
 }
 
 // Client is a concurrent transport.Dialer backed by one lazily established,
@@ -447,6 +469,17 @@ type Client struct {
 	remoteMode        string
 	remoteRate        uint64
 	selectedTransport string
+	eventHandler      ClientEventHandler
+	primaryFailReason ClientEventReason
+	lastEvent         ClientEvent
+	// lastSelectedFallback describes the most recently completed path. It is
+	// deliberately independent from primaryFailedAt: a TLS dial that completes
+	// after a concurrent QUIC recovery is still the latest real selection, but
+	// it does not reopen the QUIC circuit.
+	lastSelectedFallback bool
+	eventMu              sync.Mutex
+	eventQueue           []ClientEvent
+	eventDispatching     bool
 
 	udpConfig      clientUDPConfig
 	udpMu          sync.Mutex
@@ -457,6 +490,13 @@ type quicDialAttempt struct {
 	done   chan struct{}
 	cancel context.CancelFunc
 	err    error
+}
+
+type clientPathMetadata struct {
+	localMode  string
+	localRate  uint64
+	remoteMode string
+	remoteRate uint64
 }
 
 // NewClient creates a QUIC client. It doesn't perform network I/O until the
@@ -526,6 +566,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 		udpConfig:        udpConfig,
 		udpDispatchers:   make(map[*quic.Conn]*clientDatagramDispatcher),
 		localMode:        basePacer.label(),
+		eventHandler:     config.EventHandler,
 	}
 	if config.FallbackAddress != "" {
 		fallbackCooldown := config.FallbackCooldown
@@ -609,12 +650,15 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	if err := protocol.WriteRequest(io.Discard, request); err != nil {
 		return nil, err
 	}
-	if c.fallback != nil && !c.shouldTryPrimary(time.Now()) {
-		fallbackConn, fallbackErr := c.fallback.DialContext(ctx, network, address)
-		if fallbackErr == nil {
-			c.recordFallback()
+	if c.fallback != nil {
+		tryPrimary, fallbackReason := c.shouldTryPrimary(time.Now())
+		if !tryPrimary {
+			fallbackConn, fallbackErr := c.fallback.DialContext(ctx, network, address)
+			if fallbackErr == nil {
+				c.recordFallback(fallbackReason)
+			}
+			return fallbackConn, fallbackErr
 		}
-		return fallbackConn, fallbackErr
 	}
 
 	// In auto mode the primary budget covers the whole QUIC attempt, not just
@@ -629,6 +673,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	defer cancelPrimary()
 
 	var primaryErr error
+	fallbackReason := ClientReasonQUICDialFailed
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := contextError(ctx); err != nil {
 			c.primaryProbeFinished()
@@ -636,6 +681,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		}
 		if err := contextError(primaryCtx); err != nil {
 			primaryErr = fmt.Errorf("tunnel: QUIC attempt budget exhausted: %w", err)
+			fallbackReason = ClientReasonQUICAttemptTimeout
 			break
 		}
 		conn, err := c.connection(primaryCtx)
@@ -645,16 +691,21 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 				return nil, callerErr
 			}
 			primaryErr = err
+			if contextError(primaryCtx) != nil {
+				fallbackReason = ClientReasonQUICAttemptTimeout
+			}
 			break
 		}
 		stream, err := conn.OpenStreamSync(primaryCtx)
 		if err != nil {
 			primaryErr = fmt.Errorf("tunnel: open QUIC stream: %w", err)
+			fallbackReason = ClientReasonQUICStreamOpenFailed
 			if callerErr := contextError(ctx); callerErr != nil {
 				c.primaryProbeFinished()
 				return nil, callerErr
 			}
 			if contextError(primaryCtx) != nil {
+				fallbackReason = ClientReasonQUICAttemptTimeout
 				break
 			}
 			if conn.Context().Err() == nil {
@@ -669,12 +720,14 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		var response protocol.Response
 		response, err = openProtocolRequest(primaryCtx, wrapped, request, c.handshakeTimeout)
 		if err == nil {
-			if err = c.acceptPacingResponse(conn, response, 0, false); err != nil {
+			metadata, pacingErr := c.acceptPacingResponse(conn, response, 0, false)
+			if pacingErr != nil {
 				_ = wrapped.Close()
-				primaryErr = fmt.Errorf("tunnel: invalid pacing response: %w", err)
+				primaryErr = fmt.Errorf("tunnel: invalid pacing response: %w", pacingErr)
+				fallbackReason = ClientReasonQUICPacingRejected
 				break
 			}
-			c.primarySucceeded()
+			c.primarySucceeded(metadata)
 			return wrapped, nil
 		}
 		_ = wrapped.Close()
@@ -683,10 +736,11 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 			// A valid authenticated response proves the QUIC path is healthy.
 			// Destination and authorization failures must never trip the
 			// transport circuit breaker.
-			c.primarySucceeded()
+			c.primaryHealthy()
 			return nil, err
 		}
 		primaryErr = fmt.Errorf("tunnel: QUIC stream handshake: %w", err)
+		fallbackReason = ClientReasonQUICHandshakeFailed
 		if callerErr := contextError(ctx); callerErr != nil {
 			// A caller controls only its own stream. Canceling one request must
 			// never tear down the multiplexed connection and every other flow.
@@ -694,6 +748,9 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 			return nil, callerErr
 		}
 		if contextError(primaryCtx) != nil || conn.Context().Err() == nil {
+			if contextError(primaryCtx) != nil {
+				fallbackReason = ClientReasonQUICAttemptTimeout
+			}
 			// A per-stream deadline can mean a slow destination, not a dead
 			// QUIC path. Keep the shared connection; auto mode opens its breaker
 			// for new flows and lets this flow try TLS. A truly blackholed QUIC
@@ -708,10 +765,10 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		return nil, callerErr
 	}
 	if c.fallback != nil {
-		c.primaryFailed(time.Now())
+		c.primaryFailed(time.Now(), fallbackReason)
 		fallbackConn, fallbackErr := c.fallback.DialContext(ctx, network, address)
 		if fallbackErr == nil {
-			c.recordFallback()
+			c.recordFallback(fallbackReason)
 			return fallbackConn, nil
 		}
 		return nil, errors.Join(primaryErr, fmt.Errorf("tunnel: TLS fallback: %w", fallbackErr))
@@ -726,33 +783,67 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 // shouldTryPrimary returns false while the fallback circuit is open. Once the
 // cooldown expires exactly one caller becomes the QUIC probe; concurrent
 // callers keep using TLS instead of all paying the UDP timeout.
-func (c *Client) shouldTryPrimary(now time.Time) bool {
+func (c *Client) shouldTryPrimary(now time.Time) (bool, ClientEventReason) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.primaryFailedAt.IsZero() {
-		return true
+		return true, ""
 	}
 	if now.Before(c.primaryFailedAt.Add(c.fallbackCooldown)) {
-		return false
+		return false, c.activePrimaryFailureReason()
 	}
 	if c.primaryProbing {
-		return false
+		return false, c.activePrimaryFailureReason()
 	}
 	c.primaryProbing = true
-	return true
+	return true, ""
 }
 
-func (c *Client) primarySucceeded() {
+func (c *Client) primarySucceeded(metadata clientPathMetadata) {
+	var event ClientEvent
+	dispatchEvents := false
+	c.mu.Lock()
+	recovered := c.lastSelectedFallback
+	c.localMode = metadata.localMode
+	c.localRate = metadata.localRate
+	c.remoteMode = metadata.remoteMode
+	c.remoteRate = metadata.remoteRate
+	c.selectedTransport = "quic"
+	c.primaryFailedAt = time.Time{}
+	c.primaryProbing = false
+	c.primaryFailReason = ""
+	c.lastSelectedFallback = false
+	if recovered {
+		event = ClientEvent{
+			Kind:   ClientEventRecovery,
+			Reason: ClientReasonQUICPathRestored,
+			At:     time.Now().UTC(),
+		}
+		c.lastEvent = event
+		dispatchEvents = c.enqueueClientEvent(event)
+	}
+	c.mu.Unlock()
+	if dispatchEvents {
+		go c.dispatchClientEvents()
+	}
+}
+
+// primaryHealthy closes the fallback circuit after a valid authenticated QUIC
+// response that did not open a destination. It intentionally does not claim a
+// successful QUIC selection or emit a recovery transition.
+func (c *Client) primaryHealthy() {
 	c.mu.Lock()
 	c.primaryFailedAt = time.Time{}
 	c.primaryProbing = false
+	c.primaryFailReason = ""
 	c.mu.Unlock()
 }
 
-func (c *Client) primaryFailed(now time.Time) {
+func (c *Client) primaryFailed(now time.Time, reason ClientEventReason) {
 	c.mu.Lock()
 	c.primaryFailedAt = now
 	c.primaryProbing = false
+	c.primaryFailReason = reason
 	c.mu.Unlock()
 }
 
@@ -762,35 +853,33 @@ func (c *Client) primaryProbeFinished() {
 	c.mu.Unlock()
 }
 
-func (c *Client) acceptPacingResponse(conn *quic.Conn, response protocol.Response, sessionID uint32, assignedSession bool) error {
+func (c *Client) acceptPacingResponse(conn *quic.Conn, response protocol.Response, sessionID uint32, assignedSession bool) (clientPathMetadata, error) {
 	if err := c.validatePacingResponse(response, sessionID, assignedSession); err != nil {
-		return err
+		return clientPathMetadata{}, err
 	}
 	pacer := c.connectionPacer(conn)
 	if pacer == nil {
-		return net.ErrClosed
+		return clientPathMetadata{}, net.ErrClosed
 	}
 	if response.MaxTx != 0 {
 		if err := pacer.setFixedRate(response.MaxTx); err != nil {
-			return err
+			return clientPathMetadata{}, err
 		}
 	}
 	localMode, localProfile, _ := pacer.metadata()
 	if localMode != response.TxMode || localProfile != response.TxProfile {
-		return errors.New("response changed the client sender identity")
+		return clientPathMetadata{}, errors.New("response changed the client sender identity")
 	}
 	remoteMode := pacingModeName(response.RxMode, response.RxProfile)
 	if remoteMode == "" {
-		return errors.New("response contains an unknown relay sender")
+		return clientPathMetadata{}, errors.New("response contains an unknown relay sender")
 	}
-	c.mu.Lock()
-	c.localMode = pacingModeName(localMode, localProfile)
-	c.localRate = response.MaxTx
-	c.remoteMode = remoteMode
-	c.remoteRate = response.MaxRx
-	c.selectedTransport = "quic"
-	c.mu.Unlock()
-	return nil
+	return clientPathMetadata{
+		localMode:  pacingModeName(localMode, localProfile),
+		localRate:  response.MaxTx,
+		remoteMode: remoteMode,
+		remoteRate: response.MaxRx,
+	}, nil
 }
 
 func (c *Client) validatePacingResponse(response protocol.Response, sessionID uint32, assignedSession bool) error {
@@ -825,14 +914,37 @@ func (c *Client) validatePacingResponse(response protocol.Response, sessionID ui
 	return nil
 }
 
-func (c *Client) recordFallback() {
+func (c *Client) recordFallback(reason ClientEventReason) {
+	if reason == "" {
+		reason = ClientReasonQUICCooldownActive
+	}
+	var event ClientEvent
+	dispatchEvents := false
 	c.mu.Lock()
+	transitioned := !c.lastSelectedFallback
 	c.localMode = "tls-fallback"
 	c.localRate = 0
 	c.remoteMode = "tls-fallback"
 	c.remoteRate = 0
 	c.selectedTransport = "tls"
+	c.lastSelectedFallback = true
+	if transitioned {
+		event = ClientEvent{Kind: ClientEventFallback, Reason: reason, At: time.Now().UTC()}
+		c.lastEvent = event
+		dispatchEvents = c.enqueueClientEvent(event)
+	}
 	c.mu.Unlock()
+	if dispatchEvents {
+		go c.dispatchClientEvents()
+	}
+}
+
+// activePrimaryFailureReason must be called with c.mu held.
+func (c *Client) activePrimaryFailureReason() ClientEventReason {
+	if c.primaryFailReason != "" {
+		return c.primaryFailReason
+	}
+	return ClientReasonQUICCooldownActive
 }
 
 // SelectedTransport reports the authenticated path used by the most recent
@@ -943,6 +1055,7 @@ func (c *Client) runQUICDial(attempt *quicDialAttempt, dialCtx context.Context) 
 		if c.fallback != nil && !c.closed && c.ctx.Err() == nil {
 			c.primaryFailedAt = time.Now()
 			c.primaryProbing = false
+			c.primaryFailReason = ClientReasonQUICDialFailed
 		}
 	}
 	close(attempt.done)
@@ -960,6 +1073,8 @@ func (c *Client) invalidate(conn *quic.Conn) {
 }
 
 // Close closes the shared QUIC connection and the optional fallback dialer.
+// It does not wait for best-effort observability callbacks; a callback already
+// in flight may return after Close.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	if c.closed {

@@ -19,7 +19,7 @@ func main() {
 		if !errors.Is(err, context.Canceled) {
 			slog.Error("command failed", "error", err)
 		}
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
 }
 
@@ -41,6 +41,8 @@ func run(ctx context.Context, args []string) (err error) {
 		err = runBenchServer(ctx, args[1:])
 	case "bench-client":
 		err = runBenchClient(ctx, args[1:])
+	case "doctor":
+		err = runDoctor(ctx, args[1:])
 	case "version":
 		printVersion()
 		return nil
@@ -67,6 +69,7 @@ Usage:
   autocar token [options]        generate a strong shared token
   autocar bench-server [options] run a benchmark source/sink target
   autocar bench-client [options] measure direct or tunneled goodput
+  autocar doctor [options]       verify an authenticated relay TCP path
   autocar version                print build information
 
 Run "autocar <command> -h" for command-specific options.`)

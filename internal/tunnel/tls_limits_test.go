@@ -138,6 +138,17 @@ func TestTLSServerClientLimitAcrossAcceptedConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstSource := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 1000}
+	differentSource := &net.TCPAddr{IP: net.ParseIP("192.0.2.11"), Port: 1000}
+	server.listener = &scriptedRemoteAddrListener{
+		Listener: server.listener,
+		addresses: []net.Addr{
+			firstSource,
+			firstSource,
+			differentSource,
+			firstSource,
+		},
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(ctx) }()
@@ -154,27 +165,24 @@ func TestTLSServerClientLimitAcrossAcceptedConnections(t *testing.T) {
 		}
 	})
 
-	dialFrom := func(sourceIP string) net.Conn {
+	dial := func() net.Conn {
 		t.Helper()
-		dialer := net.Dialer{
-			Timeout:   2 * time.Second,
-			LocalAddr: &net.TCPAddr{IP: net.ParseIP(sourceIP)},
-		}
+		dialer := net.Dialer{Timeout: 2 * time.Second}
 		conn, err := dialer.Dial("tcp", server.Addr().String())
 		if err != nil {
-			t.Fatalf("dial from %s: %v", sourceIP, err)
+			t.Fatalf("dial TLS server: %v", err)
 		}
 		t.Cleanup(func() { _ = conn.Close() })
 		return conn
 	}
 
-	first := dialFrom("127.0.0.1")
-	firstKey := tlsSourceKey(first.LocalAddr())
+	first := dial()
+	firstKey := tlsSourceKey(firstSource)
 	waitForTLSLimitState(t, "first connection admission", func() bool {
-		return server.clients.count(firstKey) == 1 && len(server.core.sem) == 1
+		return server.clients.count(firstKey) == 1 && len(server.connSem) == 1 && len(server.core.sem) == 0
 	})
 
-	rejected := dialFrom("127.0.0.1")
+	rejected := dial()
 	if err := rejected.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -185,28 +193,28 @@ func TestTLSServerClientLimitAcrossAcceptedConnections(t *testing.T) {
 		t.Fatal("second connection from the same source was not rejected")
 	}
 	waitForTLSLimitState(t, "same-source rejection rollback", func() bool {
-		return server.clients.count(firstKey) == 1 && len(server.core.sem) == 1
+		return server.clients.count(firstKey) == 1 && len(server.connSem) == 1 && len(server.core.sem) == 0
 	})
 
-	different := dialFrom("127.0.0.2")
-	differentKey := tlsSourceKey(different.LocalAddr())
+	different := dial()
+	differentKey := tlsSourceKey(differentSource)
 	if differentKey == firstKey {
 		t.Fatalf("different loopback sources share key %q", firstKey)
 	}
 	waitForTLSLimitState(t, "different-source admission", func() bool {
-		return server.clients.count(differentKey) == 1 && len(server.core.sem) == 2
+		return server.clients.count(differentKey) == 1 && len(server.connSem) == 2 && len(server.core.sem) == 0
 	})
 
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
 	waitForTLSLimitState(t, "first connection release", func() bool {
-		return server.clients.count(firstKey) == 0 && len(server.core.sem) == 1
+		return server.clients.count(firstKey) == 0 && len(server.connSem) == 1 && len(server.core.sem) == 0
 	})
 
-	replacement := dialFrom("127.0.0.1")
+	replacement := dial()
 	waitForTLSLimitState(t, "released slot reuse", func() bool {
-		return server.clients.count(firstKey) == 1 && len(server.core.sem) == 2
+		return server.clients.count(firstKey) == 1 && len(server.connSem) == 2 && len(server.core.sem) == 0
 	})
 
 	if err := replacement.Close(); err != nil {
@@ -217,9 +225,34 @@ func TestTLSServerClientLimitAcrossAcceptedConnections(t *testing.T) {
 	}
 	waitForTLSLimitState(t, "all connection releases", func() bool {
 		return server.clients.count(firstKey) == 0 &&
-			server.clients.count(differentKey) == 0 && len(server.core.sem) == 0
+			server.clients.count(differentKey) == 0 && len(server.connSem) == 0 && len(server.core.sem) == 0
 	})
 }
+
+type scriptedRemoteAddrListener struct {
+	net.Listener
+	addresses []net.Addr
+}
+
+func (l *scriptedRemoteAddrListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if len(l.addresses) == 0 {
+		return conn, nil
+	}
+	address := l.addresses[0]
+	l.addresses = l.addresses[1:]
+	return scriptedRemoteAddrConn{Conn: conn, address: address}, nil
+}
+
+type scriptedRemoteAddrConn struct {
+	net.Conn
+	address net.Addr
+}
+
+func (c scriptedRemoteAddrConn) RemoteAddr() net.Addr { return c.address }
 
 func waitForTLSLimitState(t *testing.T, description string, condition func() bool) {
 	t.Helper()

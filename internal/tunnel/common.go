@@ -51,7 +51,36 @@ type serverCore struct {
 	sem              chan struct{}
 }
 
+// StreamAdmission is a concurrency budget for active relay streams. Pass the
+// same instance to multiple server transports when they must share one global
+// limit. A StreamAdmission has no background resources and remains reusable
+// for the lifetime of the servers that reference it.
+//
+// The zero value is invalid; construct values with NewStreamAdmission.
+type StreamAdmission struct {
+	sem chan struct{}
+}
+
+// NewStreamAdmission creates a stream budget with the given positive limit.
+func NewStreamAdmission(limit int) (*StreamAdmission, error) {
+	if limit <= 0 {
+		return nil, errors.New("tunnel: stream admission limit must be positive")
+	}
+	return &StreamAdmission{sem: make(chan struct{}, limit)}, nil
+}
+
 func newServerCore(token string, dialer transport.Dialer, handshakeTimeout, dialTimeout time.Duration, maxStreams int) (*serverCore, error) {
+	return newServerCoreWithAdmission(token, dialer, handshakeTimeout, dialTimeout, maxStreams, nil)
+}
+
+func newServerCoreWithAdmission(
+	token string,
+	dialer transport.Dialer,
+	handshakeTimeout time.Duration,
+	dialTimeout time.Duration,
+	maxStreams int,
+	admission *StreamAdmission,
+) (*serverCore, error) {
 	if len(token) < protocol.MinTokenLength || len(token) > protocol.MaxTokenLength {
 		return nil, fmt.Errorf("tunnel: token length must be between %d and %d bytes", protocol.MinTokenLength, protocol.MaxTokenLength)
 	}
@@ -69,14 +98,35 @@ func newServerCore(token string, dialer transport.Dialer, handshakeTimeout, dial
 		dialTimeout = defaultDialTimeout
 	}
 	if maxStreams == 0 {
-		maxStreams = defaultMaxStreams
+		if admission == nil {
+			maxStreams = defaultMaxStreams
+		}
+	}
+	if admission == nil {
+		created, err := NewStreamAdmission(maxStreams)
+		if err != nil {
+			return nil, err
+		}
+		admission = created
+	} else {
+		limit := cap(admission.sem)
+		if limit == 0 {
+			return nil, errors.New("tunnel: invalid zero-value stream admission")
+		}
+		if maxStreams != 0 && maxStreams != limit {
+			return nil, fmt.Errorf(
+				"tunnel: maximum concurrent streams (%d) does not match shared stream admission limit (%d)",
+				maxStreams,
+				limit,
+			)
+		}
 	}
 	return &serverCore{
 		tokenHash:        sha256.Sum256([]byte(token)),
 		dialer:           dialer,
 		handshakeTimeout: handshakeTimeout,
 		dialTimeout:      dialTimeout,
-		sem:              make(chan struct{}, maxStreams),
+		sem:              admission.sem,
 	}, nil
 }
 
@@ -135,6 +185,11 @@ func (s *serverCore) handleStream(
 	if authenticated != nil {
 		authenticated()
 	}
+	if !s.acquire() {
+		_ = protocol.WriteResponse(stream, protocol.Response{Status: protocol.StatusBusy, Message: "server busy"})
+		return
+	}
+	defer s.release()
 	options := streamRequestOptions{Relay: stream}
 	if handler != nil {
 		options = handler(ctx, stream, req)
@@ -269,23 +324,23 @@ func serverTLSConfig(input *tls.Config) (*tls.Config, error) {
 	cfg.NextProtos = []string{protocol.ALPN}
 	getConfigForClient := cfg.GetConfigForClient
 	if getConfigForClient != nil {
+		parent := cfg.Clone()
+		parent.GetConfigForClient = nil
 		cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			selected, err := getConfigForClient(hello)
 			if err != nil || selected == nil {
 				return selected, err
 			}
-			// crypto/tls replaces the listener Config with the callback result
-			// before version and ALPN negotiation. Clone and reapply AutoCAR's
-			// policy so a dynamic certificate selector cannot weaken the hardened
-			// parent configuration. Clearing the nested callback also prevents a
-			// returned Config from reintroducing an unwrapped policy path.
+			// crypto/tls replaces the listener Config with the callback result.
+			// Treat the callback strictly as a certificate selector: all protocol,
+			// client-authentication, verification, time, randomness, and session
+			// policy remains owned by the hardened parent configuration.
 			selected = selected.Clone()
-			selected.GetConfigForClient = nil
-			if err := requireTLS13(selected); err != nil {
-				return nil, err
-			}
-			selected.NextProtos = []string{protocol.ALPN}
-			return selected, nil
+			resolved := parent.Clone()
+			resolved.Certificates = selected.Certificates
+			resolved.GetCertificate = selected.GetCertificate
+			resolved.NameToCertificate = selected.NameToCertificate
+			return resolved, nil
 		}
 	}
 	return cfg, nil

@@ -851,7 +851,7 @@ func (c *Client) DialPacket(ctx context.Context) (transport.PacketConn, error) {
 			session.terminate()
 			var remoteErr *RemoteError
 			if errors.As(err, &remoteErr) {
-				c.primarySucceeded()
+				c.primaryHealthy()
 				return nil, err
 			}
 			if contextError(ctx) != nil {
@@ -863,7 +863,8 @@ func (c *Client) DialPacket(ctx context.Context) (transport.PacketConn, error) {
 			}
 			return nil, fmt.Errorf("tunnel: UDP control handshake: %w", err)
 		}
-		if err := c.acceptPacingResponse(conn, response, requestNonce, true); err != nil {
+		metadata, err := c.acceptPacingResponse(conn, response, requestNonce, true)
+		if err != nil {
 			releaseReservation()
 			session.terminate()
 			return nil, fmt.Errorf("tunnel: invalid UDP pacing response: %w", err)
@@ -874,7 +875,7 @@ func (c *Client) DialPacket(ctx context.Context) (transport.PacketConn, error) {
 			session.terminate()
 			return nil, err
 		}
-		c.primarySucceeded()
+		c.primarySucceeded(metadata)
 		go session.watchControl()
 		return session, nil
 	}

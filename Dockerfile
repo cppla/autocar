@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     -ldflags="-s -w -X github.com/cppla/autocar/internal/version.Version=${VERSION} -X github.com/cppla/autocar/internal/version.Commit=${COMMIT} -X github.com/cppla/autocar/internal/version.Date=${BUILD_DATE}" \
     -o /out/autocar ./cmd/autocar
 
-FROM --platform=$TARGETPLATFORM scratch
+FROM scratch
 
 LABEL org.opencontainers.image.source="https://github.com/cppla/autocar" \
       org.opencontainers.image.description="Secure dual-ended QUIC/TLS TCP and UDP accelerator" \

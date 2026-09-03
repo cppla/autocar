@@ -1,5 +1,6 @@
 /bin/
 /dist/
+/artifacts/
 /coverage.out
 *.prof
 *.test

@@ -24,6 +24,10 @@ type TLSServerConfig struct {
 	HandshakeTimeout     time.Duration
 	DialTimeout          time.Duration
 	MaxConcurrentStreams int
+	// StreamAdmission optionally shares the active-stream budget with other
+	// server transports. When set, MaxConcurrentStreams must be zero or equal
+	// to the admission limit. Nil preserves the independent-server behavior.
+	StreamAdmission      *StreamAdmission
 	MaxClientConnections int
 }
 
@@ -34,6 +38,7 @@ type TLSServer struct {
 	tlsConfig *tls.Config
 	core      *serverCore
 	clients   *sourceConnectionLimiter
+	connSem   chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -58,7 +63,14 @@ func ListenTLS(config TLSServerConfig) (*TLSServer, error) {
 	if err != nil {
 		return nil, err
 	}
-	core, err := newServerCore(config.Token, config.Dialer, config.HandshakeTimeout, config.DialTimeout, config.MaxConcurrentStreams)
+	core, err := newServerCoreWithAdmission(
+		config.Token,
+		config.Dialer,
+		config.HandshakeTimeout,
+		config.DialTimeout,
+		config.MaxConcurrentStreams,
+		config.StreamAdmission,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +94,7 @@ func ListenTLS(config TLSServerConfig) (*TLSServer, error) {
 		tlsConfig: tlsConfig,
 		core:      core,
 		clients:   newSourceConnectionLimiter(maxClientConnections),
+		connSem:   make(chan struct{}, cap(core.sem)),
 		ctx:       ctx,
 		cancel:    cancel,
 		conns:     make(map[net.Conn]struct{}),
@@ -130,14 +143,16 @@ func (s *TLSServer) Serve(ctx context.Context) error {
 			}
 			continue
 		}
-		if !s.core.acquire() {
+		select {
+		case s.connSem <- struct{}{}:
+		default:
 			s.lifecycle.Unlock()
 			_ = raw.Close()
 			continue
 		}
 		sourceKey := tlsSourceKey(raw.RemoteAddr())
 		if !s.clients.acquire(sourceKey) {
-			s.core.release()
+			<-s.connSem
 			s.lifecycle.Unlock()
 			_ = raw.Close()
 			continue
@@ -154,7 +169,7 @@ func (s *TLSServer) Serve(ctx context.Context) error {
 
 func (s *TLSServer) serveTLSConnection(ctx context.Context, conn *tls.Conn, sourceKey string) {
 	defer s.wg.Done()
-	defer s.core.release()
+	defer func() { <-s.connSem }()
 	defer s.clients.release(sourceKey)
 	defer func() {
 		s.connMu.Lock()
@@ -278,15 +293,23 @@ type TLSClient struct {
 	handshakeTimeout time.Duration
 	dialer           net.Dialer
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	mu     sync.Mutex
-	closed bool
-	conns  map[*trackedTLSConn]struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
+	mu       sync.Mutex
+	closed   bool
+	selected bool
+	conns    map[*trackedTLSConn]struct{}
 }
 
 // SelectedTransport identifies the concrete path for benchmark telemetry.
-func (c *TLSClient) SelectedTransport() string { return "tls" }
+func (c *TLSClient) SelectedTransport() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.selected {
+		return ""
+	}
+	return "tls"
+}
 
 // NewTLSClient creates a TCP+TLS fallback dialer.
 func NewTLSClient(config TLSClientConfig) (*TLSClient, error) {
@@ -376,6 +399,7 @@ func (c *TLSClient) DialContext(ctx context.Context, network, address string) (n
 		return nil, net.ErrClosed
 	}
 	c.conns[tracked] = struct{}{}
+	c.selected = true
 	c.mu.Unlock()
 	return tracked, nil
 }

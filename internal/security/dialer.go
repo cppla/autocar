@@ -26,7 +26,10 @@ var (
 	ErrUnsupportedNetwork = errors.New("security: unsupported network")
 )
 
-var carrierGradeNAT = netip.MustParsePrefix("100.64.0.0/10")
+var (
+	carrierGradeNAT     = netip.MustParsePrefix("100.64.0.0/10")
+	ipv4MappedAddresses = netip.MustParsePrefix("::ffff:0:0/96")
+)
 
 // deniedSpecialUsePrefixes contains IANA special-purpose ranges that Go's
 // netip.Addr.IsGlobalUnicast may still classify as unicast. They are not
@@ -106,7 +109,32 @@ type SafeDialer struct {
 	allowPrivate  bool
 	deniedPorts   map[uint16]struct{}
 	deniedNets    []netip.Prefix
+	configErr     error
 	fallbackDelay time.Duration
+}
+
+// NormalizeDeniedPrefix converts an IPv4-mapped IPv6 prefix into the
+// equivalent native IPv4 prefix. Destination addresses are always unmapped
+// before policy evaluation, so retaining the mapped representation would make
+// an otherwise valid deny rule impossible to match.
+func NormalizeDeniedPrefix(prefix netip.Prefix) (netip.Prefix, error) {
+	if !prefix.IsValid() || prefix.Addr().Zone() != "" {
+		return netip.Prefix{}, errors.New("security: invalid denied prefix")
+	}
+	prefix = prefix.Masked()
+	if prefix.Addr().Is4In6() {
+		prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+		return prefix.Masked(), nil
+	}
+	// Any broader IPv6 prefix that covers ::ffff:0:0/96 is ambiguous after
+	// destinations are normalized to native IPv4. Reject it rather than retain
+	// a deny rule that can never match the mapped IPv4 portion it appears to
+	// cover. Masking before this check makes equivalent Prefix values behave
+	// identically regardless of their original host bits.
+	if prefix.Bits() < ipv4MappedAddresses.Bits() && prefix.Contains(ipv4MappedAddresses.Addr()) {
+		return netip.Prefix{}, errors.New("security: IPv6 denied prefix overlaps IPv4-mapped addresses below /96")
+	}
+	return prefix, nil
 }
 
 // NewSafeDialer constructs an immutable, concurrency-safe outbound dialer.
@@ -133,10 +161,14 @@ func NewSafeDialer(opts SafeDialerOptions) *SafeDialer {
 		}
 	}
 	deniedNets := make([]netip.Prefix, 0, len(opts.DeniedPrefixes))
+	var configErrors []error
 	for _, prefix := range opts.DeniedPrefixes {
-		if prefix.IsValid() {
-			deniedNets = append(deniedNets, prefix.Masked())
+		normalized, err := NormalizeDeniedPrefix(prefix)
+		if err != nil {
+			configErrors = append(configErrors, fmt.Errorf("security: configure denied prefix %q: %w", prefix, err))
+			continue
 		}
+		deniedNets = append(deniedNets, normalized)
 	}
 	fallbackDelay := opts.AddressFallbackDelay
 	if fallbackDelay <= 0 {
@@ -149,6 +181,7 @@ func NewSafeDialer(opts SafeDialerOptions) *SafeDialer {
 		allowPrivate:  opts.AllowPrivate,
 		deniedPorts:   denied,
 		deniedNets:    deniedNets,
+		configErr:     errors.Join(configErrors...),
 		fallbackDelay: fallbackDelay,
 	}
 }
@@ -165,6 +198,9 @@ func (d *SafeDialer) DialContext(ctx context.Context, network, address string) (
 	}
 	if ctx == nil {
 		return nil, errors.New("security: nil dial context")
+	}
+	if d.configErr != nil {
+		return nil, d.configErr
 	}
 	lookupNetwork, err := resolverNetwork(network)
 	if err != nil {
@@ -233,6 +269,9 @@ func (d *SafeDialer) ResolveUDPContext(ctx context.Context, address string) ([]n
 	}
 	if ctx == nil {
 		return nil, errors.New("security: nil resolve context")
+	}
+	if d.configErr != nil {
+		return nil, d.configErr
 	}
 	if err := context.Cause(ctx); err != nil {
 		return nil, err

@@ -8,7 +8,7 @@ LDFLAGS := -s -w \
 	-X github.com/cppla/autocar/internal/version.Commit=$(COMMIT) \
 	-X github.com/cppla/autocar/internal/version.Date=$(BUILD_DATE)
 
-.PHONY: all check fmt fmt-check dependency-boundary-check mod-check notices notices-check vet test race build cross-build release docker integration-netem clean
+.PHONY: all check fmt fmt-check dependency-boundary-check mod-check notices notices-check vet test race build cross-build release docker integration-docker integration-netem clean
 
 all: check build
 
@@ -77,6 +77,9 @@ release: cross-build
 
 docker:
 	docker build --build-arg VERSION="$(VERSION)" --build-arg COMMIT="$(COMMIT)" --build-arg BUILD_DATE="$(BUILD_DATE)" -t autocar:local .
+
+integration-docker:
+	./scripts/docker-integration.sh
 
 integration-netem: build
 	sudo ./scripts/netem-integration.sh ./$(BINARY)

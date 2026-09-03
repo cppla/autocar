@@ -62,9 +62,22 @@ services. Add deployment-specific blocks with `--deny-cidrs` and
 `--deny-ports`.
 
 Resource controls include `--max-connections`, `--max-client-connections`,
-`--max-streams` and `--max-client-fallback-connections`. Start conservatively,
-watch memory/file descriptors and put host-level per-source UDP rate limits in
-front of a public relay.
+`--max-streams` and `--max-client-fallback-connections`. `--max-streams` is one
+global admission budget shared by the QUIC and TLS listeners; enabling fallback
+does not double the configured stream capacity.
+
+QUIC UDP associations have separate bounded controls:
+
+- `--max-udp-sessions` globally and `--max-client-udp-sessions` per source;
+- `--max-udp-destinations` for each association;
+- `--udp-receive-queue` for each bounded datagram work queue; and
+- `--udp-reassembly-ttl`, `--max-udp-reassembly-messages`, and
+  `--max-udp-reassembly-bytes` for incomplete messages on each QUIC connection.
+
+All UDP limits must be positive, and the per-source session limit cannot exceed
+the global UDP session limit. Start conservatively, watch memory/file
+descriptors and put host-level per-source UDP rate limits in front of a public
+relay.
 
 ## 3. Client
 
@@ -93,6 +106,33 @@ is unavailable rather than crossing the TLS fallback.
 
 Default local endpoints are loopback-only SOCKS5 `127.0.0.1:1080` and HTTP
 `127.0.0.1:8080`. Use `socks5h://` when the relay should resolve names.
+
+Before leaving a client running, verify a real authenticated relay path with
+the same connection flags:
+
+```bash
+./autocar doctor \
+  --server relay.example.com:8443 \
+  --ca /etc/autocar/server.crt \
+  --token-file /etc/autocar/relay-token \
+  --transport auto \
+  --target example.com:443 \
+  --json
+```
+
+This opens the target TCP connection through the tunnel; it does not merely
+check a local listener. The result identifies the selected transport, both
+directional pacing policies, negotiated fixed-rate ceilings, elapsed time and
+the last fallback transition when applicable. Exit status is `0` for success,
+`1` for a failed live probe and `2` for invalid arguments or local
+configuration. Failed JSON results expose only a stable code and redacted
+description; use human mode when detailed local diagnostics are required.
+Auto-mode client logs expose only stable fallback/recovery event and reason
+codes, never tokens, full targets, relay addresses or raw transport errors.
+Event callbacks are asynchronous, serialized and backed by a bounded queue;
+consumers that fall behind should read the concurrency-safe snapshot as the
+authoritative latest state. The most recently completed path is tracked
+separately from QUIC circuit health.
 
 ## 4. Pacing
 
@@ -211,6 +251,7 @@ Before production:
 ```bash
 go test ./...
 go test -race ./...
+./autocar doctor [client flags] --target target.example:443 --json
 ./autocar bench-client [client flags] --target target.example:9000 --json
 ```
 

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cppla/autocar/internal/accel"
 	"github.com/cppla/autocar/internal/netbench"
@@ -90,7 +93,7 @@ func TestParseDeniedPorts(t *testing.T) {
 }
 
 func TestParseDeniedPrefixes(t *testing.T) {
-	prefixes, err := parseDeniedPrefixes("10.0.0.1, 192.168.0.0/16,10.0.0.1/32")
+	prefixes, err := parseDeniedPrefixes("10.0.0.1, ::ffff:192.168.0.0/112,10.0.0.1/32,192.168.0.0/16")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +102,11 @@ func TestParseDeniedPrefixes(t *testing.T) {
 	}
 	if _, err := parseDeniedPrefixes("not-a-prefix"); err == nil {
 		t.Fatal("invalid prefix accepted")
+	}
+	for _, ambiguous := range []string{"::ffff:8.8.8.8/95", "::fffe:0:0/95"} {
+		if _, err := parseDeniedPrefixes(ambiguous); err == nil {
+			t.Fatalf("ambiguous IPv4-mapped prefix %q accepted", ambiguous)
+		}
 	}
 }
 
@@ -224,7 +232,7 @@ func TestRunHelpAndUnknownCommand(t *testing.T) {
 	if err := run(context.Background(), []string{"help"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"client", "server", "cert", "token", "bench-server", "bench-client"} {
+	for _, command := range []string{"client", "server", "cert", "token", "bench-server", "bench-client", "doctor"} {
 		t.Run(command+" help", func(t *testing.T) {
 			if err := run(context.Background(), []string{command, "-h"}); err != nil {
 				t.Fatalf("%s -h: %v", command, err)
@@ -245,6 +253,84 @@ func TestServerRejectsFallbackSourceLimitAboveGlobalLimit(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "--max-client-fallback-connections") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestServerUDPLimitValidation(t *testing.T) {
+	valid := serverUDPLimits{
+		maxSessions:           256,
+		maxClientSessions:     32,
+		maxDestinations:       64,
+		receiveQueue:          32,
+		reassemblyTTL:         5 * time.Second,
+		maxReassemblyMessages: 64,
+		maxReassemblyBytes:    256 << 10,
+	}
+	if err := validateServerUDPLimits(valid); err != nil {
+		t.Fatalf("default UDP limits: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		arguments []string
+		want      string
+	}{
+		{name: "sessions zero", arguments: []string{"--max-udp-sessions", "0"}, want: "--max-udp-sessions"},
+		{name: "sessions negative", arguments: []string{"--max-udp-sessions", "-1"}, want: "--max-udp-sessions"},
+		{name: "client sessions zero", arguments: []string{"--max-client-udp-sessions", "0"}, want: "--max-client-udp-sessions"},
+		{name: "client sessions above global", arguments: []string{"--max-udp-sessions", "1", "--max-client-udp-sessions", "2"}, want: "no greater than --max-udp-sessions"},
+		{name: "destinations zero", arguments: []string{"--max-udp-destinations", "0"}, want: "--max-udp-destinations"},
+		{name: "queue zero", arguments: []string{"--udp-receive-queue", "0"}, want: "--udp-receive-queue"},
+		{name: "ttl zero", arguments: []string{"--udp-reassembly-ttl", "0s"}, want: "--udp-reassembly-ttl"},
+		{name: "messages zero", arguments: []string{"--max-udp-reassembly-messages", "0"}, want: "--max-udp-reassembly-messages"},
+		{name: "bytes zero", arguments: []string{"--max-udp-reassembly-bytes", "0"}, want: "--max-udp-reassembly-bytes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			arguments := append([]string{"--cert", "unused.crt", "--key", "unused.key"}, test.arguments...)
+			err := runServer(context.Background(), arguments)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("runServer error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestServerHelpListsUDPLimitFlags(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = writer
+	runErr := runServer(context.Background(), []string{"-h"})
+	os.Stderr = originalStderr
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(runErr, flag.ErrHelp) {
+		t.Fatalf("runServer(-h) error = %v, want flag.ErrHelp", runErr)
+	}
+
+	for _, name := range []string{
+		"-max-udp-sessions",
+		"-max-client-udp-sessions",
+		"-max-udp-destinations",
+		"-udp-receive-queue",
+		"-udp-reassembly-ttl",
+		"-max-udp-reassembly-messages",
+		"-max-udp-reassembly-bytes",
+	} {
+		if !strings.Contains(string(output), name) {
+			t.Errorf("server help omitted %s", name)
+		}
 	}
 }
 

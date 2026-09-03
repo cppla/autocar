@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: [1.25.x, 1.27.x]
+        go: ['1.25.13', '1.27.x']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -50,6 +50,18 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
+  macos-test:
+    name: macOS test (Go 1.25.13)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.25.13
+          cache: true
+      - name: Test
+        run: go test -shuffle=on -count=1 ./...
+
   race:
     name: Race detector
     runs-on: ubuntu-24.04
@@ -68,7 +80,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.x
+          go-version: 1.25.13
           cache: true
       - name: Run govulncheck
         run: ./scripts/govulncheck.sh
@@ -134,8 +146,11 @@ jobs:
   container:
     name: Multi-platform container build
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run container integration
+        run: make integration-docker
       - name: Build OCI image index
         run: |
           docker buildx create --name autocar-ci --driver docker-container --use

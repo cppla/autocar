@@ -35,6 +35,13 @@ func runServer(parent context.Context, args []string) error {
 	maxConnections := fs.Int("max-connections", 256, "global maximum accepted QUIC sessions")
 	maxClientConnections := fs.Int("max-client-connections", 32, "maximum QUIC sessions per source IPv4 or IPv6 /64")
 	maxClientFallbackConnections := fs.Int("max-client-fallback-connections", 0, "maximum TLS fallback connections per source IPv4 or IPv6 /64; zero uses min(32, --max-streams)")
+	maxUDPSessions := fs.Int("max-udp-sessions", 256, "maximum live UDP associations across all QUIC clients")
+	maxClientUDPSessions := fs.Int("max-client-udp-sessions", 32, "maximum live UDP associations per source IPv4 or IPv6 /64")
+	maxUDPDestinations := fs.Int("max-udp-destinations", 64, "maximum numeric destinations authorized per UDP association")
+	udpReceiveQueue := fs.Int("udp-receive-queue", 32, "maximum complete datagrams waiting in each bounded UDP receive/send queue")
+	udpReassemblyTTL := fs.Duration("udp-reassembly-ttl", 5*time.Second, "lifetime of an incomplete fragmented UDP message")
+	maxUDPReassemblyMessages := fs.Int("max-udp-reassembly-messages", 64, "maximum incomplete UDP messages per QUIC connection")
+	maxUDPReassemblyBytes := fs.Int("max-udp-reassembly-bytes", 256<<10, "maximum bytes buffered for UDP reassembly per QUIC connection")
 	pacingText := fs.String("pacing", "adaptive", "application pacing: adaptive, reno, or fixed-rate")
 	pacingProfileText := fs.String("pacing-profile", "balanced", "adaptive pacing profile: conservative, balanced, or aggressive")
 	maxUploadMbps := fs.Uint64("max-upload-mbps", 0, "maximum client-to-relay fixed pacing rate in Mbit/s")
@@ -59,6 +66,17 @@ func runServer(parent context.Context, args []string) error {
 	}
 	if !*disableFallback && (*maxClientFallbackConnections < 0 || *maxClientFallbackConnections > *maxStreams) {
 		return errors.New("--max-client-fallback-connections must be zero or positive and no greater than --max-streams")
+	}
+	if err := validateServerUDPLimits(serverUDPLimits{
+		maxSessions:           *maxUDPSessions,
+		maxClientSessions:     *maxClientUDPSessions,
+		maxDestinations:       *maxUDPDestinations,
+		receiveQueue:          *udpReceiveQueue,
+		reassemblyTTL:         *udpReassemblyTTL,
+		maxReassemblyMessages: *maxUDPReassemblyMessages,
+		maxReassemblyBytes:    *maxUDPReassemblyBytes,
+	}); err != nil {
+		return err
 	}
 	if *tcpListen == "" {
 		*tcpListen = *listen
@@ -118,21 +136,33 @@ func runServer(parent context.Context, args []string) error {
 			KeepAlive: 30 * time.Second,
 		},
 	})
+	streamAdmission, err := tunnel.NewStreamAdmission(*maxStreams)
+	if err != nil {
+		return fmt.Errorf("configure stream admission: %w", err)
+	}
 
 	quicServer, err := tunnel.ListenQUIC(tunnel.QUICServerConfig{
-		Address:              *listen,
-		Token:                token,
-		TLSConfig:            tlsConfig,
-		Dialer:               safeDialer,
-		Pacing:               pacing,
-		MaxTx:                maxDownload,
-		MaxRx:                maxUpload,
-		AllowClientRates:     *allowClientRates,
-		HandshakeTimeout:     *handshakeTimeout,
-		DialTimeout:          *dialTimeout,
-		MaxConcurrentStreams: *maxStreams,
-		MaxConnections:       *maxConnections,
-		MaxClientConnections: *maxClientConnections,
+		Address:                  *listen,
+		Token:                    token,
+		TLSConfig:                tlsConfig,
+		Dialer:                   safeDialer,
+		Pacing:                   pacing,
+		MaxTx:                    maxDownload,
+		MaxRx:                    maxUpload,
+		AllowClientRates:         *allowClientRates,
+		HandshakeTimeout:         *handshakeTimeout,
+		DialTimeout:              *dialTimeout,
+		MaxConcurrentStreams:     *maxStreams,
+		StreamAdmission:          streamAdmission,
+		MaxConnections:           *maxConnections,
+		MaxClientConnections:     *maxClientConnections,
+		MaxUDPSessions:           *maxUDPSessions,
+		MaxClientUDPSessions:     *maxClientUDPSessions,
+		MaxUDPDestinations:       *maxUDPDestinations,
+		UDPReceiveQueue:          *udpReceiveQueue,
+		UDPReassemblyTTL:         *udpReassemblyTTL,
+		MaxUDPReassemblyMessages: *maxUDPReassemblyMessages,
+		MaxUDPReassemblyBytes:    *maxUDPReassemblyBytes,
 	})
 	if err != nil {
 		return err
@@ -149,6 +179,7 @@ func runServer(parent context.Context, args []string) error {
 			HandshakeTimeout:     *handshakeTimeout,
 			DialTimeout:          *dialTimeout,
 			MaxConcurrentStreams: *maxStreams,
+			StreamAdmission:      streamAdmission,
 			MaxClientConnections: *maxClientFallbackConnections,
 		})
 		if err != nil {
@@ -195,6 +226,42 @@ func runServer(parent context.Context, args []string) error {
 		return parent.Err()
 	}
 	slog.Info("relay stopped", "reason", strings.TrimSpace(context.Cause(ctx).Error()))
+	return nil
+}
+
+type serverUDPLimits struct {
+	maxSessions           int
+	maxClientSessions     int
+	maxDestinations       int
+	receiveQueue          int
+	reassemblyTTL         time.Duration
+	maxReassemblyMessages int
+	maxReassemblyBytes    int
+}
+
+func validateServerUDPLimits(limits serverUDPLimits) error {
+	positiveCounts := []struct {
+		name  string
+		value int
+	}{
+		{"--max-udp-sessions", limits.maxSessions},
+		{"--max-client-udp-sessions", limits.maxClientSessions},
+		{"--max-udp-destinations", limits.maxDestinations},
+		{"--udp-receive-queue", limits.receiveQueue},
+		{"--max-udp-reassembly-messages", limits.maxReassemblyMessages},
+		{"--max-udp-reassembly-bytes", limits.maxReassemblyBytes},
+	}
+	for _, limit := range positiveCounts {
+		if limit.value <= 0 {
+			return fmt.Errorf("%s must be positive", limit.name)
+		}
+	}
+	if limits.reassemblyTTL <= 0 {
+		return errors.New("--udp-reassembly-ttl must be positive")
+	}
+	if limits.maxClientSessions > limits.maxSessions {
+		return errors.New("--max-client-udp-sessions must be no greater than --max-udp-sessions")
+	}
 	return nil
 }
 

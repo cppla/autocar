@@ -1,6 +1,6 @@
 module github.com/cppla/autocar
 
-go 1.25.0
+go 1.25.13
 
 require github.com/quic-go/quic-go v0.61.0
 

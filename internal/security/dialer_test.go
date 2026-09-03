@@ -204,6 +204,67 @@ func TestSafeDialerAdditionalDeniedPrefixes(t *testing.T) {
 	}
 }
 
+func TestSafeDialerNormalizesIPv4MappedDeniedPrefixesForTCPAndUDP(t *testing.T) {
+	mapped := netip.MustParsePrefix("::ffff:8.8.8.0/120")
+
+	t.Run("TCP", func(t *testing.T) {
+		resolver := &fakeResolver{addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
+		dialer := &recordingDialer{}
+		safe := NewSafeDialer(SafeDialerOptions{
+			Resolver: resolver, Dialer: dialer, DeniedPrefixes: []netip.Prefix{mapped},
+		})
+		if _, err := safe.DialContext(context.Background(), "tcp", "dns.example:443"); !errors.Is(err, ErrUnsafeAddress) {
+			t.Fatalf("mapped-prefix TCP error = %v", err)
+		}
+		if len(dialer.calls) != 0 {
+			t.Fatalf("mapped-prefix TCP destination was dialed: %v", dialer.calls)
+		}
+	})
+
+	t.Run("UDP", func(t *testing.T) {
+		resolver := &fakeResolver{addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
+		safe := NewSafeDialer(SafeDialerOptions{
+			Resolver: resolver, DeniedPrefixes: []netip.Prefix{mapped},
+		})
+		if _, err := safe.ResolveUDPContext(context.Background(), "dns.example:53"); !errors.Is(err, ErrUnsafeAddress) {
+			t.Fatalf("mapped-prefix UDP error = %v", err)
+		}
+	})
+}
+
+func TestSafeDialerFailsClosedOnInvalidDeniedPrefixes(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix netip.Prefix
+	}{
+		{name: "mapped prefix shorter than 96 bits", prefix: netip.MustParsePrefix("::ffff:8.8.8.8/95")},
+		{name: "canonical overlapping prefix shorter than 96 bits", prefix: netip.MustParsePrefix("::fffe:0:0/95")},
+		{name: "zero value", prefix: netip.Prefix{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resolver := &fakeResolver{addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
+			dialer := &recordingDialer{}
+			safe := NewSafeDialer(SafeDialerOptions{
+				Resolver: resolver, Dialer: dialer, DeniedPrefixes: []netip.Prefix{test.prefix},
+			})
+
+			if _, err := safe.DialContext(context.Background(), "tcp", "dns.example:443"); err == nil {
+				t.Fatal("TCP dial accepted an invalid deny policy")
+			}
+			if _, err := safe.ResolveUDPContext(context.Background(), "dns.example:53"); err == nil {
+				t.Fatal("UDP resolution accepted an invalid deny policy")
+			}
+			if len(resolver.calls) != 0 {
+				t.Fatalf("invalid deny policy caused DNS resolution: %v", resolver.calls)
+			}
+			if len(dialer.calls) != 0 {
+				t.Fatalf("invalid deny policy caused dialing: %v", dialer.calls)
+			}
+		})
+	}
+}
+
 func TestSafeDialerResolvesThenDialsOnlyNumericApprovedIP(t *testing.T) {
 	resolver := &fakeResolver{addresses: []netip.Addr{
 		netip.MustParseAddr("10.0.0.1"),
