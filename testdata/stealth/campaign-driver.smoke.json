@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "campaign_id": "driver-smoke",
+  "lab": {
+    "docker_network": "autocar-stealth-driver-smoke",
+    "ownership_label": "com.cppla.autocar.stealth-campaign=driver-smoke",
+    "capture_image": "autocar-stealth-capture-driver-smoke:local",
+    "capture_host": "local-docker-toy-smoke",
+    "interface": "eth0",
+    "allowed_mount_roots": ["../.."],
+    "minimum_packets": 5,
+    "workload_timeout_seconds": 15,
+    "runner_memory_mb": 128,
+    "runner_pids_limit": 32
+  },
+  "provenance": {
+    "preregistration_recorded_at": "2026-09-01T00:00:00Z",
+    "autocar_binary": "../../scripts/stealth-campaign-toy/main.go",
+    "autocar_config": "../../scripts/stealth-campaign-toy.Dockerfile",
+    "hysteria2_binary": "../../scripts/stealth-campaign-toy/main.go",
+    "hysteria2_config": "../../scripts/stealth-campaign-toy.Dockerfile"
+  },
+  "products": {
+    "cover": {
+      "variants": [{
+        "name": "toy-cover",
+        "client_implementation": "toy UDP client (not cover evidence)",
+        "server_implementation": "toy UDP echo (not cover evidence)",
+        "implementation_version": "smoke-v1",
+        "real_browser": false,
+        "runner_image": "autocar-stealth-campaign-toy-driver-smoke:local",
+        "server_container": "autocar-stealth-toy-cover",
+        "server_ip": "10.203.77.10",
+        "server_port": 8443,
+        "transport": "udp",
+        "command": ["/stealth-campaign-toy", "client", "--server", "{server_ip}:{server_port}", "--workload", "{workload}", "--seed", "{sample_seed}"],
+        "environment": {},
+        "mounts": [],
+        "user": "65532:65532"
+      }]
+    },
+    "autocar": {
+      "variants": [{
+        "name": "toy-autocar",
+        "client_implementation": "toy UDP client (not AutoCAR evidence)",
+        "server_implementation": "toy UDP echo (not AutoCAR evidence)",
+        "implementation_version": "smoke-v1",
+        "real_browser": false,
+        "runner_image": "autocar-stealth-campaign-toy-driver-smoke:local",
+        "server_container": "autocar-stealth-toy-autocar",
+        "server_ip": "10.203.77.11",
+        "server_port": 8443,
+        "transport": "udp",
+        "command": ["/stealth-campaign-toy", "client", "--server", "{server_ip}:{server_port}", "--workload", "{workload}", "--seed", "{sample_seed}"],
+        "environment": {},
+        "mounts": [],
+        "user": "65532:65532"
+      }]
+    },
+    "hysteria2": {
+      "variants": [{
+        "name": "toy-hysteria2",
+        "client_implementation": "toy UDP client (not Hysteria evidence)",
+        "server_implementation": "toy UDP echo (not Hysteria evidence)",
+        "implementation_version": "smoke-v1",
+        "real_browser": false,
+        "runner_image": "autocar-stealth-campaign-toy-driver-smoke:local",
+        "server_container": "autocar-stealth-toy-hysteria2",
+        "server_ip": "10.203.77.12",
+        "server_port": 8443,
+        "transport": "udp",
+        "command": ["/stealth-campaign-toy", "client", "--server", "{server_ip}:{server_port}", "--workload", "{workload}", "--seed", "{sample_seed}"],
+        "environment": {},
+        "mounts": [],
+        "user": "65532:65532"
+      }]
+    }
+  }
+}

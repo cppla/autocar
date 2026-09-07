@@ -1,0 +1,4 @@
+sample_id,product,scenario,workload,wire_profile,run_id,seed,pcap,client_ip,server_ip,client_implementation,server_implementation,implementation_version,runner_image_id,server_container_id,capture_host,docker_engine_fingerprint
+cover-h3-r01-s01-0001,cover,healthy_h3,download_1k,h3,run-01,seed-01,pcaps/cover-h3-r01-s01-0001.pcap,10.203.0.1,10.203.0.2,Chromium,Caddy,example-only,sha256:replace,replace,local-docker,replace
+autocar-h3-r01-s01-0001,autocar,healthy_h3,download_1k,h3,run-01,seed-01,pcaps/autocar-h3-r01-s01-0001.pcap,10.203.0.1,10.203.0.2,AutoCAR WebClient,AutoCAR web server,example-only,sha256:replace,replace,local-docker,replace
+hysteria2-h3-r01-s01-0001,hysteria2,healthy_h3,download_1k,h3,run-01,seed-01,pcaps/hysteria2-h3-r01-s01-0001.pcap,10.203.0.1,10.203.0.2,Hysteria 2 client,Hysteria 2 server,app-v2.12.2,sha256:replace,replace,local-docker,replace

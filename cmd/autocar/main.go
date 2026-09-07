@@ -60,10 +60,10 @@ func run(ctx context.Context, args []string) (err error) {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `AutoCAR - secure dual-ended TCP/UDP acceleration
+	fmt.Fprintln(os.Stderr, `AutoCAR - secure dual-ended relay with native and web-cover transports
 
 Usage:
-  autocar server [options]       run the remote QUIC/TLS relay
+  autocar server [options]       run the remote native or web-cover relay
   autocar client [options]       run local SOCKS5 and HTTP(S) proxies
   autocar cert [options]         generate a self-signed TLS certificate
   autocar token [options]        generate a strong shared token

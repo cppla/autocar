@@ -1,8 +1,10 @@
 # Deployment guide
 
-AutoCAR has two trusted endpoints: a local proxy client and a relay. The
-preferred path is AutoCAR v2 over QUIC/UDP; a separate TLS/TCP listener can
-carry new TCP flows when UDP is unavailable.
+AutoCAR has two trusted endpoints: a local proxy client and a relay. Native mode
+prefers AutoCAR v2 over QUIC/UDP and can use a separate native TLS/TCP listener.
+Web-cover mode presents one normal website over H1/H2/TCP and H3/UDP and can
+carry new TCP flows over H2 when UDP is unavailable. Choose one relay protocol
+per endpoint and configure clients to match it.
 
 ## 1. Build and create credentials
 
@@ -37,7 +39,7 @@ External certificates are supported as long as their SAN covers the configured
 server name and the client trusts the issuing CA. AutoCAR performs normal chain,
 name and validity checks and has no certificate-verification bypass.
 
-## 2. Relay
+## 2. Native relay
 
 ```bash
 sudo -u autocar /usr/local/bin/autocar server \
@@ -79,7 +81,62 @@ the global UDP session limit. Start conservatively, watch memory/file
 descriptors and put host-level per-source UDP rate limits in front of a public
 relay.
 
-## 3. Client
+## 3. Web-cover relay
+
+Use web-cover only with a domain and site content you own or are authorized to
+serve. The static form is:
+
+```bash
+sudo -u autocar /usr/local/bin/autocar server \
+  --protocol web \
+  --listen :8443 \
+  --tcp-listen :8443 \
+  --cover-root /srv/autocar-cover \
+  --cert /etc/autocar/server.crt \
+  --key /etc/autocar/server.key \
+  --token-file /etc/autocar/relay-token
+```
+
+For a fixed authorized origin, replace `--cover-root` with, for example,
+`--cover-upstream https://origin.example.net`. The two flags are mutually
+exclusive and exactly one is required. The reverse proxy fixes the upstream
+scheme and authority, rewrites `Host`, strips authorization and hop-by-hop
+headers, and preserves the request path and query. Treat that origin as an
+Internet-facing application; do not point it at metadata or control-plane
+services.
+
+`--listen` binds H3/UDP and `--tcp-listen` binds HTTPS/H1/H2. They must use the
+same numeric port; if `--tcp-listen` is omitted it inherits `--listen`. Open both
+TCP and UDP in the deployment firewall. `--disable-tcp-fallback` is invalid in
+web mode because H2/TCP is part of the mode. `--client-ca` is also invalid: a
+normal cover origin must complete TLS without requesting a client certificate.
+The public TCP listener accepts TLS 1.2 and TLS 1.3 so ordinary website probes
+can negotiate either version. Authenticated H2 tunnels remain TLS 1.3-only; a
+TLS 1.2 CONNECT has its credential stripped and is handled only by the cover.
+H3 remains TLS 1.3.
+
+Web mode uses the same remote resolver and destination policy as native mode,
+and shares one `--max-streams` admission budget across H2 and H3 tunnels. H3
+CONNECT-UDP also uses `--max-udp-sessions`,
+`--max-client-udp-sessions`, `--max-udp-destinations`, and
+`--udp-receive-queue`. In web mode one UDP target consumes one request stream
+and one UDP session; `--max-udp-destinations` bounds the numeric candidates
+returned for that one target before a single endpoint is fixed. Native
+reassembly flags do not apply because web datagrams are not fragmented. Native
+connection/session flags do not substitute for ordinary public-web controls.
+Apply host/container file-descriptor, memory, CPU, connection, request-rate,
+and bandwidth limits appropriate to the exposed cover site.
+
+Public cover compatibility is best checked with a real SAN-valid certificate,
+an ordinary site, TLS 1.2 and TLS 1.3 H1/H2 probes, and an H3 client. Include a
+TLS 1.2 CONNECT carrying a syntactically valid ticket in an owned-lab test and
+verify that it receives cover behavior without any destination dial. A private
+CA remains supported for closed deployments, but its handshake is not
+representative of a broadly trusted public website.
+
+## 4. Client
+
+### Native client
 
 Pinned/private CA:
 
@@ -104,6 +161,43 @@ paying the same UDP blackhole timeout. Use `--transport=quic` to require UDP or
 `auto` advertises UDP, but an association is still QUIC-only and fails when QUIC
 is unavailable rather than crossing the TLS fallback.
 
+### Web-cover client
+
+```bash
+./autocar client \
+  --server relay.example.com:8443 \
+  --system-roots \
+  --token-file /etc/autocar/relay-token \
+  --transport web-auto \
+  --h3-fingerprint chrome-2026-08 \
+  --quic-attempt-timeout 5s \
+  --open-timeout 15s \
+  --fallback-cooldown 30s
+```
+
+Use `--ca /path/to/ca.pem` instead of `--system-roots` for a private trust
+anchor. `web-auto` tries standard H3 CONNECT first and switches a new TCP flow
+to standard H2 CONNECT after an H3 transport failure. During the cooldown, new
+TCP flows use H2 without repeating the UDP wait. The configured cooldown is a
+base with independent +/-20% jitter; after it, exactly one caller probes H3.
+Use `--transport=h3` or `--transport=h2` to require one path during diagnosis.
+
+`chrome-2026-08` is the default H3 fingerprint. It uses the exactly pinned
+`github.com/apernet/quic-go` fork for the complete client
+QUIC/TLS handshake profile and a zero-length source CID. Use
+`--h3-fingerprint=native` only as an interoperability or rollback diagnostic; it
+disables ChromeParrot within the same web-H3 fork and does not select native
+`autocar/2`. The profile is client-only and does not claim to reproduce server
+behavior, H3 SETTINGS, CONNECT traffic or timing.
+
+H3 and H2 use the same `--server` address, so `--fallback-server` is not valid
+with web transports. Web transports reject `--client-cert/--client-key` and
+`--pacing=fixed-rate`; native pacing metadata is reported as
+`not-applicable`. Both `web-auto` and explicit `h3` advertise SOCKS5 UDP using
+H3 RFC 9298 CONNECT-UDP. Explicit `h2` does not. The H3-to-H2 policy is for TCP
+streams only: UDP fails when H3 is unavailable and never enters H2. Full
+behavior and limits are in [WEB_COVER.md](WEB_COVER.md).
+
 Default local endpoints are loopback-only SOCKS5 `127.0.0.1:1080` and HTTP
 `127.0.0.1:8080`. Use `socks5h://` when the relay should resolve names.
 
@@ -115,31 +209,33 @@ the same connection flags:
   --server relay.example.com:8443 \
   --ca /etc/autocar/server.crt \
   --token-file /etc/autocar/relay-token \
-  --transport auto \
+  --transport web-auto \
   --target example.com:443 \
   --json
 ```
 
 This opens the target TCP connection through the tunnel; it does not merely
-check a local listener. The result identifies the selected transport, both
-directional pacing policies, negotiated fixed-rate ceilings, elapsed time and
-the last fallback transition when applicable. Exit status is `0` for success,
-`1` for a failed live probe and `2` for invalid arguments or local
-configuration. Failed JSON results expose only a stable code and redacted
-description; use human mode when detailed local diagnostics are required.
-Auto-mode client logs expose only stable fallback/recovery event and reason
-codes, never tokens, full targets, relay addresses or raw transport errors.
-Event callbacks are asynchronous, serialized and backed by a bounded queue;
+check a local listener. The result identifies the selected transport and
+elapsed time. Native QUIC also reports sender/rate negotiation; web H2/H3
+reports pacing as `not-applicable`. Exit status is `0` for success, `1` for a
+failed live probe and `2` for invalid arguments or local configuration. Failed
+JSON results expose only a stable code and redacted description; use human mode
+when detailed local diagnostics are required.
+
+Native auto-mode logs expose only stable fallback/recovery event and reason
+codes, never tokens, full targets, relay addresses or raw transport errors. Its
+event callbacks are asynchronous, serialized and backed by a bounded queue;
 consumers that fall behind should read the concurrency-safe snapshot as the
-authoritative latest state. The most recently completed path is tracked
+authoritative latest state. The most recently completed native path is tracked
 separately from QUIC circuit health.
 
-## 4. Pacing
+## 5. Pacing
 
 Use `adaptive-balanced` first. `conservative` reduces probing on shared or
 shallow-buffer paths; `aggressive` should be enabled only after measuring both
 throughput and queue delay. `reno` disables the AutoCAR pacing layer and leaves
-the upstream quic-go path as the baseline.
+the native upstream quic-go path as the baseline. Web H3 uses the separate pinned
+fork and does not participate in native pacing negotiation.
 
 Fixed-rate is appropriate only for a measured, provisioned link:
 
@@ -165,18 +261,20 @@ with `tc`, nftables or cloud policers. Fixed-rate negotiation exists only on
 QUIC: explicit `tls` is rejected, while an `auto` TCP flow that falls back to TLS
 is unpaced. Select `quic` when the rate behavior is required.
 
-## 5. mTLS and local proxy authentication
+## 6. mTLS and local proxy authentication
 
 To require a client certificate, configure `--client-ca` on the relay and
 `--client-cert/--client-key` on the client. The shared token remains a second
-authorization factor.
+authorization factor. This is available only in native mode. Web-cover rejects
+mTLS on both sides so that ordinary visitors can reach the cover site; its
+per-request HMAC ticket remains mandatory for tunnel access.
 
 SOCKS5 username/password and HTTP Basic are cleartext on the local hop. Keep
 those listeners on loopback or enable the local HTTPS proxy. A non-loopback
 plaintext listener requires an explicit override and should still be protected
 by a trusted private network/firewall.
 
-## 6. systemd example
+## 7. systemd example
 
 `/etc/systemd/system/autocar.service`:
 
@@ -211,7 +309,17 @@ port 443 as an unprivileged user. Alternatively bind both listeners to a port at
 or above 1024, remove those lines and redirect/publish the port outside the
 process.
 
-## 7. Container
+For web-cover, use the same hardening but select web protocol and an authorized
+cover source:
+
+```ini
+ExecStart=/usr/local/bin/autocar server --protocol=web --listen=:443 --tcp-listen=:443 --cover-root=/srv/autocar-cover --cert=/etc/autocar/server.crt --key=/etc/autocar/server.key --token-file=/etc/autocar/relay-token
+```
+
+Add the cover directory to `ReadOnlyPaths` (or an equivalent read-only bind) and
+ensure `User=autocar` can traverse and read it.
+
+## 8. Container
 
 ```bash
 docker build -t autocar:local .
@@ -236,6 +344,23 @@ docker run --rm \
   --token-file=/etc/autocar/relay-token
 ```
 
+For a static web-cover container, mount the authorized site read-only and add
+the web flags while keeping both TCP and UDP port publications:
+
+```bash
+docker run --rm \
+  -p 443:8443/udp -p 443:8443/tcp \
+  -v /etc/autocar-container:/etc/autocar:ro \
+  -v /srv/autocar-cover:/srv/www:ro \
+  autocar:local server \
+  --protocol=web \
+  --listen=:8443 --tcp-listen=:8443 \
+  --cover-root=/srv/www \
+  --cert=/etc/autocar/server.crt \
+  --key=/etc/autocar/server.key \
+  --token-file=/etc/autocar/relay-token
+```
+
 The image runs as UID/GID `65532` and exposes `8443`, so mounting the root-owned
 systemd credential directory directly would normally be unreadable. Rootless or
 user-namespace-remapped Docker uses a different host-ID mapping; prepare the
@@ -244,7 +369,7 @@ unless the rootless runtime has been explicitly authorized to bind `443`. The
 image does not need host networking. Apply memory, CPU, PID and file-descriptor
 limits appropriate to the configured connection limits.
 
-## 8. Validation and upgrade
+## 9. Validation and upgrade
 
 Before production:
 
@@ -255,11 +380,39 @@ go test -race ./...
 ./autocar bench-client [client flags] --target target.example:9000 --json
 ```
 
-Also test UDP and TCP firewall rules separately, an invalid token, an invalid
-certificate, UDP blackhole fallback, SOCKS5 UDP, destination-policy rejection
-and shutdown under load.
+Also test TCP and UDP firewall rules separately, an invalid token, an invalid
+certificate, UDP blackhole fallback, destination-policy rejection, and shutdown
+under load. For native mode, test SOCKS5 UDP separately. For web mode, verify
+ordinary H1/H2/H3 cover behavior and explicit `h3`, explicit `h2`, and
+`web-auto` TCP paths. Verify CONNECT-UDP with an owned UDP fixture over `h3` and
+`web-auto`, including its 1,150-byte boundary and expected failure while H3 is
+blocked. Run active probes only against loopback, isolated Docker networks, or
+systems you own or are explicitly authorized to test; never scan unrelated
+public endpoints.
 
-`autocar/2` is incompatible with Hysteria and AutoCAR v1. For a rolling breaking
-upgrade, start the new relay on a second UDP/TCP port, move clients, verify QUIC
-and fallback independently, and then retire the old endpoint. There is no silent
-protocol downgrade.
+A low-memory remote Linux host may run a non-release active smoke from an
+already loaded, matching image pair:
+
+```bash
+STEALTH_RELEASE_GATE=0 STEALTH_RUN_ROLE=remote-linux \
+  STEALTH_EXECUTION_HOST=198.51.100.10:22 \
+  STEALTH_AUTOCAR_IMAGE=autocar:smoke \
+  STEALTH_LAB_IMAGE=autocar-stealth-lab:smoke \
+  ./scripts/stealth-active.sh
+```
+
+Both image variables are mandatory together, and the harness must be launched
+from a direct session to the host named by `STEALTH_EXECUTION_HOST` and from a
+valid AutoCAR Git checkout so it can record source-state stability. This
+avoids compiling on that host but is smoke evidence only: the release gate
+rejects prebuilt images because it must build from the exact frozen Git archive.
+Remote manifests also record the ED25519 host-key fingerprint derived from the
+machine's `/etc/ssh/ssh_host_ed25519_key.pub`; release evidence must match the
+endpoint and fingerprint frozen in the preregistration. See
+[STEALTH-BENCHMARK.md](STEALTH-BENCHMARK.md) for the release-evidence contract.
+
+`autocar/2` and web-cover do not provide third-party proxy or AutoCAR v1 compatibility.
+The shared web-H3 QUIC implementation does not change that protocol boundary.
+For a rolling breaking upgrade, start the new relay on a second UDP/TCP port,
+move clients, verify each selected transport independently, and then retire the
+old endpoint. There is no silent protocol-family downgrade.

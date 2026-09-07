@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "campaign_id": "replace-with-immutable-campaign-id",
+  "claim_scope": "hysteria2-v2.12.2-standard",
+  "autocar_commit": "replace-with-full-release-commit",
+  "preregistration_git_commit": "replace-with-full-release-commit",
+  "preregistration_sha256": "replace-with-64-lowercase-hex-digest",
+  "preregistration_recorded_before_capture": true,
+  "preregistration_recorded_at": "2026-09-01T00:00:00Z",
+  "capture_started_at": "2026-09-02T00:00:00Z",
+  "capture_completed_at": "2026-09-03T00:00:00Z",
+  "capture_manifest_sha256": "replace-with-64-lowercase-hex-digest",
+  "products": {
+    "autocar": {
+      "commit": "replace-with-full-release-commit",
+      "binary_sha256": "replace-with-64-lowercase-hex-digest",
+      "config_sha256": "replace-with-64-lowercase-hex-digest"
+    },
+    "hysteria2": {
+      "version": "v2.12.2",
+      "commit": "619a6f8",
+      "binary_sha256": "6493dfffd55b5883f64c76c63880ecc32988f0c568c9ca9014907877b4d55f94",
+      "config_sha256": "replace-with-64-lowercase-hex-digest"
+    },
+    "cover": {
+      "client_implementations": [
+        "replace-with-real-browser-one",
+        "replace-with-independent-client-two"
+      ],
+      "server_implementations": [
+        "replace-with-server-one",
+        "replace-with-independent-server-two"
+      ],
+      "real_browser_h2_h3_present": true
+    }
+  }
+}

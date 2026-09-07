@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "hysteria2_version": "v2.12.2",
+    "hysteria2_commit": "619a6f8",
+    "linux_amd64_sha256": "6493dfffd55b5883f64c76c63880ecc32988f0c568c9ca9014907877b4d55f94",
+    "linux_arm64_sha256": "ebfacc1ec3a0edfd742cd68ce17f292a6092e606b9d11f99b035c1d888f3d709",
+    "standard_profile": "HTTP/3 masquerade reverse proxy, TCP listenHTTPS, Chrome QUIC parroting enabled",
+    "disable_update_check": true,
+    "local_http_proxy_connection_header": "Proxy-Connection: keep-alive",
+    "additional_profiles": [
+      "gecko",
+      "mimic on a disposable native Linux interface"
+    ]
+  },
+  "active_evidence": {
+    "remote_execution_host": "198.51.100.10:22",
+    "remote_ssh_host_key_ed25519_sha256": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "sample_attempt_policy": {
+    "maximum_attempts_per_sample": 1,
+    "retry_failed_or_interrupted_sample": false,
+    "checkpoint_boundary": "after_sample_complete"
+  },
+  "models": [
+    "single_feature_rule",
+    "logistic_l2",
+    "tree_depth_3"
+  ],
+  "minimum_samples_per_product_cell": 500,
+  "minimum_groups_per_product_cell": 5,
+  "minimum_samples_per_product_cell_group": 100,
+  "minimum_paired_groups": 5,
+  "bootstrap_iterations": 20000,
+  "bootstrap_seed": 20260904,
+  "healthy_h3_scenario": "healthy_h3",
+  "gates": {
+    "healthy_h3_max_tpr_regression": 0.02,
+    "any_cell_max_tpr_regression": 0.02,
+    "aggregate_min_tpr_improvement": 0.05
+  },
+  "required_common_cells": [
+    {"scenario": "healthy_h3", "workload": "idle", "wire_profile": "h3"},
+    {"scenario": "healthy_h3", "workload": "download_1k", "wire_profile": "h3"},
+    {"scenario": "healthy_h3", "workload": "download_128k", "wire_profile": "h3"},
+    {"scenario": "healthy_h3", "workload": "download_1m", "wire_profile": "h3"},
+    {"scenario": "healthy_h3", "workload": "upload_1m", "wire_profile": "h3"},
+    {"scenario": "healthy_h3", "workload": "parallel_20", "wire_profile": "h3"},
+    {"scenario": "healthy_h3", "workload": "interactive", "wire_profile": "h3"},
+
+    {"scenario": "delay35_loss0.5", "workload": "idle", "wire_profile": "h3"},
+    {"scenario": "delay35_loss0.5", "workload": "download_1k", "wire_profile": "h3"},
+    {"scenario": "delay35_loss0.5", "workload": "download_128k", "wire_profile": "h3"},
+    {"scenario": "delay35_loss0.5", "workload": "download_1m", "wire_profile": "h3"},
+    {"scenario": "delay35_loss0.5", "workload": "upload_1m", "wire_profile": "h3"},
+    {"scenario": "delay35_loss0.5", "workload": "parallel_20", "wire_profile": "h3"},
+    {"scenario": "delay35_loss0.5", "workload": "interactive", "wire_profile": "h3"},
+
+    {"scenario": "delay100_loss2", "workload": "idle", "wire_profile": "h3"},
+    {"scenario": "delay100_loss2", "workload": "download_1k", "wire_profile": "h3"},
+    {"scenario": "delay100_loss2", "workload": "download_128k", "wire_profile": "h3"},
+    {"scenario": "delay100_loss2", "workload": "download_1m", "wire_profile": "h3"},
+    {"scenario": "delay100_loss2", "workload": "upload_1m", "wire_profile": "h3"},
+    {"scenario": "delay100_loss2", "workload": "parallel_20", "wire_profile": "h3"},
+    {"scenario": "delay100_loss2", "workload": "interactive", "wire_profile": "h3"}
+  ]
+}

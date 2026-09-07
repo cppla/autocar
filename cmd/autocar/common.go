@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -34,6 +35,7 @@ type tunnelFlags struct {
 	primaryTimeout time.Duration
 	openTimeout    time.Duration
 	fallbackTTL    time.Duration
+	h3Fingerprint  string
 	pacing         string
 	pacingProfile  string
 	uploadMbps     uint64
@@ -44,17 +46,18 @@ type tunnelFlags struct {
 func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
 	fs.StringVar(&flags.server, "server", "", "relay host:port (required)")
 	fs.StringVar(&flags.fallback, "fallback-server", "", "TCP/TLS relay host:port; defaults to --server")
-	fs.StringVar(&flags.mode, "transport", "auto", "transport: auto, quic, or tls")
+	fs.StringVar(&flags.mode, "transport", "auto", "transport: auto, quic, tls, web-auto, h3, or h2")
 	fs.StringVar(&flags.serverName, "server-name", "", "TLS certificate DNS name; defaults to relay host")
 	fs.StringVar(&flags.caFile, "ca", "", "PEM trust anchor for the relay certificate")
 	fs.BoolVar(&flags.systemRoots, "system-roots", false, "trust the operating-system CA set instead of --ca")
 	fs.StringVar(&flags.clientCert, "client-cert", "", "optional mTLS client certificate PEM")
 	fs.StringVar(&flags.clientKey, "client-key", "", "optional mTLS client private key PEM")
 	fs.StringVar(&flags.tokenFile, "token-file", "", "0600 shared-token file; otherwise AUTOCAR_TOKEN")
-	fs.DurationVar(&flags.dialTimeout, "dial-timeout", 5*time.Second, "QUIC/TLS network dial timeout")
-	fs.DurationVar(&flags.primaryTimeout, "quic-attempt-timeout", 5*time.Second, "entire QUIC phase budget before auto-mode TLS fallback")
+	fs.DurationVar(&flags.dialTimeout, "dial-timeout", 5*time.Second, "transport network dial timeout")
+	fs.DurationVar(&flags.primaryTimeout, "quic-attempt-timeout", 5*time.Second, "entire UDP primary phase budget before auto-mode TCP fallback")
 	fs.DurationVar(&flags.openTimeout, "open-timeout", 15*time.Second, "overall remote stream open timeout")
-	fs.DurationVar(&flags.fallbackTTL, "fallback-cooldown", 30*time.Second, "time to prefer TLS after a QUIC path failure")
+	fs.DurationVar(&flags.fallbackTTL, "fallback-cooldown", 30*time.Second, "base time to prefer the TCP fallback after a UDP path failure (each retry is jittered +/-20%)")
+	fs.StringVar(&flags.h3Fingerprint, "h3-fingerprint", string(tunnel.H3FingerprintChrome202608), "web H3 wire profile: chrome-2026-08 or native")
 	fs.StringVar(&flags.pacing, "pacing", "adaptive", "QUIC application pacing: adaptive, reno, or fixed-rate")
 	fs.StringVar(&flags.pacingProfile, "pacing-profile", "balanced", "adaptive pacing profile: conservative, balanced, or aggressive")
 	fs.Uint64Var(&flags.uploadMbps, "upload-mbps", 0, "client-to-relay fixed pacing rate in Mbit/s")
@@ -71,14 +74,14 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 		return nil, errors.New("--server is required")
 	}
 	mode := strings.ToLower(strings.TrimSpace(flags.mode))
-	if mode != "auto" && mode != "quic" && mode != "tls" {
-		return nil, fmt.Errorf("invalid --transport %q; want auto, quic, or tls", flags.mode)
+	if !validTunnelTransport(mode) {
+		return nil, fmt.Errorf("invalid --transport %q; want auto, quic, tls, web-auto, h3, or h2", flags.mode)
 	}
 	if flags.dialTimeout <= 0 || flags.openTimeout <= 0 {
 		return nil, errors.New("--dial-timeout and --open-timeout must be positive")
 	}
-	if mode == "auto" && (flags.primaryTimeout <= 0 || flags.primaryTimeout >= flags.openTimeout) {
-		return nil, errors.New("auto mode requires 0 < --quic-attempt-timeout < --open-timeout so TLS fallback retains time")
+	if (mode == "auto" || mode == "web-auto") && (flags.primaryTimeout <= 0 || flags.primaryTimeout >= flags.openTimeout) {
+		return nil, fmt.Errorf("%s mode requires 0 < --quic-attempt-timeout < --open-timeout so the TCP fallback retains time", mode)
 	}
 	if mode != "auto" && flags.fallback != "" {
 		return nil, errors.New("--fallback-server is valid only with --transport=auto")
@@ -91,6 +94,9 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 	}
 	if (flags.clientCert == "") != (flags.clientKey == "") {
 		return nil, errors.New("--client-cert and --client-key must be supplied together")
+	}
+	if isWebTransport(mode) && flags.clientCert != "" {
+		return nil, errors.New("web transports do not support mTLS client certificates because the cover origin must remain publicly reachable")
 	}
 
 	host, _, err := net.SplitHostPort(flags.server)
@@ -199,8 +205,116 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 			MaxRx:                 download,
 			EventHandler:          eventHandler,
 		})
+	case "h3":
+		client, err := tunnel.NewWebH3Client(tunnel.WebH3ClientConfig{
+			ServerAddress:      flags.server,
+			Token:              token,
+			TLSConfig:          tlsConfig,
+			FingerprintProfile: tunnel.H3FingerprintProfile(flags.h3Fingerprint),
+			HandshakeTimeout:   flags.openTimeout,
+			DialTimeout:        flags.dialTimeout,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return newWebSnapshotDialer(client), nil
+	case "h2":
+		client, err := tunnel.NewWebH2Client(tunnel.WebH2ClientConfig{
+			ServerAddress:    flags.server,
+			Token:            token,
+			TLSConfig:        tlsConfig,
+			HandshakeTimeout: flags.openTimeout,
+			DialTimeout:      flags.dialTimeout,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return newWebSnapshotDialer(client), nil
+	case "web-auto":
+		return tunnel.NewWebClient(tunnel.WebClientConfig{
+			ServerAddress:         flags.server,
+			Token:                 token,
+			TLSConfig:             tlsConfig,
+			H3FingerprintProfile:  tunnel.H3FingerprintProfile(flags.h3Fingerprint),
+			HandshakeTimeout:      flags.openTimeout,
+			H3DialTimeout:         flags.dialTimeout,
+			H2DialTimeout:         flags.dialTimeout,
+			PrimaryAttemptTimeout: flags.primaryTimeout,
+			FallbackCooldown:      flags.fallbackTTL,
+		})
 	default:
 		panic("unreachable transport mode")
+	}
+}
+
+func validTunnelTransport(mode string) bool {
+	switch mode {
+	case "auto", "quic", "tls", "web-auto", "h3", "h2":
+		return true
+	default:
+		return false
+	}
+}
+
+func isWebTransport(mode string) bool {
+	switch mode {
+	case "web-auto", "h3", "h2":
+		return true
+	default:
+		return false
+	}
+}
+
+type webSelectedTransportReporter interface {
+	SelectedTransport() string
+}
+
+// webSnapshotDialer gives the explicit H2 and H3 clients the same metadata
+// contract used by doctor and bench. The transport clients remain responsible
+// for reporting a selection only after an authenticated CONNECT succeeds.
+type webSnapshotDialer struct {
+	closeDialer
+	reporter webSelectedTransportReporter
+}
+
+// webPacketSnapshotDialer preserves the optional datagram capability of an
+// explicit H3 client while adding doctor / benchmark metadata. Keeping this as
+// a distinct wrapper is important: an H2-only client must not appear to support
+// SOCKS5 UDP ASSOCIATE merely because all explicit web clients share the
+// snapshot wrapper.
+type webPacketSnapshotDialer struct {
+	*webSnapshotDialer
+	packetDialer transport.PacketDialer
+}
+
+func newWebSnapshotDialer(dialer closeDialer) closeDialer {
+	if _, ok := dialer.(doctorSnapshotReporter); ok {
+		return dialer
+	}
+	reporter, ok := dialer.(webSelectedTransportReporter)
+	if !ok {
+		return dialer
+	}
+	snapshot := &webSnapshotDialer{closeDialer: dialer, reporter: reporter}
+	if packetDialer, ok := dialer.(transport.PacketDialer); ok {
+		return &webPacketSnapshotDialer{webSnapshotDialer: snapshot, packetDialer: packetDialer}
+	}
+	return snapshot
+}
+
+func (d *webPacketSnapshotDialer) DialPacket(ctx context.Context) (transport.PacketConn, error) {
+	return d.packetDialer.DialPacket(ctx)
+}
+
+func (d *webSnapshotDialer) SelectedTransport() string {
+	return d.reporter.SelectedTransport()
+}
+
+func (d *webSnapshotDialer) Snapshot() tunnel.ClientSnapshot {
+	return tunnel.ClientSnapshot{
+		SelectedTransport: d.reporter.SelectedTransport(),
+		ClientPacing:      "not-applicable",
+		RelayPacing:       "not-applicable",
 	}
 }
 
@@ -247,7 +361,10 @@ func validateClientRates(mode accel.Mode, upload, download uint64) error {
 }
 
 func validateClientPacingTransport(transportMode string, pacingMode accel.Mode) error {
-	if transportMode == "tls" && pacingMode == accel.ModeFixedRate {
+	if pacingMode != accel.ModeFixedRate {
+		return nil
+	}
+	if transportMode == "tls" || isWebTransport(transportMode) {
 		return errors.New("--pacing=fixed-rate requires --transport=quic or --transport=auto")
 	}
 	return nil

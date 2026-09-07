@@ -1,21 +1,24 @@
 # AutoCAR acceleration model
 
 AutoCAR implements an independent application protocol and sender-pacing layer.
-Hysteria v2 is a public design reference; AutoCAR does not include its source and
-the two wire protocols are incompatible. The design draws on these public ideas:
+The native transport uses upstream `github.com/quic-go/quic-go`. Web H3
+separately depends on the exactly pinned `github.com/apernet/quic-go` fork for its
+client handshake profile; it does not import an external proxy application module
+or provide third-party proxy wire compatibility. The design draws on
+these public ideas:
 
-- Hysteria v2 demonstrates the value of a persistent multiplexed QUIC session,
-  independent streams and unreliable datagrams on difficult paths. AutoCAR
-  implements those goals with its own `autocar/2` and `ACDG` formats on official
-  upstream quic-go.
+- Persistent multiplexed QUIC sessions, independent streams and unreliable
+  datagrams support sustained transport on difficult paths. AutoCAR
+  implements those native-mode goals with its own `autocar/2` and `ACDG` formats
+  on official upstream quic-go.
 - BBR's public model separates estimated bottleneck bandwidth from propagation
   RTT and uses pacing to avoid filling queues. AutoCAR uses that insight in a
   deliberately smaller application-layer estimator.
-- ServerSpeeder/LotServer are treated only as public product goals: keep warm
-  state, pace independently in both directions and improve loss-path usability.
-  AutoCAR does not reproduce any proprietary Zeta-TCP algorithm.
+- Warm connection state, independent pacing in both directions and bounded
+  backpressure are usability goals for loss-prone paths. AutoCAR does not
+  reproduce a proprietary transport algorithm.
 
-References: [Hysteria protocol documentation](https://v2.hysteria.network/docs/developers/Protocol/),
+References: [reference protocol documentation](https://v2.hysteria.network/docs/developers/Protocol/),
 [Google's BBR paper](https://research.google/pubs/bbr-congestion-based-congestion-control/),
 and the [IETF BBR draft](https://datatracker.ietf.org/doc/html/draft-ietf-ccwg-bbr).
 
@@ -74,8 +77,9 @@ delay test matters at least as much as bulk throughput.
 ## `reno`
 
 `reno` bypasses AutoCAR's application-layer admission. It does not implement
-Reno itself; the pinned quic-go v0.61.0 transport selects Reno for its default
-sender. This mode therefore measures that actual upstream baseline and is useful
+Reno itself; the native pinned upstream quic-go v0.61.0 transport selects Reno
+for its default sender. This mode therefore measures that actual upstream
+baseline and is useful
 for A/B tests or for operators who do not want an additional application pacing
 layer. A future quic-go upgrade must reverify this label before release.
 
@@ -103,7 +107,7 @@ pretends that the client's local controller sent a relay-originated payload.
 
 Fixed-rate mode does not compensate by dividing by observed ACK ratio. It is
 AutoCAR's bounded token-bucket design, with its own `fixed-rate` name and
-semantics rather than a Brutal controller. It is also not an enforcement
+semantics rather than a replacement congestion controller. It is also not an enforcement
 boundary: a modified client can bypass its local pacer. Use `tc`, nftables or a
 cloud policer for non-bypassable limits.
 

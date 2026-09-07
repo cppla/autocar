@@ -296,6 +296,36 @@ func TestServerUDPLimitValidation(t *testing.T) {
 	}
 }
 
+func TestWebServerRejectsNativeOnlyPacingAndReassemblyOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "fixed pacing", args: []string{"--pacing", "fixed-rate", "--max-upload-mbps", "1", "--max-download-mbps", "1"}, want: "native pacing"},
+		{name: "pacing profile", args: []string{"--pacing-profile", "aggressive"}, want: "native pacing"},
+		{name: "client rates", args: []string{"--allow-client-rates", "--max-upload-mbps", "1", "--max-download-mbps", "1"}, want: "native pacing"},
+		{name: "reassembly ttl", args: []string{"--udp-reassembly-ttl", "6s"}, want: "native UDP reassembly"},
+		{name: "reassembly messages", args: []string{"--max-udp-reassembly-messages", "65"}, want: "native UDP reassembly"},
+		{name: "reassembly bytes", args: []string{"--max-udp-reassembly-bytes", "262145"}, want: "native UDP reassembly"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{
+				"--protocol", "web",
+				"--cover-root", t.TempDir(),
+				"--cert", "unused.crt",
+				"--key", "unused.key",
+			}
+			args = append(args, test.args...)
+			err := runServer(context.Background(), args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("runServer error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestServerHelpListsUDPLimitFlags(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -320,6 +350,9 @@ func TestServerHelpListsUDPLimitFlags(t *testing.T) {
 	}
 
 	for _, name := range []string{
+		"-protocol",
+		"-cover-root",
+		"-cover-upstream",
 		"-max-udp-sessions",
 		"-max-client-udp-sessions",
 		"-max-udp-destinations",

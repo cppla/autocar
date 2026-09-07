@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "campaign_id": "replace-before-lab-creation",
+  "lab": {
+    "docker_network": "replace-labelled-internal-network",
+    "ownership_label": "com.cppla.autocar.stealth-campaign=replace-before-lab-creation",
+    "capture_image": "autocar-stealth-capture:local",
+    "capture_host": "local-docker",
+    "interface": "eth0",
+    "allowed_mount_roots": [
+      "/replace/with/reviewed/campaign-inputs"
+    ],
+    "minimum_packets": 5,
+    "workload_timeout_seconds": 120,
+    "runner_memory_mb": 768,
+    "runner_pids_limit": 512
+  },
+  "provenance": {
+    "preregistration_recorded_at": "2026-09-01T00:00:00Z",
+    "autocar_binary": "/replace/with/reviewed/campaign-inputs/autocar",
+    "autocar_config": "/replace/with/reviewed/campaign-inputs/autocar-effective.json",
+    "hysteria2_binary": "/replace/with/reviewed/campaign-inputs/hysteria-linux-amd64",
+    "hysteria2_config": "/replace/with/reviewed/campaign-inputs/hysteria-effective.yaml"
+  },
+  "products": {
+    "cover": {
+      "variants": [
+        {
+          "name": "chromium-caddy",
+          "client_implementation": "Chromium",
+          "server_implementation": "Caddy",
+          "implementation_version": "replace-with-exact-versions",
+          "real_browser": true,
+          "browser_binary_sha256": "replace-with-64-lowercase-hex-digest",
+          "runner_image": "replace-with-prebuilt-browser-runner",
+          "server_container": "replace-labelled-cover-server-one",
+          "server_ip": "10.203.0.10",
+          "server_port": 8443,
+          "transport": "udp",
+          "command": [
+            "/campaign/run-cover",
+            "--protocol",
+            "h3",
+            "--server",
+            "{server_ip}:{server_port}",
+            "--workload",
+            "{workload}",
+            "--seed",
+            "{sample_seed}"
+          ],
+          "h2_command": [
+            "/campaign/run-cover",
+            "--protocol",
+            "h2",
+            "--server",
+            "{server_ip}:{server_port}",
+            "--workload",
+            "download_128k",
+            "--seed",
+            "{sample_seed}"
+          ],
+          "environment": {},
+          "mounts": [
+            {
+              "source": "/replace/with/reviewed/campaign-inputs/cover-ca.pem",
+              "target": "/campaign/cover-ca.pem",
+              "read_only": true
+            }
+          ],
+          "user": "65532:65532"
+        },
+        {
+          "name": "firefox-nginx",
+          "client_implementation": "Firefox",
+          "server_implementation": "nginx-quic",
+          "implementation_version": "replace-with-exact-versions",
+          "real_browser": true,
+          "browser_binary_sha256": "replace-with-64-lowercase-hex-digest",
+          "runner_image": "replace-with-second-prebuilt-browser-runner",
+          "server_container": "replace-labelled-cover-server-two",
+          "server_ip": "10.203.0.11",
+          "server_port": 8443,
+          "transport": "udp",
+          "command": [
+            "/campaign/run-cover",
+            "--protocol",
+            "h3",
+            "--server",
+            "{server_ip}:{server_port}",
+            "--workload",
+            "{workload}",
+            "--seed",
+            "{sample_seed}"
+          ],
+          "h2_command": [
+            "/campaign/run-cover",
+            "--protocol",
+            "h2",
+            "--server",
+            "{server_ip}:{server_port}",
+            "--workload",
+            "download_128k",
+            "--seed",
+            "{sample_seed}"
+          ],
+          "environment": {},
+          "mounts": [],
+          "user": "65532:65532"
+        }
+      ]
+    },
+    "autocar": {
+      "variants": [
+        {
+          "name": "autocar-web",
+          "client_implementation": "AutoCAR WebClient",
+          "server_implementation": "AutoCAR web server",
+          "implementation_version": "replace-with-release-commit",
+          "real_browser": false,
+          "runner_image": "replace-with-prebuilt-autocar-runner",
+          "server_container": "replace-labelled-autocar-server",
+          "server_ip": "10.203.0.20",
+          "server_port": 8443,
+          "transport": "udp",
+          "command": [
+            "/campaign/run-autocar",
+            "--server",
+            "{server_ip}:{server_port}",
+            "--workload",
+            "{workload}",
+            "--seed",
+            "{sample_seed}"
+          ],
+          "environment": {},
+          "mounts": [],
+          "user": "65532:65532"
+        }
+      ]
+    },
+    "hysteria2": {
+      "variants": [
+        {
+          "name": "hysteria2-standard",
+          "client_implementation": "Hysteria 2 client",
+          "server_implementation": "Hysteria 2 server with reverse-proxy masquerade",
+          "implementation_version": "v2.12.2-619a6f8",
+          "real_browser": false,
+          "runner_image": "replace-with-prebuilt-hysteria-runner",
+          "server_container": "replace-labelled-hysteria-server",
+          "server_ip": "10.203.0.30",
+          "server_port": 8443,
+          "transport": "udp",
+          "command": [
+            "/campaign/run-hysteria2",
+            "--server",
+            "{server_ip}:{server_port}",
+            "--workload",
+            "{workload}",
+            "--seed",
+            "{sample_seed}"
+          ],
+          "environment": {},
+          "mounts": [],
+          "user": "65532:65532"
+        }
+      ]
+    }
+  }
+}

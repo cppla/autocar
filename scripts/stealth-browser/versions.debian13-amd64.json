@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "architecture": "amd64",
+  "base_image": "debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
+  "chromium": {
+    "browser_package_version": "152.0.7977.82-1~deb13u1",
+    "webdriver_package_version": "152.0.7977.82-1~deb13u1"
+  },
+  "firefox-esr": {
+    "browser_package_version": "140.15.0esr-1~deb13u1",
+    "webdriver_package_version": "0.36.0",
+    "webdriver_release_commit": "a3d508507022",
+    "webdriver_archive_sha256": "0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04"
+  }
+}
