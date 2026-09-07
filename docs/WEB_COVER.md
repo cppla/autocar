@@ -28,6 +28,13 @@ HTTP/2 CONNECT presented to the public origin is always treated as cover,
 including when it carries an otherwise valid ticket: the handler removes
 `Proxy-Authorization` before delegation and never dials its authority.
 
+H2 preserves a client upload half-close while the destination's reply drains.
+When the destination itself reaches EOF, H2 finishes that CONNECT response and
+stops any remaining upload on that stream; the HTTP handler interface cannot
+finish its response while continuing to receive an independent upload. Other
+streams on the same connection remain usable. Applications that need to keep
+uploading after receiving a destination EOF require the H3 stream transport.
+
 There is no `autocar/2` ALPN or AutoCAR binary stream header on these paths.
 The web ALPNs are `h2`, `h3`, and `http/1.1`. Native and web transports remain
 separate modes and are not wire-compatible.

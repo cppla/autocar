@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/apernet/quic-go/http3"
@@ -151,7 +152,43 @@ func (h *webTunnelHandler) serveH2Connect(
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 	stream := &webResponseStream{body: r.Body, writer: w, flusher: flusher}
-	relay(stream, upstream)
+	relayWebH2(stream, upstream)
+}
+
+// relayWebH2 ends an EOF-delimited response when its destination stops sending.
+// The HTTP handler API cannot send response END_STREAM independently of
+// returning from ServeHTTP. Once the destination reaches EOF, stop the request
+// upload as well and join both copies before returning: leaving it waiting for
+// a client FIN would withhold the response EOF indefinitely. A client-side FIN
+// still half-closes the destination writer and permits the full reply to drain.
+// This limitation is local to H2; the H3 stream adapter supports both half-closes.
+func relayWebH2(stream io.ReadWriteCloser, upstream net.Conn) {
+	var abortOnce sync.Once
+	abort := func() {
+		abortOnce.Do(func() {
+			_ = stream.Close()
+			_ = upstream.Close()
+		})
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		_, err := io.Copy(upstream, stream)
+		if err != nil && !isBenignClose(err) {
+			abort()
+		} else {
+			closeWrite(upstream)
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(stream, upstream)
+		// Close the destination too: the upload may already be blocked in a
+		// destination Write rather than in the request-body Read.
+		abort()
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
 }
 
 func webRequestTransport(r *http.Request) string {

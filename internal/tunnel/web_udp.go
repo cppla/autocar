@@ -563,6 +563,7 @@ func (p *webUDPPacketConn) openSession(target string) (*webUDPClientSession, err
 		target:     target,
 		connection: opened.connection,
 		stream:     opened.stream,
+		release:    opened.release,
 		outbound:   make(chan []byte, p.client.udpReceiveQueue),
 		ctx:        sessionContext,
 		cancel:     cancelSession,
@@ -651,6 +652,7 @@ type webUDPClientSession struct {
 	target     string
 	connection *quic.Conn
 	stream     *http3.RequestStream
+	release    func()
 	outbound   chan []byte
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -748,6 +750,9 @@ func (s *webUDPClientSession) terminate() {
 		s.stream.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
 		s.stream.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
 		_ = s.stream.Close()
+		if s.release != nil {
+			s.release()
+		}
 		s.packet.removeSession(s.target, s)
 		s.packet.client.releaseWebUDPSession()
 		close(s.done)
@@ -784,6 +789,15 @@ func (c *WebH3Client) releaseWebUDPSession() { <-c.udpSlots }
 type webConnectUDPStream struct {
 	stream     *http3.RequestStream
 	connection *quic.Conn
+	release    func()
+}
+
+// close relinquishes an opened request not transferred to a UDP session.
+func (s *webConnectUDPStream) close() {
+	s.stream.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+	s.stream.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+	_ = s.stream.Close()
+	s.release()
 }
 
 func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) (*webConnectUDPStream, error) {
@@ -803,6 +817,12 @@ func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) 
 		return nil, err
 	}
 	session := reservation.session
+	owned := true
+	defer func() {
+		if owned {
+			reservation.release()
+		}
+	}()
 	conn, client := session.conn, session.client
 	var (
 		bearer     string
@@ -940,7 +960,8 @@ func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) 
 	}
 	c.selected = true
 	c.mu.Unlock()
-	return &webConnectUDPStream{stream: stream, connection: conn}, nil
+	owned = false
+	return &webConnectUDPStream{stream: stream, connection: conn, release: reservation.release}, nil
 }
 
 func waitWebH3DatagramSettings(ctx context.Context, client *http3.ClientConn) error {

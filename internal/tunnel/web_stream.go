@@ -41,6 +41,9 @@ type webH3Conn struct {
 	local  net.Addr
 	remote net.Addr
 	once   sync.Once
+	// Only a client stream owns a reservation on its multiplexed connection.
+	// Half-closes retain ownership: the opposite direction may still be live.
+	onClose func()
 }
 
 func newWebH3Conn(stream h3DataStream, local, remote net.Addr) *webH3Conn {
@@ -55,6 +58,9 @@ func (c *webH3Conn) Close() error {
 		code := quic.StreamErrorCode(http3.ErrCodeRequestCanceled)
 		c.stream.CancelRead(code)
 		c.stream.CancelWrite(code)
+		if c.onClose != nil {
+			c.onClose()
+		}
 	})
 	return nil
 }
@@ -110,15 +116,18 @@ type webH2Conn struct {
 	local  net.Addr
 	remote net.Addr
 
-	mu           sync.Mutex
-	closed       bool
-	readExpired  bool
-	writeExpired bool
-	readSeq      uint64
-	writeSeq     uint64
-	readTimer    *time.Timer
-	writeTimer   *time.Timer
-	closeOnce    sync.Once
+	mu            sync.Mutex
+	closed        bool
+	readExpired   bool
+	writeExpired  bool
+	readSeq       uint64
+	writeSeq      uint64
+	readDeadline  time.Time
+	writeDeadline time.Time
+	readTimer     *time.Timer
+	writeTimer    *time.Timer
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 func newWebH2Conn(reader io.ReadCloser, writer *io.PipeWriter, cancel context.CancelFunc, local, remote net.Addr) *webH2Conn {
@@ -148,16 +157,23 @@ func (c *webH2Conn) Write(p []byte) (int, error) {
 }
 
 func (c *webH2Conn) Close() error {
-	var result error
+	c.mu.Lock()
+	c.closed = true
+	c.stopTimersLocked()
+	c.mu.Unlock()
+	return c.closeStream()
+}
+
+// Canceling a request context alone does not release the HTTP/2 request-body
+// goroutine once it is blocked reading our pipe. Close both stream directions
+// as well, outside mu: closing the response may wait for that goroutine, and
+// cancel/Close callbacks must be free to inspect the connection's state.
+func (c *webH2Conn) closeStream() error {
 	c.closeOnce.Do(func() {
-		c.mu.Lock()
-		c.closed = true
-		c.stopTimersLocked()
-		c.mu.Unlock()
 		c.cancel()
-		result = errors.Join(c.writer.Close(), c.reader.Close())
+		c.closeErr = errors.Join(c.writer.Close(), c.reader.Close())
 	})
-	return result
+	return c.closeErr
 }
 
 func (c *webH2Conn) CloseWrite() error { return c.writer.Close() }
@@ -166,10 +182,14 @@ func (c *webH2Conn) LocalAddr() net.Addr  { return c.local }
 func (c *webH2Conn) RemoteAddr() net.Addr { return c.remote }
 
 func (c *webH2Conn) SetDeadline(t time.Time) error {
-	if err := c.SetReadDeadline(t); err != nil {
-		return err
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return net.ErrClosed
 	}
-	return c.SetWriteDeadline(t)
+	c.setReadDeadlineLocked(t)
+	c.setWriteDeadlineLocked(t)
+	return nil
 }
 
 func (c *webH2Conn) SetReadDeadline(t time.Time) error {
@@ -178,17 +198,22 @@ func (c *webH2Conn) SetReadDeadline(t time.Time) error {
 	if c.closed {
 		return net.ErrClosed
 	}
+	c.setReadDeadlineLocked(t)
+	return nil
+}
+
+func (c *webH2Conn) setReadDeadlineLocked(t time.Time) {
 	c.readSeq++
+	c.readDeadline = t
 	if c.readTimer != nil {
 		c.readTimer.Stop()
 		c.readTimer = nil
 	}
 	if t.IsZero() {
-		return nil
+		return
 	}
 	seq := c.readSeq
 	c.readTimer = time.AfterFunc(time.Until(t), func() { c.expireRead(seq) })
-	return nil
 }
 
 func (c *webH2Conn) SetWriteDeadline(t time.Time) error {
@@ -197,17 +222,22 @@ func (c *webH2Conn) SetWriteDeadline(t time.Time) error {
 	if c.closed {
 		return net.ErrClosed
 	}
+	c.setWriteDeadlineLocked(t)
+	return nil
+}
+
+func (c *webH2Conn) setWriteDeadlineLocked(t time.Time) {
 	c.writeSeq++
+	c.writeDeadline = t
 	if c.writeTimer != nil {
 		c.writeTimer.Stop()
 		c.writeTimer = nil
 	}
 	if t.IsZero() {
-		return nil
+		return
 	}
 	seq := c.writeSeq
 	c.writeTimer = time.AfterFunc(time.Until(t), func() { c.expireWrite(seq) })
-	return nil
 }
 
 func (c *webH2Conn) expireRead(seq uint64) {
@@ -217,8 +247,9 @@ func (c *webH2Conn) expireRead(seq uint64) {
 		return
 	}
 	c.readExpired = true
+	c.expireStreamLocked()
 	c.mu.Unlock()
-	c.cancel()
+	_ = c.closeStream()
 }
 
 func (c *webH2Conn) expireWrite(seq uint64) {
@@ -228,8 +259,19 @@ func (c *webH2Conn) expireWrite(seq uint64) {
 		return
 	}
 	c.writeExpired = true
+	c.expireStreamLocked()
 	c.mu.Unlock()
-	c.cancel()
+	_ = c.closeStream()
+}
+
+func (c *webH2Conn) expireStreamLocked() {
+	// SetDeadline sets both directions atomically. The first timer to fire
+	// terminates the stream, but both due directions must report a timeout.
+	now := time.Now()
+	c.readExpired = c.readExpired || !c.readDeadline.IsZero() && !c.readDeadline.After(now)
+	c.writeExpired = c.writeExpired || !c.writeDeadline.IsZero() && !c.writeDeadline.After(now)
+	c.closed = true
+	c.stopTimersLocked()
 }
 
 func (c *webH2Conn) stopTimersLocked() {
@@ -237,9 +279,11 @@ func (c *webH2Conn) stopTimersLocked() {
 	c.writeSeq++
 	if c.readTimer != nil {
 		c.readTimer.Stop()
+		c.readTimer = nil
 	}
 	if c.writeTimer != nil {
 		c.writeTimer.Stop()
+		c.writeTimer = nil
 	}
 }
 

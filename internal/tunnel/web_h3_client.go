@@ -76,6 +76,10 @@ type webH3ClientSession struct {
 	authState webH3ClientAuthState
 	authReady chan struct{}
 	auth      *webSessionClientAuth
+	// guarded by WebH3Client.mu; users includes requests still opening and
+	// established TCP / UDP streams until their owner closes them.
+	retired bool
+	users   int
 
 	closeOnce sync.Once
 	closeErr  error
@@ -94,6 +98,7 @@ type webH3SessionReservation struct {
 	session   *webH3ClientSession
 	bootstrap bool
 	auth      *webSessionClientAuth
+	release   func()
 }
 
 func (s *webH3ClientSession) closeResources() error {
@@ -227,6 +232,12 @@ func (c *WebH3Client) DialContext(ctx context.Context, network, address string) 
 		return nil, err
 	}
 	session := reservation.session
+	owned := true
+	defer func() {
+		if owned {
+			reservation.release()
+		}
+	}()
 	conn, client := session.conn, session.client
 	openContext, cancelOpen := context.WithTimeout(ctx, c.handshakeTimeout)
 	stopClient := context.AfterFunc(c.ctx, cancelOpen)
@@ -370,7 +381,10 @@ func (c *WebH3Client) DialContext(ctx context.Context, network, address string) 
 	}
 	c.selected = true
 	c.mu.Unlock()
-	return newWebH3Conn(stream, conn.LocalAddr(), conn.RemoteAddr()), nil
+	result := newWebH3Conn(stream, conn.LocalAddr(), conn.RemoteAddr())
+	result.onClose = reservation.release
+	owned = false
+	return result, nil
 }
 
 // reserveAuthenticatedSession assigns exactly one bootstrap request to a new
@@ -389,19 +403,22 @@ func (c *WebH3Client) reserveAuthenticatedSession(ctx context.Context) (webH3Ses
 			c.mu.Unlock()
 			return webH3SessionReservation{}, net.ErrClosed
 		}
-		if session == nil || conn.Context().Err() != nil {
+		if session == nil || session.retired || conn.Context().Err() != nil {
 			c.mu.Unlock()
 			continue
 		}
 		switch session.authState {
 		case webH3ClientAuthFresh:
 			session.authState = webH3ClientAuthBootstrapping
+			reservation := c.reserveSessionLocked(session)
+			reservation.bootstrap = true
 			c.mu.Unlock()
-			return webH3SessionReservation{session: session, bootstrap: true}, nil
+			return reservation, nil
 		case webH3ClientAuthReady:
-			auth := session.auth
+			reservation := c.reserveSessionLocked(session)
+			reservation.auth = session.auth
 			c.mu.Unlock()
-			return webH3SessionReservation{session: session, auth: auth}, nil
+			return reservation, nil
 		case webH3ClientAuthBootstrapping:
 			ready := session.authReady
 			c.mu.Unlock()
@@ -420,6 +437,28 @@ func (c *WebH3Client) reserveAuthenticatedSession(ctx context.Context) (webH3Ses
 			c.mu.Unlock()
 			return webH3SessionReservation{}, errors.New("tunnel: invalid web-cover H3 authentication state")
 		}
+	}
+}
+
+// reserveSessionLocked acquires a stream owner before releasing the selection
+// lock. Thus retirement cannot close an otherwise idle connection between its
+// selection and OpenRequestStream. A successful open transfers this ownership
+// to the stream; every failed open must release it.
+func (c *WebH3Client) reserveSessionLocked(session *webH3ClientSession) webH3SessionReservation {
+	session.users++
+	return webH3SessionReservation{
+		session: session,
+		release: sync.OnceFunc(func() { c.releaseSession(session) }),
+	}
+}
+
+func (c *WebH3Client) releaseSession(session *webH3ClientSession) {
+	c.mu.Lock()
+	session.users--
+	closeRetired := session.retired && session.users == 0 && c.conns[session.conn] == session
+	c.mu.Unlock()
+	if closeRetired {
+		_ = session.conn.CloseWithError(0, "")
 	}
 }
 
@@ -679,15 +718,24 @@ func (c *WebH3Client) failSessionAuthentication(session *webH3ClientSession) {
 }
 
 // retire prevents new request streams from selecting conn while allowing its
-// already-established sibling streams to drain. The connection remains
-// tracked so Close still terminates it.
+// already-established sibling streams and pending opens to drain. Closing the
+// final owner completes retirement even if QUIC keepalive is enabled. Until
+// then the connection stays tracked so client Close can still terminate it.
 func (c *WebH3Client) retire(conn *quic.Conn) {
 	c.mu.Lock()
+	session := c.conns[conn]
+	if session != nil {
+		session.retired = true
+	}
 	if c.conn == conn {
 		c.conn = nil
 		c.client = nil
 	}
+	closeRetired := session != nil && session.users == 0
 	c.mu.Unlock()
+	if closeRetired {
+		_ = conn.CloseWithError(0, "")
+	}
 }
 
 func (c *WebH3Client) Close() error {

@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apernet/quic-go"
-	"github.com/apernet/quic-go/http3"
 	"github.com/cppla/autocar/internal/transport"
 )
 
@@ -112,8 +110,7 @@ func TestWebSessionConcurrentShortTickets(t *testing.T) {
 								failures <- err
 								return
 							}
-							defer opened.stream.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
-							defer opened.stream.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+							defer opened.close()
 							if err := opened.stream.SendDatagram([]byte{0, 'u'}); err != nil {
 								failures <- err
 								return
@@ -221,8 +218,7 @@ func TestWebSessionCanceledTicketWaitDoesNotCloseSibling(t *testing.T) {
 					open = func(ctx context.Context) error {
 						opened, err := h3.openConnectUDPSession(ctx, "wait.example:443")
 						if opened != nil {
-							opened.stream.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
-							opened.stream.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+							opened.close()
 						}
 						return err
 					}

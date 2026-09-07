@@ -339,7 +339,11 @@ type webAltSvcCover struct {
 }
 
 func (h *webAltSvcCover) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.next.ServeHTTP(&webAltSvcResponseWriter{ResponseWriter: w, value: h.value}, r)
+	writer := &webAltSvcResponseWriter{ResponseWriter: w, value: h.value}
+	h.next.ServeHTTP(writer, r)
+	// Returning without a final WriteHeader, Write or Flush implicitly sends
+	// a 200 response. The handler may have cleared headers after a 1xx response.
+	writer.commit()
 }
 
 type webAltSvcResponseWriter struct {
@@ -357,7 +361,13 @@ func (w *webAltSvcResponseWriter) commit() {
 }
 
 func (w *webAltSvcResponseWriter) WriteHeader(status int) {
-	w.commit()
+	if status >= 100 && status < 200 && status != http.StatusSwitchingProtocols {
+		// Informational responses do not commit final headers. A reverse proxy
+		// can clear and replace them before sending the final response.
+		w.Header().Set("Alt-Svc", w.value)
+	} else {
+		w.commit()
+	}
 	w.ResponseWriter.WriteHeader(status)
 }
 

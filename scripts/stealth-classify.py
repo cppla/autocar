@@ -654,27 +654,39 @@ def roc_auc(predictions: Sequence[Prediction]) -> float:
 
 
 def tpr_at_fpr(predictions: Sequence[Prediction], maximum_fpr: float) -> float:
-    positives = [item.score for item in predictions if item.label == 1]
-    negatives = sorted((item.score for item in predictions if item.label == 0), reverse=True)
+    """Maximize empirical TPR over deterministic thresholds within the FPR bound."""
+    if not math.isfinite(maximum_fpr) or not 0.0 <= maximum_fpr <= 1.0:
+        raise ValueError("maximum FPR must be finite and between zero and one")
+    positives = sum(item.label == 1 for item in predictions)
+    negatives = sum(item.label == 0 for item in predictions)
     if not positives or not negatives:
         raise InsufficientEvidence("TPR needs both classes")
-    required_negatives = math.ceil(1.0 / maximum_fpr)
-    if len(negatives) < required_negatives:
+    # Preserve the evidence-resolution gate for positive FPR bounds. A zero
+    # bound denotes zero observed false positives, not a population guarantee.
+    required_negatives = math.ceil(1.0 / maximum_fpr) if maximum_fpr > 0.0 else 1
+    if negatives < required_negatives:
         raise InsufficientEvidence(
             f"TPR at {maximum_fpr:.2%} FPR needs at least {required_negatives} negative samples; "
-            f"got {len(negatives)}"
+            f"got {negatives}"
         )
-    allowed_false_positives = math.floor(maximum_fpr * len(negatives) + 1e-12)
-    if allowed_false_positives == 0:
-        threshold = negatives[0]
-        return sum(score > threshold for score in positives) / len(positives)
-    threshold = negatives[min(allowed_false_positives - 1, len(negatives) - 1)]
-    false_positives = sum(score >= threshold for score in negatives)
-    if false_positives / len(negatives) > maximum_fpr + 1e-12:
-        # A tied score block cannot be partially accepted without a randomized
-        # detector. Move above it to preserve the declared FPR bound.
-        return sum(score > threshold for score in positives) / len(positives)
-    return sum(score >= threshold for score in positives) / len(positives)
+    if any(not math.isfinite(item.score) for item in predictions):
+        raise ValueError("TPR scores must be finite")
+
+    # Every observed score is a possible threshold, including positive-only
+    # scores between negatives. Accept tied scores together: splitting a block
+    # or interpolating a ROC segment would imply a randomized detector.
+    ordered = sorted(predictions, key=lambda item: item.score, reverse=True)
+    true_positives = false_positives = best_true_positives = index = 0
+    while index < len(ordered):
+        score = ordered[index].score
+        while index < len(ordered) and ordered[index].score == score:
+            true_positives += ordered[index].label == 1
+            false_positives += ordered[index].label == 0
+            index += 1
+        if false_positives / negatives > maximum_fpr:
+            break
+        best_true_positives = true_positives
+    return best_true_positives / positives
 
 
 def group_predictions(predictions: Sequence[Prediction]) -> dict[str, list[Prediction]]:
@@ -729,7 +741,69 @@ def write_json_atomic(path: Path, value: object) -> None:
             os.unlink(temporary_name)
 
 
+def self_test_tpr_at_fpr() -> None:
+    from itertools import product
+
+    cell = ("healthy_h3", "download_1k", "h3")
+
+    def samples(negatives: Sequence[float], positives: Sequence[float]) -> list[Prediction]:
+        return [Prediction(f"n{index}", cell, "g1", 0, score) for index, score in enumerate(negatives)] + [
+            Prediction(f"p{index}", cell, "g1", 1, score) for index, score in enumerate(positives)
+        ]
+
+    # A positive-only threshold in a gap must not be skipped.
+    assert tpr_at_fpr(samples([1.0] + [0.0] * 99, [0.5] * 100), 0.01) == 1.0
+    # A tied block fits the budget only as a whole; no fractional acceptance.
+    assert tpr_at_fpr(samples([0.5] + [0.0] * 99, [0.5] * 100), 0.01) == 1.0
+    assert tpr_at_fpr(samples([0.5] * 2 + [0.0] * 98, [0.5] * 100), 0.01) == 0.0
+    assert tpr_at_fpr(samples([0.5] * 2 + [0.0] * 98, [0.75, 0.5]), 0.01) == 0.5
+    assert tpr_at_fpr(samples([0.5] * 100, [0.5] * 100), 0.01) == 0.0
+    assert tpr_at_fpr(samples([1.0], [2.0, 1.0]), 0.0) == 0.5
+    assert tpr_at_fpr(samples([1.0], [0.0]), 1.0) == 1.0
+    # Do not round a just-too-small bound upward to admit another false positive.
+    assert tpr_at_fpr(samples([1.0, 0.5, 0.0], [1.0]), math.nextafter(2.0 / 3.0, 0.0)) == 1.0
+    assert tpr_at_fpr(samples([1.0, 0.5, 0.0], [0.5]), math.nextafter(2.0 / 3.0, 0.0)) == 0.0
+
+    # Independent brute-force oracle: enumerate every threshold and classify
+    # the entire sample set anew, rather than sharing the production sweep.
+    for scores in product((-1.0, 0.0, 1.0), repeat=6):
+        predictions = samples(scores[:3], scores[3:])
+        for bound in (0.0, 0.34, 0.5, 2.0 / 3.0, 1.0):
+            expected = max(
+                (
+                    sum(score >= threshold for score in scores[3:]) / 3
+                    for threshold in set(scores) | {math.inf}
+                    if sum(score >= threshold for score in scores[:3]) / 3 <= bound
+                ),
+                default=0.0,
+            )
+            assert tpr_at_fpr(predictions, bound) == expected, (scores, bound, expected)
+
+    for invalid in (-0.01, 1.01, math.inf, -math.inf, math.nan):
+        try:
+            tpr_at_fpr(samples([0.0], [1.0]), invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid FPR bound {invalid}")
+    for invalid_score in (math.inf, -math.inf, math.nan):
+        try:
+            tpr_at_fpr(samples([0.0], [invalid_score]), 1.0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid score {invalid_score}")
+    for incomplete in (samples([], [1.0]), samples([0.0], []), samples([0.0] * 99, [1.0])):
+        try:
+            tpr_at_fpr(incomplete, 0.01)
+        except InsufficientEvidence:
+            pass
+        else:
+            raise AssertionError("accepted insufficient negative samples or a missing class")
+
+
 def self_test() -> None:
+    self_test_tpr_at_fpr()
     cell = ("healthy_h3", "download_1k", "h3")
     predictions = [Prediction(f"n{index}", cell, "g1", 0, index / 1000.0) for index in range(100)]
     predictions += [Prediction(f"p{index}", cell, "g1", 1, 0.8 + index / 1000.0) for index in range(100)]
