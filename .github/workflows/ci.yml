@@ -41,6 +41,9 @@ jobs:
         run: make notices-check
       - name: Vet
         run: make vet
+      - name: Release contract regression tests
+        if: matrix.go == '1.27.x'
+        run: make release-recipe-check
       - name: Test with coverage
         run: go test -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
       - name: Upload coverage

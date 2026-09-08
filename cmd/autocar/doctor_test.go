@@ -44,6 +44,20 @@ func (d *fakeDoctorDialer) Close() error {
 
 func (d *fakeDoctorDialer) Snapshot() tunnel.ClientSnapshot { return d.snapshot }
 
+// Keep the underlying local probe error for test diagnostics without changing
+// doctor's deliberately redacted JSON contract, timeouts, or retry behavior.
+type recordingDoctorDialer struct {
+	closeDialer
+	doctorSnapshotReporter
+	probeErr error
+}
+
+func (d *recordingDoctorDialer) DialContext(ctx context.Context, network, target string) (net.Conn, error) {
+	conn, err := d.closeDialer.DialContext(ctx, network, target)
+	d.probeErr = err
+	return conn, err
+}
+
 func TestDoctorJSONProbesAuthenticatedTunnelAndReportsSnapshot(t *testing.T) {
 	eventTime := time.Date(2026, time.September, 3, 8, 30, 0, 0, time.UTC)
 	dialer := &fakeDoctorDialer{snapshot: tunnel.ClientSnapshot{
@@ -154,6 +168,20 @@ func TestDoctorCommandOpensRealAuthenticatedQUICPath(t *testing.T) {
 		}
 	})
 
+	var observed *recordingDoctorDialer
+	builder := func(flags tunnelFlags) (closeDialer, error) {
+		dialer, err := buildTunnelDialer(flags)
+		if err != nil {
+			return nil, err
+		}
+		reporter, ok := dialer.(doctorSnapshotReporter)
+		if !ok {
+			_ = dialer.Close()
+			return nil, errors.New("real tunnel dialer does not expose a snapshot")
+		}
+		observed = &recordingDoctorDialer{closeDialer: dialer, doctorSnapshotReporter: reporter}
+		return observed, nil
+	}
 	var stdout, stderr bytes.Buffer
 	err = runDoctorWith(context.Background(), []string{
 		"--server", server.Addr().String(),
@@ -162,9 +190,13 @@ func TestDoctorCommandOpensRealAuthenticatedQUICPath(t *testing.T) {
 		"--transport", "quic",
 		"--target", target.Addr().String(),
 		"--json",
-	}, &stdout, &stderr, buildTunnelDialer)
+	}, &stdout, &stderr, builder)
 	if err != nil {
-		t.Fatalf("doctor failed: %v; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+		var probeErr error
+		if observed != nil {
+			probeErr = observed.probeErr
+		}
+		t.Fatalf("doctor failed: %v; underlying probe error=%T: %v; stdout=%s stderr=%s", err, probeErr, probeErr, stdout.String(), stderr.String())
 	}
 	var result doctorResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {

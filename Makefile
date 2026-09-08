@@ -8,7 +8,7 @@ LDFLAGS := -s -w \
 	-X github.com/cppla/autocar/internal/version.Commit=$(COMMIT) \
 	-X github.com/cppla/autocar/internal/version.Date=$(BUILD_DATE)
 
-.PHONY: all check fmt fmt-check dependency-boundary-check mod-check notices notices-check vet test race build cross-build release release-recipe-check release-evidence-check docker integration-docker integration-netem stealth-tools-check stealth-active-smoke stealth-active-release stealth-campaign-calibration stealth-campaign-full stealth-campaign-docker-smoke stealth-passive clean
+.PHONY: all check fmt fmt-check dependency-boundary-check mod-check notices notices-check vet test race build cross-build release release-quality-check release-metadata-check release-artifact-check release-with-evidence release-recipe-check release-evidence-check docker integration-docker integration-netem stealth-tools-check stealth-active-smoke stealth-active-release stealth-campaign-calibration stealth-campaign-full stealth-campaign-docker-smoke stealth-passive clean
 
 STEALTH_PREREGISTRATION ?= testdata/stealth/preregistration.json
 STEALTH_EXPECTED_REMOTE_HOST ?=
@@ -75,17 +75,45 @@ cross-build: notices-check
 	cd dist/.release-stage-autocar/autocar-windows-amd64 && zip -q -X ../../autocar-windows-amd64.zip autocar.exe LICENSE THIRD_PARTY_NOTICES.md
 	rm -rf dist/.release-stage-autocar
 
-release: release-evidence-check
-	@test "$(VERSION)" != dev || { echo "set VERSION to the release version" >&2; exit 2; }
-	@test "$(BUILD_DATE)" != unknown || { echo "set BUILD_DATE to the release timestamp" >&2; exit 2; }
+release:
 	@set -eu; commit="$$(git rev-parse --verify HEAD)"; tree="$$(git rev-parse "HEAD^{tree}")"; \
 	test -z "$$(git status --porcelain=v1 --untracked-files=all)" || { echo "release checkout became dirty" >&2; exit 1; }; \
+	$(MAKE) release-metadata-check VERSION="$(VERSION)" COMMIT="$$commit" BUILD_DATE="$(BUILD_DATE)"; \
+	$(MAKE) release-quality-check; \
+	test "$$(git rev-parse --verify HEAD)" = "$$commit" && test "$$(git rev-parse "HEAD^{tree}")" = "$$tree" && \
+	test -z "$$(git status --porcelain=v1 --untracked-files=all)" || { echo "release source changed during quality checks" >&2; exit 1; }; \
 	$(MAKE) cross-build VERSION="$(VERSION)" COMMIT="$$commit" BUILD_DATE="$(BUILD_DATE)"; \
+	$(MAKE) release-artifact-check VERSION="$(VERSION)" COMMIT="$$commit" BUILD_DATE="$(BUILD_DATE)"; \
 	test "$$(git rev-parse --verify HEAD)" = "$$commit" && test "$$(git rev-parse "HEAD^{tree}")" = "$$tree" && \
 	test -z "$$(git status --porcelain=v1 --untracked-files=all)" || { echo "release source changed while archives were built" >&2; exit 1; }
 
+release-quality-check:
+	$(MAKE) check
+	$(MAKE) race
+	$(MAKE) stealth-tools-check
+	./scripts/govulncheck.sh
+
+release-metadata-check:
+	python3 scripts/release-artifact-check.py --metadata-only --version "$(VERSION)" --commit "$(COMMIT)" --build-date "$(BUILD_DATE)"
+
+release-artifact-check:
+	python3 scripts/release-artifact-check.py --version "$(VERSION)" --commit "$(COMMIT)" --build-date "$(BUILD_DATE)" --go "$(GO)"
+
+# Comparative claims retain the complete, fail-closed research evidence gate.
+release-with-evidence:
+	@set -eu; commit="$$(git rev-parse --verify HEAD)"; tree="$$(git rev-parse "HEAD^{tree}")"; \
+	test -z "$$(git status --porcelain=v1 --untracked-files=all)" || { echo "comparative release checkout is dirty" >&2; exit 1; }; \
+	$(MAKE) release-evidence-check; \
+	test "$$(git rev-parse --verify HEAD)" = "$$commit" && test "$$(git rev-parse "HEAD^{tree}")" = "$$tree" && \
+	test -z "$$(git status --porcelain=v1 --untracked-files=all)" || { echo "comparative release source changed during evidence checks" >&2; exit 1; }; \
+	$(MAKE) release VERSION="$(VERSION)" BUILD_DATE="$(BUILD_DATE)"; \
+	test "$$(git rev-parse --verify HEAD)" = "$$commit" && test "$$(git rev-parse "HEAD^{tree}")" = "$$tree" && \
+	test -z "$$(git status --porcelain=v1 --untracked-files=all)" || { echo "comparative release source changed during packaging" >&2; exit 1; }
+
 release-recipe-check:
 	python3 scripts/test_make_release.py
+	python3 scripts/test_release_artifact_check.py
+	python3 scripts/test_release_smoke.py
 
 release-evidence-check: stealth-tools-check
 	@test -n "$(STEALTH_LOCAL_ACTIVE)" || { echo "set STEALTH_LOCAL_ACTIVE=/path/to/local/manifest.json" >&2; exit 2; }

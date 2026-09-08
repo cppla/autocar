@@ -1,10 +1,17 @@
 # Web-cover mode
 
-AutoCAR v1.0.1 introduces an opt-in `web` relay mode for deployments that need
-a genuine HTTPS origin and reliable TCP service across both UDP-capable and
+AutoCAR v1.0.1 introduces an experimental, opt-in `web` relay mode for deployments
+that need a genuine HTTPS origin and reliable TCP service across both UDP-capable and
 UDP-blocked networks. It is intended for lawful privacy, normal website
 compatibility, and service continuity on infrastructure the operator owns or is
 authorized to use.
+
+The default remains a `native` relay and an `auto` client. A normal v1.0.1
+feature/bugfix release does not certify passive-fingerprint quality. Enable
+web-cover only after validating the application's required TCP and UDP paths;
+see [upgrade and rollback](DEPLOYMENT.md#10-v100-to-v101-upgrade-and-rollback).
+Web clients and relays must both support v1.0.1 web mode; v1.0.0 supports native
+`autocar/2` only. Web mode never silently downgrades to that native protocol.
 
 It is not an “undetectable” mode. Standard HTTP does not make all TLS, QUIC,
 HTTP framing, packet-size, timing, traffic-volume, endpoint, or application
@@ -271,10 +278,14 @@ indistinguishable from a browser. A defensible result requires a versioned,
 reproducible capture and a classifier evaluated on held-out runs. Until such a
 gate passes, passive-fingerprint superiority is unproven.
 
-The frozen comparison corpus, safety boundary, minimum sample counts, and
+The optional research corpus, safety boundary, minimum sample counts, and
 decision rule are specified in
 [STEALTH-BENCHMARK.md](STEALTH-BENCHMARK.md). A smoke run validates the tools;
-it is not a comparative result.
+it is not a comparative result. The complete 31,500-PCAP campaign and real-browser
+comparison have not been completed for v1.0.1. The earlier 65-capture calibration
+remains `insufficient_evidence` and belongs only to its recorded source snapshot.
+Separating [ordinary release checks](RELEASING.md) from that optional research
+gate does not change those results or permit stronger claims.
 
 ## Transport continuity and validation limits
 
