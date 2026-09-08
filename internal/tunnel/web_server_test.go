@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -340,7 +341,7 @@ func reserveWebTestTCPUDP(t *testing.T) (net.Listener, net.PacketConn) {
 			return tcp, udp
 		}
 		_ = tcp.Close()
-		if !errors.Is(err, syscall.EADDRINUSE) {
+		if !isWebTestAddressInUse(err) {
 			t.Fatalf("reserve matching UDP endpoint: %v", err)
 		}
 	}
@@ -352,8 +353,45 @@ func requireWebListenAddressInUse(t *testing.T, err error, network, address stri
 	t.Helper()
 	var opErr *net.OpError
 	if !errors.As(err, &opErr) || opErr.Op != "listen" || opErr.Net != network ||
-		opErr.Addr == nil || opErr.Addr.String() != address || !errors.Is(err, syscall.EADDRINUSE) {
+		opErr.Addr == nil || opErr.Addr.String() != address || !isWebTestAddressInUse(err) {
 		t.Fatalf("ListenWeb bind error = %v, want listen %s %s: address already in use", err, network, address)
+	}
+}
+
+func isWebTestAddressInUse(err error) bool {
+	if runtime.GOOS == "windows" {
+		// Windows bind returns WSAEADDRINUSE, not the synthetic POSIX-style
+		// syscall.EADDRINUSE value. Errno.Is does not map between them.
+		const winsockAddressInUse syscall.Errno = 10048
+		return errors.Is(err, winsockAddressInUse)
+	}
+	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+func TestWebTestAddressInUse(t *testing.T) {
+	windows := runtime.GOOS == "windows"
+	nativeErrno := syscall.EADDRINUSE
+	if windows {
+		nativeErrno = syscall.Errno(10048)
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"posix_errno", syscall.EADDRINUSE, !windows},
+		{"winsock_errno", syscall.Errno(10048), windows},
+		{"wrapped_native", fmt.Errorf("bind: %w", nativeErrno), true},
+		{"wrapped_op", &net.OpError{Op: "listen", Net: "tcp", Err: fmt.Errorf("bind: %w", nativeErrno)}, true},
+		{"permission_error", syscall.EACCES, false},
+		{"matching_text_only", errors.New("address already in use"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isWebTestAddressInUse(tc.err); got != tc.want {
+				t.Fatalf("isWebTestAddressInUse(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
