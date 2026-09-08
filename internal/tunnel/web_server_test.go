@@ -8,9 +8,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -286,23 +288,111 @@ func TestWebServerAddressValidationAndUDPBindRollback(t *testing.T) {
 		t.Fatalf("zero/fixed address normalization = %q/%q, %v", tcp, udp, err)
 	}
 
-	occupiedUDP, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	reservedTCP, occupiedUDP := reserveWebTestTCPUDP(t)
 	occupiedAddress := occupiedUDP.LocalAddr().String()
-	defer occupiedUDP.Close()
 	config.TCPAddress = occupiedAddress
 	config.UDPAddress = occupiedAddress
-	if _, err := ListenWeb(config); err == nil {
-		t.Fatal("ListenWeb succeeded while its UDP endpoint was occupied")
+
+	// An occupied TCP endpoint must not be mistaken for the UDP failure this
+	// regression exercises. Holding both sockets also proves that this numeric
+	// port was available in both independent protocol namespaces.
+	server, err := ListenWeb(config)
+	if server != nil {
+		_ = server.Close()
+		t.Fatal("ListenWeb returned a server while its TCP endpoint was occupied")
 	}
+	requireWebListenAddressInUse(t, err, "tcp", occupiedAddress)
+	if err := reservedTCP.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	server, err = ListenWeb(config)
+	if server != nil {
+		_ = server.Close()
+		t.Fatal("ListenWeb returned a server while its UDP endpoint was occupied")
+	}
+	requireWebListenAddressInUse(t, err, "udp", occupiedAddress)
 	// The failed second bind must roll back the already-created TCP listener.
+	// Neither the server call nor this check may retry: doing so could hide a
+	// genuine rollback leak. A competing TCP bind above has a different error.
 	probeTCP, err := net.Listen("tcp", occupiedAddress)
 	if err != nil {
 		t.Fatalf("TCP listener leaked after UDP bind failure: %v", err)
 	}
 	_ = probeTCP.Close()
+}
+
+func reserveWebTestTCPUDP(t *testing.T) (net.Listener, net.PacketConn) {
+	t.Helper()
+	// The kernel allocates TCP and UDP ephemeral ports independently. Retry
+	// only fixture setup when a TCP-selected port is already occupied on UDP,
+	// before invoking ListenWeb or testing any rollback behavior.
+	for range 32 {
+		tcp, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		udp, err := net.ListenPacket("udp", tcp.Addr().String())
+		if err == nil {
+			t.Cleanup(func() {
+				_ = tcp.Close()
+				_ = udp.Close()
+			})
+			return tcp, udp
+		}
+		_ = tcp.Close()
+		if !isWebTestAddressInUse(err) {
+			t.Fatalf("reserve matching UDP endpoint: %v", err)
+		}
+	}
+	t.Fatal("could not reserve one port in both TCP and UDP namespaces")
+	return nil, nil
+}
+
+func requireWebListenAddressInUse(t *testing.T, err error, network, address string) {
+	t.Helper()
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || opErr.Op != "listen" || opErr.Net != network ||
+		opErr.Addr == nil || opErr.Addr.String() != address || !isWebTestAddressInUse(err) {
+		t.Fatalf("ListenWeb bind error = %v, want listen %s %s: address already in use", err, network, address)
+	}
+}
+
+func isWebTestAddressInUse(err error) bool {
+	if runtime.GOOS == "windows" {
+		// Windows bind returns WSAEADDRINUSE, not the synthetic POSIX-style
+		// syscall.EADDRINUSE value. Errno.Is does not map between them.
+		const winsockAddressInUse syscall.Errno = 10048
+		return errors.Is(err, winsockAddressInUse)
+	}
+	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+func TestWebTestAddressInUse(t *testing.T) {
+	windows := runtime.GOOS == "windows"
+	nativeErrno := syscall.EADDRINUSE
+	if windows {
+		nativeErrno = syscall.Errno(10048)
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"posix_errno", syscall.EADDRINUSE, !windows},
+		{"winsock_errno", syscall.Errno(10048), windows},
+		{"wrapped_native", fmt.Errorf("bind: %w", nativeErrno), true},
+		{"wrapped_op", &net.OpError{Op: "listen", Net: "tcp", Err: fmt.Errorf("bind: %w", nativeErrno)}, true},
+		{"permission_error", syscall.EACCES, false},
+		{"matching_text_only", errors.New("address already in use"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isWebTestAddressInUse(tc.err); got != tc.want {
+				t.Fatalf("isWebTestAddressInUse(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestWebServerCloseIsConcurrentAndServeIsSingleUse(t *testing.T) {
