@@ -213,6 +213,17 @@ class ReleaseRecipeTests(unittest.TestCase):
         for command in ("echo check", "echo race", "echo stealth-tools-check", "./scripts/govulncheck.sh"):
             self.assertIn(command, result.stdout)
 
+    def test_tar_archives_disable_macos_copyfile_metadata(self):
+        result = subprocess.run(
+            [shutil.which("make") or "make", "-n", "--no-print-directory", "-f", str(MAKEFILE),
+             "-o", "notices-check", "cross-build"], cwd=self.repo, env=self.env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        tar_commands = [line for line in result.stdout.splitlines() if " -czf dist/" in line]
+        self.assertEqual(len(tar_commands), 3)
+        self.assertTrue(all(line.startswith("COPYFILE_DISABLE=1 tar ") for line in tar_commands), tar_commands)
+
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--mock-build"]:

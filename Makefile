@@ -69,9 +69,9 @@ cross-build: notices-check
 	cp LICENSE THIRD_PARTY_NOTICES.md dist/.release-stage-autocar/autocar-linux-arm64/
 	cp LICENSE THIRD_PARTY_NOTICES.md dist/.release-stage-autocar/autocar-darwin-arm64/
 	cp LICENSE THIRD_PARTY_NOTICES.md dist/.release-stage-autocar/autocar-windows-amd64/
-	tar -C dist/.release-stage-autocar/autocar-linux-amd64 -czf dist/autocar-linux-amd64.tar.gz autocar LICENSE THIRD_PARTY_NOTICES.md
-	tar -C dist/.release-stage-autocar/autocar-linux-arm64 -czf dist/autocar-linux-arm64.tar.gz autocar LICENSE THIRD_PARTY_NOTICES.md
-	tar -C dist/.release-stage-autocar/autocar-darwin-arm64 -czf dist/autocar-darwin-arm64.tar.gz autocar LICENSE THIRD_PARTY_NOTICES.md
+	COPYFILE_DISABLE=1 tar -C dist/.release-stage-autocar/autocar-linux-amd64 -czf dist/autocar-linux-amd64.tar.gz autocar LICENSE THIRD_PARTY_NOTICES.md
+	COPYFILE_DISABLE=1 tar -C dist/.release-stage-autocar/autocar-linux-arm64 -czf dist/autocar-linux-arm64.tar.gz autocar LICENSE THIRD_PARTY_NOTICES.md
+	COPYFILE_DISABLE=1 tar -C dist/.release-stage-autocar/autocar-darwin-arm64 -czf dist/autocar-darwin-arm64.tar.gz autocar LICENSE THIRD_PARTY_NOTICES.md
 	cd dist/.release-stage-autocar/autocar-windows-amd64 && zip -q -X ../../autocar-windows-amd64.zip autocar.exe LICENSE THIRD_PARTY_NOTICES.md
 	rm -rf dist/.release-stage-autocar
 
