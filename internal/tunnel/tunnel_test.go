@@ -478,11 +478,14 @@ func TestFallbackCircuitBreakerAllowsOnlyOneConcurrentProbe(t *testing.T) {
 	defer closeTarget()
 	serverTLS, clientTLS := testTLSConfigs(t)
 	fallback := startTLSServer(t, serverTLS, &net.Dialer{}, testToken)
-	blackhole := startUDPBlackhole(t)
+	blackholeAddress := startUDPBlackhole(t)
 
-	const cooldown = 250 * time.Millisecond
+	// Drive the cooldown transition below instead of assuming that all TLS
+	// exchanges finish within a short wall-clock interval on a loaded runner.
+	// The exact expiry boundary is checked separately with a supplied clock.
+	const cooldown = time.Hour
 	client, err := NewClient(ClientConfig{
-		ServerAddress:    blackhole.address,
+		ServerAddress:    blackholeAddress,
 		FallbackAddress:  fallback.Addr().String(),
 		Token:            testToken,
 		TLSConfig:        clientTLS,
@@ -495,24 +498,82 @@ func TestFallbackCircuitBreakerAllowsOnlyOneConcurrentProbe(t *testing.T) {
 	}
 	defer client.Close()
 
+	var attempts atomic.Int32
+	probeReady := make(chan struct{})
+	probeRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProbe := func() { releaseOnce.Do(func() { close(probeRelease) }) }
+	defer releaseProbe()
+	realDialQUIC := client.dialQUIC
+	client.dialQUIC = func(ctx context.Context, address string, tlsConfig *tls.Config, config *quic.Config) (*quic.Conn, error) {
+		attempt := attempts.Add(1)
+		conn, err := realDialQUIC(ctx, address, tlsConfig, config)
+		if attempt == 2 {
+			// Keep the half-open probe pending after its real UDP attempt. Other
+			// callers must finish via TLS before this failure is published; a
+			// broken probe lock cannot hide behind a newly reopened cooldown.
+			close(probeReady)
+			select {
+			case <-probeRelease:
+			case <-client.ctx.Done():
+			}
+		}
+		return conn, err
+	}
+
 	// Concurrent callers share the first failed handshake, which opens the
-	// circuit, and all succeed through TLS. QUIC retries use one UDP source
-	// socket, which is our attempt ID.
+	// circuit, and all succeed through TLS. Count dial calls directly: UDP
+	// source-port reuse or a delayed packet observer is not an attempt ID.
 	runConcurrentExchanges(t, client, targetAddress, 20)
-	initialAttempts := blackhole.attempts()
+	initialAttempts := attempts.Load()
 	if initialAttempts != 1 {
 		t.Fatalf("initial QUIC attempts = %d, want 1", initialAttempts)
 	}
 
 	runConcurrentExchanges(t, client, targetAddress, 20)
-	if got := blackhole.attempts(); got != initialAttempts {
+	if got := attempts.Load(); got != initialAttempts {
 		t.Fatalf("QUIC attempts during cooldown = %d, want %d", got, initialAttempts)
 	}
 
-	time.Sleep(cooldown + 20*time.Millisecond)
+	client.mu.Lock()
+	client.primaryFailedAt = time.Now().Add(-cooldown)
+	client.mu.Unlock()
+	probeResult := make(chan error, 1)
+	go func() { probeResult <- exchange(client, targetAddress, "half-open probe") }()
+	select {
+	case <-probeReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("half-open QUIC probe did not reach its real dial result")
+	}
 	runConcurrentExchanges(t, client, targetAddress, 30)
-	if got, want := blackhole.attempts(), initialAttempts+1; got != want {
+	if got, want := attempts.Load(), initialAttempts+1; got != want {
 		t.Fatalf("QUIC attempts after cooldown = %d, want exactly one probe (%d)", got, want)
+	}
+	releaseProbe()
+	if err := <-probeResult; err != nil {
+		t.Fatalf("half-open probe did not fall back to TLS: %v", err)
+	}
+	if tryPrimary, _ := client.shouldTryPrimary(time.Now()); tryPrimary {
+		t.Fatal("failed half-open probe did not reopen the cooldown")
+	}
+}
+
+func TestFallbackCircuitBreakerCooldownBoundary(t *testing.T) {
+	failedAt := time.Date(2026, time.September, 8, 0, 0, 0, 0, time.UTC)
+	const cooldown = 250 * time.Millisecond
+	client := &Client{
+		primaryFailedAt:   failedAt,
+		fallbackCooldown:  cooldown,
+		primaryFailReason: ClientReasonQUICDialFailed,
+	}
+	if try, reason := client.shouldTryPrimary(failedAt.Add(cooldown - time.Nanosecond)); try || reason != ClientReasonQUICDialFailed {
+		t.Fatalf("before expiry: try=%v reason=%q", try, reason)
+	}
+	if try, reason := client.shouldTryPrimary(failedAt.Add(cooldown)); !try || reason != "" {
+		t.Fatalf("at expiry: try=%v reason=%q", try, reason)
+	}
+	if try, reason := client.shouldTryPrimary(failedAt.Add(2 * cooldown)); try || reason != ClientReasonQUICDialFailed {
+		t.Fatalf("pending probe: try=%v reason=%q", try, reason)
 	}
 }
 
@@ -1133,44 +1194,28 @@ func startHalfCloseTarget(t *testing.T) (string, func()) {
 	}
 }
 
-type udpBlackhole struct {
-	address string
-	conn    net.PacketConn
-	mu      sync.Mutex
-	sources map[string]struct{}
-	done    chan struct{}
-}
-
-func startUDPBlackhole(t *testing.T) *udpBlackhole {
+func startUDPBlackhole(t *testing.T) string {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &udpBlackhole{
-		address: conn.LocalAddr().String(),
-		conn:    conn,
-		sources: make(map[string]struct{}),
-		done:    make(chan struct{}),
-	}
+	done := make(chan struct{})
 	go func() {
-		defer close(b.done)
+		defer close(done)
 		buffer := make([]byte, 64<<10)
 		for {
-			_, source, err := conn.ReadFrom(buffer)
+			_, _, err := conn.ReadFrom(buffer)
 			if err != nil {
 				return
 			}
-			b.mu.Lock()
-			b.sources[source.String()] = struct{}{}
-			b.mu.Unlock()
 		}
 	}()
 	t.Cleanup(func() {
 		_ = conn.Close()
-		<-b.done
+		<-done
 	})
-	return b
+	return conn.LocalAddr().String()
 }
 
 func startQUICStreamBlackhole(t *testing.T, tlsConfig *tls.Config) string {
@@ -1237,12 +1282,6 @@ func mustServerTLSConfig(t *testing.T, input *tls.Config) *tls.Config {
 		t.Fatal(err)
 	}
 	return config
-}
-
-func (b *udpBlackhole) attempts() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.sources)
 }
 
 func startQUICServer(t *testing.T, tlsConfig *tls.Config, dialer transport.Dialer, token string) *QUICServer {

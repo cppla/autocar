@@ -2,9 +2,10 @@
 
 AutoCAR has two trusted endpoints: a local proxy client and a relay. Native mode
 prefers AutoCAR v2 over QUIC/UDP and can use a separate native TLS/TCP listener.
-Web-cover mode presents one normal website over H1/H2/TCP and H3/UDP and can
-carry new TCP flows over H2 when UDP is unavailable. Choose one relay protocol
-per endpoint and configure clients to match it.
+Experimental, opt-in web-cover mode presents one normal website over H1/H2/TCP
+and H3/UDP and can carry new TCP flows over H2 when UDP is unavailable. Choose one relay protocol
+per endpoint and configure clients to match it. The defaults remain a `native`
+relay and an `auto` client; installing v1.0.1 does not enable web-cover.
 
 ## 1. Build and create credentials
 
@@ -404,15 +405,51 @@ STEALTH_RELEASE_GATE=0 STEALTH_RUN_ROLE=remote-linux \
 Both image variables are mandatory together, and the harness must be launched
 from a direct session to the host named by `STEALTH_EXECUTION_HOST` and from a
 valid AutoCAR Git checkout so it can record source-state stability. This
-avoids compiling on that host but is smoke evidence only: the release gate
-rejects prebuilt images because it must build from the exact frozen Git archive.
+avoids compiling on that host but is smoke evidence only: the optional research
+gate rejects prebuilt images because it must build from the exact frozen Git archive.
 Remote manifests also record the ED25519 host-key fingerprint derived from the
 machine's `/etc/ssh/ssh_host_ed25519_key.pub`; release evidence must match the
 endpoint and fingerprint frozen in the preregistration. See
-[STEALTH-BENCHMARK.md](STEALTH-BENCHMARK.md) for the release-evidence contract.
+[STEALTH-BENCHMARK.md](STEALTH-BENCHMARK.md) for the research evidence contract,
+and [RELEASING.md](RELEASING.md) for ordinary release quality checks.
 
 `autocar/2` and web-cover do not provide third-party proxy or AutoCAR v1 compatibility.
 The shared web-H3 QUIC implementation does not change that protocol boundary.
 For a rolling breaking upgrade, start the new relay on a second UDP/TCP port,
 move clients, verify each selected transport independently, and then retire the
 old endpoint. There is no silent protocol-family downgrade.
+
+## 10. v1.0.0 to v1.0.1 upgrade and rollback
+
+The version number v1.0.0 is not the retired AutoCAR v1 wire protocol. Both
+v1.0.0 and v1.0.1 native endpoints use `autocar/2`; web-cover is new in v1.0.1
+and requires matching web-capable endpoints. Keep the existing native
+configuration when a feature change is not intended.
+
+1. Download the archive for the host architecture and verify its entry in the
+   release's `SHA256SUMS`. Record `autocar version` and retain the previous
+   executable, service definition, token, certificate, and configuration in a
+   protected backup. Do not put secrets in a release report.
+2. Test v1.0.1 on a separate, explicitly permitted TCP/UDP port with the same
+   certificate trust and destination policy. For a native rolling upgrade,
+   test the old client against the new relay and the new client against the
+   old relay for every transport actually used: `quic`, `tls`, `auto`, and
+   SOCKS5 UDP where required. A successful `doctor` only checks a TCP open;
+   also exercise application traffic and UDP separately.
+3. Replace one endpoint at a time, restart its managed service, and rerun those
+   checks before proceeding. Restarting an endpoint disconnects its current
+   streams; drain or schedule an interruption where needed.
+4. To try web-cover, keep the native endpoint available on its original port
+   and bring up a separate v1.0.1 `--protocol web` endpoint. Move only opted-in
+   clients to `web-auto`, `h3`, or `h2`. Check cover responses, authenticated
+   TCP, H3 CONNECT-UDP's 1,150-byte boundary, invalid credentials and the H3-to-H2
+   new-flow fallback before wider use. Web mode does not support mTLS or H2 UDP.
+5. For a native rollback, restore the recorded v1.0.0 executable and native
+   service configuration, restart, and repeat the same path checks. For a web
+   rollback, move clients back to the retained native endpoint/configuration
+   first; a v1.0.0 executable cannot consume web flags or speak the web protocol.
+   Do not overwrite working keys or tokens merely to roll back a binary.
+
+These are deployment acceptance steps, not a claim that every operating
+system, network, or application has been tested. Cross-compiled release
+archives alone are not native runtime validation for their target platform.

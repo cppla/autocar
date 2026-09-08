@@ -13,8 +13,18 @@ Only after all gates pass may a report make this scoped conclusion:
 > distinguishable than the frozen baseline and retained a standards-based
 > HTTPS/H2 path when UDP was unavailable.
 
-Do not publish that conclusion unless every release gate in this document is
-green. A smoke run proves that the harness works; it does not prove the claim.
+Do not publish that conclusion unless every research evidence gate in this
+document is green. A smoke run proves that the harness works; it does not prove
+the claim.
+
+This is an optional claim-bearing research gate, not a prerequisite for an
+ordinary feature/bugfix release. `make release` uses the independent quality,
+source-integrity and artifact checks described in [RELEASING.md](RELEASING.md).
+`make release-with-evidence` adds all of this document's original evidence
+requirements before those ordinary checks. The comparison has not been
+completed for v1.0.1; changing the release policy does not change a recorded
+`insufficient_evidence` result to `pass` or waive any condition for a research
+claim. Existing frozen campaign plans, digests and source bindings remain intact.
 
 The frozen 2026-09-07 pilot snapshot completed active checks in local Docker
 and remote Linux, collected 65 calibration captures, and extracted 49 features.
@@ -400,10 +410,11 @@ All machine-readable tools use the same status vocabulary: `pass`, `tie`,
 `fail`, and `insufficient_evidence`. Operational errors are `fail`; absent or
 incomplete observations are `insufficient_evidence`.
 
-### Offline release evidence gate
+### Offline research evidence gate
 
-The normal `make release` target is fail-closed. It will not build release
-archives until `scripts/stealth-release-check.py` has verified:
+The optional `make release-with-evidence` target is fail-closed. It will not
+build claim-bearing release archives until the unchanged
+`release-evidence-check` target and `scripts/stealth-release-check.py` have verified:
 
 - distinct `local-docker` and `remote-linux` release-size active manifests;
 - a schema-v3 remote manifest whose `execution_host`, the explicitly supplied
@@ -423,7 +434,7 @@ archives until `scripts/stealth-release-check.py` has verified:
 Provide the evidence paths explicitly:
 
 ```sh
-make release VERSION=v1.0.1 BUILD_DATE=2026-09-04T00:00:00Z \
+make release-with-evidence VERSION=v1.0.1 BUILD_DATE=2026-09-08T00:00:00Z \
   STEALTH_EXPECTED_REMOTE_HOST=198.51.100.10:22 \
   STEALTH_LOCAL_ACTIVE=/path/to/local/manifest.json \
   STEALTH_REMOTE_ACTIVE=/path/to/remote/manifest.json \
@@ -443,7 +454,7 @@ The gate is offline and read-only. Missing evidence returns
 digest-mismatched evidence returns `fail`. Passing the same active artifact as
 both local and remote evidence is rejected.
 
-## Release decision
+## Research claim decision
 
 The web-cover camouflage claim remains unproven until all of the following are
 current for the exact release commit:

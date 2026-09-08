@@ -21,6 +21,10 @@ AutoCAR 在本地提供 SOCKS5、HTTP 和 HTTPS Proxy，在远端解析并连接
 HTTP/3/UDP，UDP 不可用时让新 TCP 流继续走 HTTPS/HTTP/2/TCP；SOCKS5 UDP
 使用 H3 RFC 9298 CONNECT-UDP，不跨入 H2 fallback。
 
+v1.0.1 是功能增强与问题修复版本。默认仍为 `native` 服务端与 `auto` 客户端；
+**Web-cover 是需要显式开启的实验性功能**，发布不代表其被动抗识别能力已经验证。
+变更、升级与限制见 [v1.0.1 发布说明](docs/releases/v1.0.1.md)。
+
 AutoCAR 的身份验证、`autocar/2` 协议、TCP/UDP framing、速率协商、pacing、
 熔断回退和资源边界均由 AutoCAR 实现；自有协议不提供第三方代理协议兼容模式。
 Native 模式继续使用上游 `github.com/quic-go/quic-go`；web H3 则透明依赖
@@ -109,7 +113,7 @@ go build -trimpath -o autocar ./cmd/autocar
   --token-file token
 ```
 
-### Web-cover 模式（v1.0.1）
+### Web-cover 模式（v1.0.1，实验性、显式启用）
 
 准备一个你拥有或获授权使用的网站目录，然后在同一数字端口上启用 HTTPS/H2 与
 H3。`--cover-root` 和 `--cover-upstream` 必须且只能选一个：
@@ -223,9 +227,14 @@ QUIC pacing；需要严格的 fixed-rate 语义时应显式使用 `--transport=q
 ## 兼容性
 
 Native 模式的 ALPN 是 `autocar/2`；web 模式使用标准 `h2`、`h3` 与
-`http/1.1`。两种模式均不提供第三方代理协议或旧 AutoCAR v1 兼容模式，客户端与服务端必须
+`http/1.1`。v1.0.0 和 v1.0.1 的 native 模式使用相同的 `autocar/2` 协议，
+v1.0.0 不支持 web 模式。这里的版本号 `v1.0.0` 不等于已经移除的旧协议 AutoCAR v1。
+两种模式均不提供第三方代理协议或旧 AutoCAR v1 兼容模式，客户端与服务端必须
 显式选择匹配的模式。`client --transport` 接受 `auto`、`quic`、`tls`、
 `web-auto`、`h3`、`h2`；`bench-client` 另提供 `direct` 对照路径。
+启用 web 时两端都应升级到 v1.0.1；升级不会自动修改现有 native 配置。
+先保留旧二进制和配置，验证实际使用的 TCP、UDP 路径后再切换；具体步骤见
+[部署与升级](docs/DEPLOYMENT.md#10-v100-to-v101-upgrade-and-rollback)。
 
 ## 验证
 
@@ -240,6 +249,11 @@ make integration-docker
 make build
 sudo ./scripts/netem-integration.sh ./bin/autocar
 ```
+
+常规功能发布使用 `make release`，要求质量检查、干净且固定的源码、构建信息及
+发布包完整性检查。它不要求运行完整比较实验，也不会生成比较实验的通过结果。
+带比较研究结论的发布另用 `make release-with-evidence`，保留完整证据门禁；详见
+[发布流程](docs/RELEASING.md)。
 
 `stealth-active-smoke` 只验证隔离实验工具和小样本行为，不证明被动抗识别能力。
 任何比较结论都必须满足
@@ -273,7 +287,7 @@ iptables 下的 UDP `sendmsg` 直接返回 `EPERM`。有损阶段只硬验证协
 更多文档：[Web-cover 模式](docs/WEB_COVER.md)、[隔离小规模 pilot](docs/STEALTH-PILOT.md)、
 [加速机制](docs/ACCELERATION.md)、[架构](docs/ARCHITECTURE.md)、
 [协议](docs/PROTOCOL.md)、[部署](docs/DEPLOYMENT.md)、[基准](docs/BENCHMARK.md)、
-[安全](SECURITY.md)。
+[发布流程](docs/RELEASING.md)、[安全](SECURITY.md)。
 
 ## License
 
