@@ -167,6 +167,19 @@ func TestDoctorCommandOpensRealAuthenticatedQUICPath(t *testing.T) {
 			t.Errorf("serve QUIC: %v", serveErr)
 		}
 	})
+	// The config directory differs from the process working directory. Relative
+	// credential paths must resolve against the file, not the invocation cwd.
+	configFile := filepath.Join(directory, "doctor.json")
+	configData, err := json.Marshal(map[string]any{
+		"server": server.Addr().String(), "ca": "server.crt", "token-file": "token",
+		"transport": "quic", "json": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configFile, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	var observed *recordingDoctorDialer
 	builder := func(flags tunnelFlags) (closeDialer, error) {
@@ -184,12 +197,8 @@ func TestDoctorCommandOpensRealAuthenticatedQUICPath(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	err = runDoctorWith(context.Background(), []string{
-		"--server", server.Addr().String(),
-		"--ca", certFile,
-		"--token-file", tokenFile,
-		"--transport", "quic",
+		"--config", configFile,
 		"--target", target.Addr().String(),
-		"--json",
 	}, &stdout, &stderr, builder)
 	if err != nil {
 		var probeErr error
@@ -394,7 +403,7 @@ func TestDoctorFailuresHaveStableCodesAndExitCodes(t *testing.T) {
 		err := runDoctorWith(context.Background(), []string{"--target", "example.com:443"}, &bytes.Buffer{}, &bytes.Buffer{}, func(tunnelFlags) (closeDialer, error) {
 			return nil, errors.New("bad credentials")
 		})
-		if commandExitCode(err) != doctorExitUsageFailure || !strings.Contains(err.Error(), "configure authenticated tunnel") {
+		if commandExitCode(err) != doctorExitUsageFailure || !strings.Contains(err.Error(), "local tunnel configuration failed") || !strings.Contains(err.Error(), "hint:") {
 			t.Fatalf("exit=%d err=%v", commandExitCode(err), err)
 		}
 	})
@@ -404,7 +413,7 @@ func TestDoctorFailuresHaveStableCodesAndExitCodes(t *testing.T) {
 		err := runDoctorWith(context.Background(), []string{"--target", "example.com:443"}, &bytes.Buffer{}, &bytes.Buffer{}, func(tunnelFlags) (closeDialer, error) {
 			return dialer, nil
 		})
-		if commandExitCode(err) != doctorExitProbeFailure || !strings.Contains(err.Error(), "returned no TCP connection") {
+		if commandExitCode(err) != doctorExitProbeFailure || !strings.Contains(err.Error(), "authenticated tunnel TCP open failed") || !strings.Contains(err.Error(), "hint:") {
 			t.Fatalf("exit=%d err=%v", commandExitCode(err), err)
 		}
 	})

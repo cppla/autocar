@@ -180,7 +180,7 @@ func TestFallbackEventAndSnapshotRequireSuccessfulAuthenticatedTLSPath(t *testin
 func TestRecoveryEventIsEmittedOnceAndHandlerPanicsAreContained(t *testing.T) {
 	noFallbackEvents := make(chan ClientEvent, 1)
 	neverFellBack := &Client{eventHandler: func(event ClientEvent) { noFallbackEvents <- event }}
-	neverFellBack.primaryFailed(time.Now(), ClientReasonQUICDialFailed)
+	neverFellBack.primaryFailed(nativePrimaryAttempt{}, time.Now(), ClientReasonQUICDialFailed)
 	neverFellBack.primarySucceeded(clientPathMetadata{})
 	if snapshot := neverFellBack.Snapshot(); snapshot.LastEvent != nil {
 		t.Fatalf("QUIC retry without a successful TLS fallback emitted %+v", snapshot.LastEvent)
@@ -193,7 +193,7 @@ func TestRecoveryEventIsEmittedOnceAndHandlerPanicsAreContained(t *testing.T) {
 
 	events := make(chan ClientEvent, 4)
 	client := &Client{eventHandler: func(event ClientEvent) { events <- event }}
-	client.primaryFailed(time.Now(), ClientReasonQUICStreamOpenFailed)
+	client.primaryFailed(nativePrimaryAttempt{}, time.Now(), ClientReasonQUICStreamOpenFailed)
 	client.recordFallback(ClientReasonQUICStreamOpenFailed)
 	fallbackEvent := receiveClientEvent(t, events)
 	client.primaryHealthy()
@@ -221,7 +221,7 @@ func TestRecoveryEventIsEmittedOnceAndHandlerPanicsAreContained(t *testing.T) {
 		panicsContained <- struct{}{}
 		panic("observer must not crash tunnel")
 	}}
-	panicking.primaryFailed(time.Now(), ClientReasonQUICDialFailed)
+	panicking.primaryFailed(nativePrimaryAttempt{}, time.Now(), ClientReasonQUICDialFailed)
 	panicking.recordFallback(ClientReasonQUICDialFailed)
 	panicking.primarySucceeded(clientPathMetadata{})
 	receiveClientEventSignal := func() {
@@ -242,7 +242,7 @@ func TestLateFallbackCompletionUpdatesSelectionWithoutReopeningCircuit(t *testin
 		fallbackCooldown: time.Millisecond,
 		eventHandler:     func(event ClientEvent) { events <- event },
 	}
-	client.primaryFailed(time.Now().Add(-time.Second), ClientReasonQUICDialFailed)
+	client.primaryFailed(nativePrimaryAttempt{}, time.Now().Add(-time.Second), ClientReasonQUICDialFailed)
 	client.recordFallback(ClientReasonQUICDialFailed)
 	if event := receiveClientEvent(t, events); event.Kind != ClientEventFallback {
 		t.Fatalf("initial event = %+v", event)
@@ -250,10 +250,10 @@ func TestLateFallbackCompletionUpdatesSelectionWithoutReopeningCircuit(t *testin
 
 	// One caller becomes the recovery probe while a concurrent caller starts a
 	// TLS fallback. The QUIC path can succeed before that TLS dial completes.
-	if tryPrimary, _ := client.shouldTryPrimary(time.Now()); !tryPrimary {
+	if tryPrimary, _, _ := client.shouldTryPrimary(time.Now()); !tryPrimary {
 		t.Fatal("cooldown probe was not admitted")
 	}
-	tryPrimary, lateFallbackReason := client.shouldTryPrimary(time.Now())
+	tryPrimary, lateFallbackReason, _ := client.shouldTryPrimary(time.Now())
 	if tryPrimary {
 		t.Fatal("concurrent caller unexpectedly joined the cooldown probe")
 	}
@@ -269,7 +269,7 @@ func TestLateFallbackCompletionUpdatesSelectionWithoutReopeningCircuit(t *testin
 		snapshot.LastEvent == nil || snapshot.LastEvent.Kind != ClientEventFallback {
 		t.Fatalf("latest successful path snapshot = %+v", snapshot)
 	}
-	if tryPrimary, _ := client.shouldTryPrimary(time.Now()); !tryPrimary {
+	if tryPrimary, _, _ := client.shouldTryPrimary(time.Now()); !tryPrimary {
 		t.Fatal("late TLS completion reopened the healthy QUIC circuit")
 	}
 }
@@ -304,7 +304,7 @@ func TestClientEventHandlerIsSerializedInTransitionOrder(t *testing.T) {
 			close(handledAll)
 		}
 	}}
-	client.primaryFailed(time.Now(), ClientReasonQUICDialFailed)
+	client.primaryFailed(nativePrimaryAttempt{}, time.Now(), ClientReasonQUICDialFailed)
 
 	fallbackReturned := make(chan struct{})
 	go func() {
@@ -364,7 +364,7 @@ func TestClientEventQueueIsBoundedAndReleasesStorage(t *testing.T) {
 		handled = append(handled, event.Kind)
 	}}
 
-	client.primaryFailed(time.Now(), ClientReasonQUICDialFailed)
+	client.primaryFailed(nativePrimaryAttempt{}, time.Now(), ClientReasonQUICDialFailed)
 	client.recordFallback(ClientReasonQUICDialFailed)
 	select {
 	case <-entered:

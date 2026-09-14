@@ -55,7 +55,7 @@ func runServer(parent context.Context, args []string) error {
 	allowClientRates := fs.Bool("allow-client-rates", false, "native protocol: allow authenticated clients to request rates within server maxima")
 	dialTimeout := fs.Duration("dial-timeout", 4*time.Second, "remote destination dial timeout")
 	handshakeTimeout := fs.Duration("handshake-timeout", 10*time.Second, "authentication and initial stream-open timeout")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsWithConfig(fs, args); err != nil {
 		return err
 	}
 	serverProtocol := strings.ToLower(strings.TrimSpace(*serverProtocolText))
