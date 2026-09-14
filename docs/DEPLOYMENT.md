@@ -220,8 +220,12 @@ check a local listener. The result identifies the selected transport and
 elapsed time. Native QUIC also reports sender/rate negotiation; web H2/H3
 reports pacing as `not-applicable`. Exit status is `0` for success, `1` for a
 failed live probe and `2` for invalid arguments or local configuration. Failed
-JSON results expose only a stable code and redacted description; use human mode
-when detailed local diagnostics are required.
+JSON results retain a stable code and redacted description, with additive
+`diagnosis` and `hint` fields for actionable troubleshooting. Human-mode failures
+also use safe descriptions rather than echoing raw remote messages, arguments,
+or local paths. Unknown failures remain explicitly unclassified; in particular,
+a web cover response alone does not prove token rejection. Use `--json` on the
+command line when automation needs JSON even if loading its config file fails.
 
 Native auto-mode logs expose only stable fallback/recovery event and reason
 codes, never tokens, full targets, relay addresses or raw transport errors. Its
@@ -229,6 +233,55 @@ event callbacks are asynchronous, serialized and backed by a bounded queue;
 consumers that fall behind should read the concurrency-safe snapshot as the
 authoritative latest state. The most recently completed native path is tracked
 separately from QUIC circuit health.
+
+### Reusable configuration files (after v1.0.1)
+
+Builds containing the configuration-file change support `--config` for `client`,
+`server`, and `doctor`; the published v1.0.1 binary does not. Existing CLI-only
+commands are unchanged. Copy [examples/client.json](../examples/client.json)
+and [examples/server.json](../examples/server.json) into your credential
+directory and adjust addresses and filenames. These files contain references,
+not secrets; keep the existing token and private-key permission requirements.
+Do not overwrite an existing deployment config without reviewing/backing it up.
+
+```bash
+autocar client --config /etc/autocar/client.json
+autocar doctor --config /etc/autocar/client.json --target example.com:443 --json
+autocar server --config /etc/autocar/server.json
+```
+
+A config is one JSON object (maximum 64 KiB). Its keys are the selected command's
+long option names without `--`. CLI options override matching config entries,
+including explicit empty strings and `false`; other entries keep their values.
+Use JSON booleans, exact integers for numeric options, and strings for addresses,
+paths and durations such as `"15s"`. Duplicate/unknown keys, invalid types,
+arrays, nested objects and trailing content are rejected, even if an invalid
+entry is overridden on the command line. There are no comments, includes, shell
+expansion, environment-variable expansion, or automatic reloads.
+These commands also reject unexpected positional arguments instead of silently
+ignoring them; use named options for every setting.
+
+Relative credential/certificate/cover-root paths in JSON are resolved against
+the config file's directory (not the process working directory). Paths supplied
+on the CLI keep their existing working-directory semantics. To switch from a
+configured private CA to system roots, explicitly clear the old setting:
+`--ca= --system-roots`. Credentials themselves are never accepted inline in JSON;
+`token-file` and `proxy-password-file` retain the existing environment fallback
+when unset. Do not put passwords in addresses, URLs, or arbitrary string options.
+
+The supplied client template intentionally contains only shared tunnel options,
+so it can also be used by `doctor`. Client-only options such as `socks`, `http`,
+and `https` are valid in a client-specific file but rejected by `doctor`; pass
+them on the client command line if you want to reuse one connection config.
+Server files are separate and cannot be used as client connection profiles.
+Use a trusted, runtime-readable config and restart the process after editing it.
+`--help` never reads config files or starts a network probe.
+
+For routine diagnosis, use the same file with `doctor`, then temporarily require
+`--transport=tls` (native) or `--transport=h2` (web) to isolate the TCP path. A
+successful TCP check does not validate UDP. Fallback/recovery applies to new
+flows; applications must reconnect broken streams. AutoCAR does not replay
+application requests or migrate already-open streams.
 
 ## 5. Pacing
 
@@ -319,6 +372,17 @@ ExecStart=/usr/local/bin/autocar server --protocol=web --listen=:443 --tcp-liste
 
 Add the cover directory to `ReadOnlyPaths` (or an equivalent read-only bind) and
 ensure `User=autocar` can traverse and read it.
+
+With a post-v1.0.1 configuration-capable build, the native service can instead
+use the sample server config installed at `/etc/autocar/server.json`:
+
+```ini
+ExecStart=/usr/local/bin/autocar server --config=/etc/autocar/server.json --listen=:443
+```
+
+The sample omits `tcp-listen`, so both protocols inherit the overridden port.
+Keep the same unprivileged runtime user and hardening above. `Restart=on-failure`
+restarts a failed process; transport recovery within a live process is separate.
 
 ## 8. Container
 

@@ -553,7 +553,7 @@ func TestFallbackCircuitBreakerAllowsOnlyOneConcurrentProbe(t *testing.T) {
 	if err := <-probeResult; err != nil {
 		t.Fatalf("half-open probe did not fall back to TLS: %v", err)
 	}
-	if tryPrimary, _ := client.shouldTryPrimary(time.Now()); tryPrimary {
+	if tryPrimary, _, _ := client.shouldTryPrimary(time.Now()); tryPrimary {
 		t.Fatal("failed half-open probe did not reopen the cooldown")
 	}
 }
@@ -566,13 +566,13 @@ func TestFallbackCircuitBreakerCooldownBoundary(t *testing.T) {
 		fallbackCooldown:  cooldown,
 		primaryFailReason: ClientReasonQUICDialFailed,
 	}
-	if try, reason := client.shouldTryPrimary(failedAt.Add(cooldown - time.Nanosecond)); try || reason != ClientReasonQUICDialFailed {
+	if try, reason, _ := client.shouldTryPrimary(failedAt.Add(cooldown - time.Nanosecond)); try || reason != ClientReasonQUICDialFailed {
 		t.Fatalf("before expiry: try=%v reason=%q", try, reason)
 	}
-	if try, reason := client.shouldTryPrimary(failedAt.Add(cooldown)); !try || reason != "" {
+	if try, reason, _ := client.shouldTryPrimary(failedAt.Add(cooldown)); !try || reason != "" {
 		t.Fatalf("at expiry: try=%v reason=%q", try, reason)
 	}
-	if try, reason := client.shouldTryPrimary(failedAt.Add(2 * cooldown)); try || reason != ClientReasonQUICDialFailed {
+	if try, reason, _ := client.shouldTryPrimary(failedAt.Add(2 * cooldown)); try || reason != ClientReasonQUICDialFailed {
 		t.Fatalf("pending probe: try=%v reason=%q", try, reason)
 	}
 }

@@ -38,7 +38,7 @@ func runClient(parent context.Context, args []string) error {
 	maxConnections := fs.Int("max-connections", 1024, "maximum clients per local proxy listener")
 	idleTimeout := fs.Duration("idle-timeout", 5*time.Minute, "local proxy idle timeout")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagsWithConfig(fs, args); err != nil {
 		return err
 	}
 	if *socksAddress == "" && *httpAddress == "" && *httpsAddress == "" {

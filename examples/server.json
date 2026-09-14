@@ -1,0 +1,7 @@
+{
+  "protocol": "native",
+  "listen": ":8443",
+  "cert": "server.crt",
+  "key": "server.key",
+  "token-file": "relay-token"
+}

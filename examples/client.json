@@ -1,0 +1,6 @@
+{
+  "server": "relay.example.com:8443",
+  "ca": "server.crt",
+  "token-file": "relay-token",
+  "transport": "auto"
+}

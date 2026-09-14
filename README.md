@@ -163,8 +163,10 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 `doctor` 不以“本地端口已监听”代替中继健康。它会通过经过证书和令牌认证的
 隧道实际打开一次目标 TCP 连接，再报告真正选中的 `quic`、`tls`、`h3` 或 `h2`
 以及耗时；native QUIC 还报告 pacing 与协商速率，web 路径则报告
-`not-applicable`。加 `--json` 可得到稳定的机器可读结果；失败 JSON 只包含稳定错误码
-和脱敏说明，原始网络错误、远端消息及本地路径仅在人类输出的诊断日志中出现。退出码
+`not-applicable`。加 `--json` 可得到稳定的机器可读结果；失败保留稳定错误码
+和脱敏说明，另附 `diagnosis` 分类与 `hint` 排查建议。人读模式也给出安全提示，
+不回显原始远端消息、参数值或本地路径。无法可靠分类的错误会提示检查两端配置，
+不会把所有失败都断言成认证问题。退出码
 `0` 表示探测成功，`1` 表示网络/认证/目标探测失败，`2` 表示参数或本地配置错误。
 成功只证明该 TCP 路径此刻可用，不代表目标应用协议正确、不可识别或链路更快。
 
@@ -180,6 +182,40 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 | HTTPS Proxy | 默认关闭 | 使用 `--https`、`--proxy-cert`、`--proxy-key` 开启 |
 
 `socks5h` 会把域名交给远端。AutoCAR 不伪造目标证书，也不解密目标 HTTPS。
+
+### 保存配置，启动和诊断共用
+
+以下配置文件功能为 v1.0.1 之后新增，需使用包含本改动的构建。
+不必每次重复填写连接参数：将 [客户端模板](examples/client.json) 保存为
+自己的 `client.json`，修改中继地址，并把证书与令牌放在配置文件旁：
+
+```json
+{
+  "server": "relay.example.com:8443",
+  "ca": "server.crt",
+  "token-file": "relay-token",
+  "transport": "auto"
+}
+```
+
+```bash
+./autocar client --config /path/to/client.json
+./autocar doctor --config /path/to/client.json --target example.com:443 --json
+# 临时强制 TCP/TLS 诊断，不修改配置文件
+./autocar doctor --config /path/to/client.json --transport tls --target example.com:443
+```
+
+字段名对应命令行长选项，但不加 `--`；命令行同名选项优先。配置中的相对文件路径
+以配置文件所在目录为基准，命令行路径仍以当前目录为基准。布尔值用 JSON
+`true/false`，时长用 `"15s"` 等字符串。未知字段、重复字段与无效值会直接报错；
+不支持注释、环境变量展开或配置嵌套。令牌和私钥仍单独存文件并检查权限，
+不要把原文写进 JSON。
+
+要让 `client` 和 `doctor` 共用同一个文件，只保存二者共有的隧道参数；
+`socks/http/https` 等客户端专属参数放在启动命令中。中继使用单独的
+[服务端模板](examples/server.json)：`./autocar server --config /path/to/server.json`。
+配置仅在进程启动时读取，修改后需重启；自动回退和恢复只影响新连接，
+已中断的业务连接仍需要应用重新发起，不会自动重放请求。
 
 ## Pacing 模式
 

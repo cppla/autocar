@@ -460,18 +460,20 @@ type Client struct {
 	pacer   *connectionPacer
 	dialing *quicDialAttempt
 	closed  bool
-	// primaryFailedAt and primaryProbing implement a small circuit breaker.
+	// primaryFailedAt and primaryProbeID implement a small circuit breaker.
 	// They are guarded by mu together with the QUIC connection state.
-	primaryFailedAt   time.Time
-	primaryProbing    bool
-	localMode         string
-	localRate         uint64
-	remoteMode        string
-	remoteRate        uint64
-	selectedTransport string
-	eventHandler      ClientEventHandler
-	primaryFailReason ClientEventReason
-	lastEvent         ClientEvent
+	primaryFailedAt         time.Time
+	primaryProbeID          uint64
+	nextPrimaryID           uint64
+	primaryHealthGeneration uint64
+	localMode               string
+	localRate               uint64
+	remoteMode              string
+	remoteRate              uint64
+	selectedTransport       string
+	eventHandler            ClientEventHandler
+	primaryFailReason       ClientEventReason
+	lastEvent               ClientEvent
 	// lastSelectedFallback describes the most recently completed path. It is
 	// deliberately independent from primaryFailedAt: a TLS dial that completes
 	// after a concurrent QUIC recovery is still the latest real selection, but
@@ -487,9 +489,17 @@ type Client struct {
 }
 
 type quicDialAttempt struct {
-	done   chan struct{}
-	cancel context.CancelFunc
-	err    error
+	done             chan struct{}
+	cancel           context.CancelFunc
+	err              error
+	healthGeneration uint64
+}
+
+// A caller owns only its own half-open probe. Health learned after it started
+// (including through a UDP association) supersedes its eventual failure.
+type nativePrimaryAttempt struct {
+	id               uint64
+	healthGeneration uint64
 }
 
 type clientPathMetadata struct {
@@ -650,8 +660,10 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	if err := protocol.WriteRequest(io.Discard, request); err != nil {
 		return nil, err
 	}
+	var primaryAttempt nativePrimaryAttempt
 	if c.fallback != nil {
-		tryPrimary, fallbackReason := c.shouldTryPrimary(time.Now())
+		tryPrimary, fallbackReason, attempt := c.shouldTryPrimary(time.Now())
+		primaryAttempt = attempt
 		if !tryPrimary {
 			fallbackConn, fallbackErr := c.fallback.DialContext(ctx, network, address)
 			if fallbackErr == nil {
@@ -676,7 +688,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	fallbackReason := ClientReasonQUICDialFailed
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := contextError(ctx); err != nil {
-			c.primaryProbeFinished()
+			c.primaryProbeFinished(primaryAttempt)
 			return nil, err
 		}
 		if err := contextError(primaryCtx); err != nil {
@@ -687,7 +699,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		conn, err := c.connection(primaryCtx)
 		if err != nil {
 			if callerErr := contextError(ctx); callerErr != nil {
-				c.primaryProbeFinished()
+				c.primaryProbeFinished(primaryAttempt)
 				return nil, callerErr
 			}
 			primaryErr = err
@@ -701,7 +713,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 			primaryErr = fmt.Errorf("tunnel: open QUIC stream: %w", err)
 			fallbackReason = ClientReasonQUICStreamOpenFailed
 			if callerErr := contextError(ctx); callerErr != nil {
-				c.primaryProbeFinished()
+				c.primaryProbeFinished(primaryAttempt)
 				return nil, callerErr
 			}
 			if contextError(primaryCtx) != nil {
@@ -744,7 +756,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		if callerErr := contextError(ctx); callerErr != nil {
 			// A caller controls only its own stream. Canceling one request must
 			// never tear down the multiplexed connection and every other flow.
-			c.primaryProbeFinished()
+			c.primaryProbeFinished(primaryAttempt)
 			return nil, callerErr
 		}
 		if contextError(primaryCtx) != nil || conn.Context().Err() == nil {
@@ -761,11 +773,11 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		continue
 	}
 	if callerErr := contextError(ctx); callerErr != nil {
-		c.primaryProbeFinished()
+		c.primaryProbeFinished(primaryAttempt)
 		return nil, callerErr
 	}
 	if c.fallback != nil {
-		c.primaryFailed(time.Now(), fallbackReason)
+		c.primaryFailed(primaryAttempt, time.Now(), fallbackReason)
 		fallbackConn, fallbackErr := c.fallback.DialContext(ctx, network, address)
 		if fallbackErr == nil {
 			c.recordFallback(fallbackReason)
@@ -773,7 +785,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		}
 		return nil, errors.Join(primaryErr, fmt.Errorf("tunnel: TLS fallback: %w", fallbackErr))
 	}
-	c.primaryProbeFinished()
+	c.primaryProbeFinished(primaryAttempt)
 	if primaryErr == nil {
 		primaryErr = errors.New("tunnel: QUIC connection unavailable")
 	}
@@ -783,20 +795,20 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 // shouldTryPrimary returns false while the fallback circuit is open. Once the
 // cooldown expires exactly one caller becomes the QUIC probe; concurrent
 // callers keep using TLS instead of all paying the UDP timeout.
-func (c *Client) shouldTryPrimary(now time.Time) (bool, ClientEventReason) {
+func (c *Client) shouldTryPrimary(now time.Time) (bool, ClientEventReason, nativePrimaryAttempt) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.primaryFailedAt.IsZero() {
-		return true, ""
+	if !c.primaryFailedAt.IsZero() {
+		if now.Before(c.primaryFailedAt.Add(c.fallbackCooldown)) || c.primaryProbeID != 0 {
+			return false, c.activePrimaryFailureReason(), nativePrimaryAttempt{}
+		}
 	}
-	if now.Before(c.primaryFailedAt.Add(c.fallbackCooldown)) {
-		return false, c.activePrimaryFailureReason()
+	c.nextPrimaryID++
+	attempt := nativePrimaryAttempt{id: c.nextPrimaryID, healthGeneration: c.primaryHealthGeneration}
+	if !c.primaryFailedAt.IsZero() {
+		c.primaryProbeID = attempt.id
 	}
-	if c.primaryProbing {
-		return false, c.activePrimaryFailureReason()
-	}
-	c.primaryProbing = true
-	return true, ""
+	return true, "", attempt
 }
 
 func (c *Client) primarySucceeded(metadata clientPathMetadata) {
@@ -810,7 +822,8 @@ func (c *Client) primarySucceeded(metadata clientPathMetadata) {
 	c.remoteRate = metadata.remoteRate
 	c.selectedTransport = "quic"
 	c.primaryFailedAt = time.Time{}
-	c.primaryProbing = false
+	c.primaryHealthGeneration++
+	c.primaryProbeID = 0
 	c.primaryFailReason = ""
 	c.lastSelectedFallback = false
 	if recovered {
@@ -834,22 +847,31 @@ func (c *Client) primarySucceeded(metadata clientPathMetadata) {
 func (c *Client) primaryHealthy() {
 	c.mu.Lock()
 	c.primaryFailedAt = time.Time{}
-	c.primaryProbing = false
+	c.primaryHealthGeneration++
+	c.primaryProbeID = 0
 	c.primaryFailReason = ""
 	c.mu.Unlock()
 }
 
-func (c *Client) primaryFailed(now time.Time, reason ClientEventReason) {
+func (c *Client) primaryFailed(attempt nativePrimaryAttempt, now time.Time, reason ClientEventReason) {
 	c.mu.Lock()
-	c.primaryFailedAt = now
-	c.primaryProbing = false
-	c.primaryFailReason = reason
+	// This request still gets its own fallback, but an older stream failure is
+	// not grounds to cool down a path proved healthy after the request began.
+	if attempt.healthGeneration == c.primaryHealthGeneration {
+		c.primaryFailedAt = now
+		c.primaryFailReason = reason
+	}
+	if c.primaryProbeID == attempt.id {
+		c.primaryProbeID = 0
+	}
 	c.mu.Unlock()
 }
 
-func (c *Client) primaryProbeFinished() {
+func (c *Client) primaryProbeFinished(attempt nativePrimaryAttempt) {
 	c.mu.Lock()
-	c.primaryProbing = false
+	if c.primaryProbeID == attempt.id {
+		c.primaryProbeID = 0
+	}
 	c.mu.Unlock()
 }
 
@@ -1004,7 +1026,10 @@ func (c *Client) connection(ctx context.Context) (*quic.Conn, error) {
 			// derived from the client rather than from whichever caller happened to
 			// arrive first. Every caller still waits with its own context below.
 			dialCtx, cancel := context.WithTimeout(c.ctx, c.dialTimeout)
-			attempt = &quicDialAttempt{done: make(chan struct{}), cancel: cancel}
+			attempt = &quicDialAttempt{
+				done: make(chan struct{}), cancel: cancel,
+				healthGeneration: c.primaryHealthGeneration,
+			}
 			c.dialing = attempt
 			go c.runQUICDial(attempt, dialCtx)
 		}
@@ -1052,9 +1077,11 @@ func (c *Client) runQUICDial(attempt *quicDialAttempt, dialCtx context.Context) 
 		attempt.err = fmt.Errorf("tunnel: dial QUIC: %w", err)
 		// Publish the open circuit before waking waiters. Otherwise callers
 		// waiting on the same failed UDP handshake could each pay another timeout.
-		if c.fallback != nil && !c.closed && c.ctx.Err() == nil {
+		// The shared dial doesn't own a caller's probe ID: only that caller may
+		// release it. Later authenticated health also supersedes this failure.
+		if c.fallback != nil && !c.closed && c.ctx.Err() == nil &&
+			attempt.healthGeneration == c.primaryHealthGeneration {
 			c.primaryFailedAt = time.Now()
-			c.primaryProbing = false
 			c.primaryFailReason = ClientReasonQUICDialFailed
 		}
 	}
