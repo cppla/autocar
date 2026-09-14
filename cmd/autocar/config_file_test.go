@@ -79,6 +79,7 @@ func TestCommandConfigRejectsInvalid(t *testing.T) {
 		`{"unknown":true}`, `{"config":"other.json"}`, `{"--server":"a"}`,
 		`{"server":false}`, `{"system-roots":"false"}`, `{"system-roots":0}`,
 		`{"open-timeout":0}`, `{"open-timeout":5}`, `{"upload-mbps":-1}`, `{"upload-mbps":1.5}`,
+		`{"upload-mbps":"1"}`, `{"upload-mbps":"0x10"}`, `{"upload-mbps":1e3}`,
 		`{"upload-mbps":18446744073709551616}`, `{"upload-mbps":true}`,
 		`{"open-timeout":"secret-invalid-duration"}`,
 	} {
@@ -96,6 +97,24 @@ func TestCommandConfigRejectsInvalid(t *testing.T) {
 				t.Fatal("invalid config value leaked into diagnostics")
 			}
 		})
+	}
+}
+
+func TestCommandConfigIntegerFlagTypes(t *testing.T) {
+	for _, value := range []string{`"1"`, `"0x10"`, `1.5`, `1e3`, `true`, `1`} {
+		for _, unsigned := range []bool{false, true} {
+			path := writeTestCommandConfig(t, `{"limit":`+value+`}`)
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			if unsigned {
+				fs.Uint64("limit", 0, "")
+			} else {
+				fs.Int("limit", 0, "")
+			}
+			err := parseFlagsWithConfig(fs, []string{"--config", path})
+			if (err == nil) != (value == "1") {
+				t.Fatalf("unsigned=%t value=%s err=%v", unsigned, value, err)
+			}
+		}
 	}
 }
 

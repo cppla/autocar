@@ -373,8 +373,12 @@ ExecStart=/usr/local/bin/autocar server --protocol=web --listen=:443 --tcp-liste
 Add the cover directory to `ReadOnlyPaths` (or an equivalent read-only bind) and
 ensure `User=autocar` can traverse and read it.
 
-With a post-v1.0.1 configuration-capable build, the native service can instead
-use the sample server config installed at `/etc/autocar/server.json`:
+With a post-v1.0.1 configuration-capable build, first manually copy
+[examples/server.json](../examples/server.json) to `/etc/autocar/server.json`
+and adjust its settings, as described in the reusable-configuration section.
+Templates are not bundled or installed automatically by the release archive or
+container image. After preparing that runtime-readable file, the native service
+can use:
 
 ```ini
 ExecStart=/usr/local/bin/autocar server --config=/etc/autocar/server.json --listen=:443

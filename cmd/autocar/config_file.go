@@ -169,16 +169,12 @@ func commandConfigValue(f *flag.Flag, value any) (string, error) {
 		}
 		return "", errors.New("must be a duration string such as 15s")
 	default:
-		// Numeric flags accept exact JSON integers or strings and retain
-		// flag's own range/format validation.
-		switch v := value.(type) {
-		case string:
-			return v, nil
-		case json.Number:
+		// Numeric flags require JSON numbers, not CLI-specific string syntax.
+		// flag's integer parser still enforces integral values and range limits.
+		if v, ok := value.(json.Number); ok {
 			return v.String(), nil
-		default:
-			return "", errors.New("must be a number or numeric string")
 		}
+		return "", errors.New("must be a JSON integer")
 	}
 }
 
