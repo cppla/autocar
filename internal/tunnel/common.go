@@ -21,11 +21,12 @@ import (
 )
 
 const (
-	defaultHandshakeTimeout     = 10 * time.Second
-	defaultDialTimeout          = 10 * time.Second
-	defaultMaxStreams           = 1024
-	defaultMaxConnections       = 256
-	defaultMaxClientConnections = 32
+	defaultHandshakeTimeout        = 10 * time.Second
+	defaultDialTimeout             = 10 * time.Second
+	defaultDestinationWriteTimeout = 5 * time.Minute
+	defaultMaxStreams              = 1024
+	defaultMaxConnections          = 256
+	defaultMaxClientConnections    = 32
 )
 
 // RemoteError is returned when the authenticated exit rejects a CONNECT
@@ -44,11 +45,12 @@ func (e *RemoteError) Error() string {
 }
 
 type serverCore struct {
-	tokenHash        [sha256.Size]byte
-	dialer           transport.Dialer
-	handshakeTimeout time.Duration
-	dialTimeout      time.Duration
-	sem              chan struct{}
+	tokenHash               [sha256.Size]byte
+	dialer                  transport.Dialer
+	handshakeTimeout        time.Duration
+	dialTimeout             time.Duration
+	destinationWriteTimeout time.Duration
+	sem                     chan struct{}
 }
 
 // StreamAdmission is a concurrency budget for active relay streams. Pass the
@@ -70,7 +72,7 @@ func NewStreamAdmission(limit int) (*StreamAdmission, error) {
 }
 
 func newServerCore(token string, dialer transport.Dialer, handshakeTimeout, dialTimeout time.Duration, maxStreams int) (*serverCore, error) {
-	return newServerCoreWithAdmission(token, dialer, handshakeTimeout, dialTimeout, maxStreams, nil)
+	return newServerCoreWithAdmission(token, dialer, handshakeTimeout, dialTimeout, 0, maxStreams, nil)
 }
 
 func newServerCoreWithAdmission(
@@ -78,6 +80,7 @@ func newServerCoreWithAdmission(
 	dialer transport.Dialer,
 	handshakeTimeout time.Duration,
 	dialTimeout time.Duration,
+	destinationWriteTimeout time.Duration,
 	maxStreams int,
 	admission *StreamAdmission,
 ) (*serverCore, error) {
@@ -88,7 +91,7 @@ func newServerCoreWithAdmission(
 		netDialer := &net.Dialer{Timeout: defaultDialTimeout, KeepAlive: 30 * time.Second}
 		dialer = netDialer
 	}
-	if handshakeTimeout < 0 || dialTimeout < 0 || maxStreams < 0 {
+	if handshakeTimeout < 0 || dialTimeout < 0 || destinationWriteTimeout < 0 || maxStreams < 0 {
 		return nil, errors.New("tunnel: timeout and concurrency limits cannot be negative")
 	}
 	if handshakeTimeout == 0 {
@@ -96,6 +99,9 @@ func newServerCoreWithAdmission(
 	}
 	if dialTimeout == 0 {
 		dialTimeout = defaultDialTimeout
+	}
+	if destinationWriteTimeout == 0 {
+		destinationWriteTimeout = defaultDestinationWriteTimeout
 	}
 	if maxStreams == 0 {
 		if admission == nil {
@@ -122,11 +128,12 @@ func newServerCoreWithAdmission(
 		}
 	}
 	return &serverCore{
-		tokenHash:        sha256.Sum256([]byte(token)),
-		dialer:           dialer,
-		handshakeTimeout: handshakeTimeout,
-		dialTimeout:      dialTimeout,
-		sem:              admission.sem,
+		tokenHash:               sha256.Sum256([]byte(token)),
+		dialer:                  dialer,
+		handshakeTimeout:        handshakeTimeout,
+		dialTimeout:             dialTimeout,
+		destinationWriteTimeout: destinationWriteTimeout,
+		sem:                     admission.sem,
 	}, nil
 }
 
@@ -217,6 +224,7 @@ func (s *serverCore) handleStream(
 		_ = protocol.WriteResponse(stream, protocol.Response{Status: protocol.StatusDialFailed, Message: "destination unavailable"})
 		return
 	}
+	upstream = s.boundDestinationWrites(upstream)
 	defer upstream.Close()
 	options.Response.Status = protocol.StatusOK
 	if err := protocol.WriteResponse(stream, options.Response); err != nil {

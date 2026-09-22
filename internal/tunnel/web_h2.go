@@ -29,15 +29,18 @@ type webTLSConnectionContextKey struct{}
 // Only a TLS 1.3 authenticated HTTP/2 CONNECT request is handled as a tunnel;
 // all other requests are delegated to Cover.
 type WebH2ServerConfig struct {
-	Address              string
-	Token                string
-	TLSConfig            *tls.Config
-	Cover                http.Handler
-	Dialer               transport.Dialer
-	HandshakeTimeout     time.Duration
-	DialTimeout          time.Duration
-	MaxConcurrentStreams int
-	StreamAdmission      *StreamAdmission
+	Address          string
+	Token            string
+	TLSConfig        *tls.Config
+	Cover            http.Handler
+	Dialer           transport.Dialer
+	HandshakeTimeout time.Duration
+	DialTimeout      time.Duration
+	// DestinationWriteTimeout bounds each tunneled TCP destination write.
+	// Zero uses five minutes; negative values are invalid. Cover is unaffected.
+	DestinationWriteTimeout time.Duration
+	MaxConcurrentStreams    int
+	StreamAdmission         *StreamAdmission
 	// MaxConnections and MaxClientConnections bound accepted HTTPS
 	// connections globally and per source IPv4 or IPv6 /64. A combined
 	// WebServer shares these limits with HTTP/3.
@@ -74,6 +77,7 @@ func ListenWebH2(config WebH2ServerConfig) (*WebH2Server, error) {
 		config.Dialer,
 		config.HandshakeTimeout,
 		config.DialTimeout,
+		config.DestinationWriteTimeout,
 		config.MaxConcurrentStreams,
 		config.StreamAdmission,
 	)

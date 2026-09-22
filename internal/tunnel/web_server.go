@@ -32,10 +32,13 @@ type WebServerConfig struct {
 	Cover      http.Handler
 	Dialer     transport.Dialer
 
-	HandshakeTimeout     time.Duration
-	DialTimeout          time.Duration
-	MaxConcurrentStreams int
-	StreamAdmission      *StreamAdmission
+	HandshakeTimeout time.Duration
+	DialTimeout      time.Duration
+	// DestinationWriteTimeout bounds each tunneled TCP destination write.
+	// Zero uses five minutes; negative values are invalid. Cover/UDP are unaffected.
+	DestinationWriteTimeout time.Duration
+	MaxConcurrentStreams    int
+	StreamAdmission         *StreamAdmission
 	// MaxConnections and MaxClientConnections are shared by the HTTP/2 and
 	// HTTP/3 listeners, preventing a source from multiplying its allowance by
 	// switching transports.
@@ -86,6 +89,7 @@ func ListenWeb(config WebServerConfig) (*WebServer, error) {
 		config.Dialer,
 		config.HandshakeTimeout,
 		config.DialTimeout,
+		config.DestinationWriteTimeout,
 		config.MaxConcurrentStreams,
 		config.StreamAdmission,
 	)
@@ -111,20 +115,21 @@ func ListenWeb(config WebServerConfig) (*WebServer, error) {
 	// unrelated alternative service.
 	tcpCover := &webAltSvcCover{next: config.Cover}
 	h2, err := listenWebH2WithCore(WebH2ServerConfig{
-		Address:              config.TCPAddress,
-		Token:                config.Token,
-		TLSConfig:            config.TLSConfig,
-		Cover:                tcpCover,
-		Dialer:               config.Dialer,
-		HandshakeTimeout:     config.HandshakeTimeout,
-		DialTimeout:          config.DialTimeout,
-		MaxConcurrentStreams: config.MaxConcurrentStreams,
-		StreamAdmission:      config.StreamAdmission,
-		ReplayEntries:        config.ReplayEntries,
-		MaxConnections:       config.MaxConnections,
-		MaxClientConnections: config.MaxClientConnections,
-		MaxHeaderBytes:       config.MaxHeaderBytes,
-		connectionAdmission:  connectionAdmission,
+		Address:                 config.TCPAddress,
+		Token:                   config.Token,
+		TLSConfig:               config.TLSConfig,
+		Cover:                   tcpCover,
+		Dialer:                  config.Dialer,
+		HandshakeTimeout:        config.HandshakeTimeout,
+		DialTimeout:             config.DialTimeout,
+		DestinationWriteTimeout: config.DestinationWriteTimeout,
+		MaxConcurrentStreams:    config.MaxConcurrentStreams,
+		StreamAdmission:         config.StreamAdmission,
+		ReplayEntries:           config.ReplayEntries,
+		MaxConnections:          config.MaxConnections,
+		MaxClientConnections:    config.MaxClientConnections,
+		MaxHeaderBytes:          config.MaxHeaderBytes,
+		connectionAdmission:     connectionAdmission,
 	}, core, verifier)
 	if err != nil {
 		return nil, err
@@ -136,26 +141,27 @@ func ListenWeb(config WebServerConfig) (*WebServer, error) {
 		return nil, err
 	}
 	h3, err := listenWebH3WithCore(WebH3ServerConfig{
-		Address:              udpAddress,
-		Token:                config.Token,
-		TLSConfig:            config.TLSConfig,
-		QUICConfig:           config.QUICConfig,
-		Dialer:               config.Dialer,
-		Cover:                config.Cover,
-		HandshakeTimeout:     config.HandshakeTimeout,
-		DialTimeout:          config.DialTimeout,
-		MaxConcurrentStreams: config.MaxConcurrentStreams,
-		StreamAdmission:      config.StreamAdmission,
-		MaxHeaderBytes:       config.MaxHeaderBytes,
-		ReplayEntries:        config.ReplayEntries,
-		MaxConnections:       config.MaxConnections,
-		MaxClientConnections: config.MaxClientConnections,
-		connectionAdmission:  connectionAdmission,
-		UDPResolver:          config.UDPResolver,
-		MaxUDPSessions:       config.MaxUDPSessions,
-		MaxClientUDPSessions: config.MaxClientUDPSessions,
-		MaxUDPDestinations:   config.MaxUDPDestinations,
-		UDPReceiveQueue:      config.UDPReceiveQueue,
+		Address:                 udpAddress,
+		Token:                   config.Token,
+		TLSConfig:               config.TLSConfig,
+		QUICConfig:              config.QUICConfig,
+		Dialer:                  config.Dialer,
+		Cover:                   config.Cover,
+		HandshakeTimeout:        config.HandshakeTimeout,
+		DialTimeout:             config.DialTimeout,
+		DestinationWriteTimeout: config.DestinationWriteTimeout,
+		MaxConcurrentStreams:    config.MaxConcurrentStreams,
+		StreamAdmission:         config.StreamAdmission,
+		MaxHeaderBytes:          config.MaxHeaderBytes,
+		ReplayEntries:           config.ReplayEntries,
+		MaxConnections:          config.MaxConnections,
+		MaxClientConnections:    config.MaxClientConnections,
+		connectionAdmission:     connectionAdmission,
+		UDPResolver:             config.UDPResolver,
+		MaxUDPSessions:          config.MaxUDPSessions,
+		MaxClientUDPSessions:    config.MaxClientUDPSessions,
+		MaxUDPDestinations:      config.MaxUDPDestinations,
+		UDPReceiveQueue:         config.UDPReceiveQueue,
 	}, core, verifier)
 	if err != nil {
 		closeErr := normalizeWebServerCloseError(h2.Close())

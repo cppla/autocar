@@ -69,6 +69,7 @@ func (h *webTunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeAuthenticatedError(w, &authentication, http.StatusBadGateway)
 		return
 	}
+	upstream = h.core.boundDestinationWrites(upstream)
 	defer upstream.Close()
 
 	switch wire {

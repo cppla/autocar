@@ -237,6 +237,7 @@ func TestPreflightServerRejectsInvalidConfiguration(t *testing.T) {
 		{"CIDR policy", "invalid denied CIDR", []string{"--deny-cidrs", "not-a-CIDR"}},
 		{"dial timeout", "--dial-timeout", []string{"--dial-timeout", "-1s"}},
 		{"handshake timeout", "--handshake-timeout", []string{"--handshake-timeout", "-1s"}},
+		{"destination write timeout", "--destination-write-timeout", []string{"--destination-write-timeout", "-1s"}},
 		{"connections", "--max-connections", []string{"--max-connections", "0"}},
 		{"UDP sessions", "--max-client-udp-sessions", []string{"--max-udp-sessions", "1"}},
 		{"rate bound", "protocol maximum", []string{"--pacing", "fixed-rate", "--max-upload-mbps", "8000001", "--max-download-mbps", "1"}},

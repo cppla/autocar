@@ -86,12 +86,15 @@ func checkServerAddresses(mode, udp, tcp string, disableFallback bool) error {
 // These bounds mirror the transport constructors, which cannot be invoked
 // for a server without binding sockets. Use them on both the check and normal
 // startup paths, before any listener is prepared.
-func validateServerLocalLimits(token string, handshakeTimeout, dialTimeout time.Duration, maxUpload, maxDownload uint64) error {
+func validateServerLocalLimits(token string, handshakeTimeout, dialTimeout, destinationWriteTimeout time.Duration, maxUpload, maxDownload uint64) error {
 	if len(token) < protocol.MinTokenLength || len(token) > protocol.MaxTokenLength {
 		return fmt.Errorf("tunnel: token length must be between %d and %d bytes", protocol.MinTokenLength, protocol.MaxTokenLength)
 	}
 	if handshakeTimeout < 0 || dialTimeout < 0 {
 		return errors.New("--handshake-timeout and --dial-timeout must not be negative")
+	}
+	if destinationWriteTimeout < 0 {
+		return errors.New("--destination-write-timeout must not be negative; zero uses the 5m default")
 	}
 	if maxUpload > protocol.MaxRate || maxDownload > protocol.MaxRate {
 		return errors.New("tunnel: pacing rate exceeds protocol maximum")

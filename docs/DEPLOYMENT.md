@@ -253,6 +253,25 @@ progress as activity, including small buffered responses. Stalled request or
 response bodies and blocked writes remain bounded; header and keepalive
 timeouts are unchanged.
 
+The relay's separate `--destination-write-timeout` defaults to `5m`; `0`
+also selects `5m`, rather than disabling the limit. It bounds the completion
+of each TCP destination write, split into chunks of at most 32 KiB. Each
+successfully completed chunk gets a fresh budget for the next write. This is
+not a kernel-level no-progress timer: a write can time out after making partial
+progress, and that error is retained rather than silently retried.
+
+This server setting applies to native QUIC/TLS and web H2/H3 TCP tunnels, not
+UDP or ordinary cover requests. The write deadline is cleared after every
+write, including failures; when no write is pending it does not count idle
+time, change read deadlines, or limit total upload duration. A stalled target
+therefore releases its stream slot within the pending write's timeout, even
+in the H3 response-FIN/reset edge case described in [WEB_COVER.md](WEB_COVER.md).
+That is bounded cleanup, not a promise of immediate reset detection. Configure
+it on the server as `--destination-write-timeout=30s` or JSON
+`"destination-write-timeout": "30s"`; choose a longer value if individual
+32 KiB writes can legitimately take longer. Negative durations are rejected by
+normal startup and `--check`.
+
 Before leaving a client running, verify a real authenticated relay path with
 the same connection flags:
 
