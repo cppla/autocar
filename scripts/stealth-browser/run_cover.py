@@ -31,6 +31,8 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 SCHEMA_VERSION = 1
 KIND = "real-browser-workload"
+DIAGNOSTIC_KIND = "browser-h3-credentials-diagnostic"
+DIAGNOSTIC_FETCH_CREDENTIALS = ("omit", "same-origin")
 RFC1918 = (
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
@@ -90,6 +92,9 @@ SUCCESS_FIELDS = {
     "request_count",
     "response_bytes",
     "result_sha256",
+}
+DIAGNOSTIC_SUCCESS_FIELDS = SUCCESS_FIELDS | {
+    "execution_status", "fetch_credentials", "evidence_scope",
 }
 
 
@@ -276,6 +281,41 @@ class RunnerError(RuntimeError):
 
 class UsageError(RunnerError):
     pass
+
+
+def validate_diagnostic_credentials(
+    credentials: Optional[str], protocol: str, workload: str
+) -> Optional[str]:
+    if credentials is None:
+        return None
+    if credentials not in DIAGNOSTIC_FETCH_CREDENTIALS:
+        raise UsageError("diagnostic fetch credentials must be omit or same-origin")
+    if protocol != "h3" or workload != "download_1k":
+        raise UsageError("--diagnostic-fetch-credentials requires --protocol h3 --workload download_1k")
+    return credentials
+
+
+def diagnostic_workload_script() -> str:
+    # Preserve the frozen ordinary workload byte-for-byte. The diagnostic
+    # receives its sole treatment through a WebDriver argument, never source
+    # interpolation. Echo it in the result so a stale script cannot be scored
+    # as though it applied the requested treatment.
+    credentials_literal = 'credentials: "omit",'
+    success_literal = "    ok: true,\n    request_count:"
+    if WORKLOAD_SCRIPT.count(credentials_literal) != 1 or WORKLOAD_SCRIPT.count(success_literal) != 1:
+        raise RunnerError("diagnostic workload anchors differ from the frozen script")
+    script = WORKLOAD_SCRIPT.replace(credentials_literal, "credentials: diagnosticFetchCredentials,")
+    script = script.replace(
+        success_literal,
+        "    ok: true,\n    fetch_credentials: diagnosticFetchCredentials,\n    request_count:",
+    )
+    return (
+        "const diagnosticFetchCredentials = arguments[3];\n"
+        'if (!["omit", "same-origin"].includes(diagnosticFetchCredentials)) {\n'
+        '  arguments[arguments.length - 1]({ok: false, error: "invalid diagnostic fetch credentials"});\n'
+        "  return;\n"
+        "}\n" + script
+    )
 
 
 class StrictArgumentParser(argparse.ArgumentParser):
@@ -803,7 +843,61 @@ def workload_receipt(
     return receipt
 
 
+def diagnostic_workload_receipt(
+    identity: BrowserIdentity,
+    protocol: str,
+    workload: str,
+    seed: int,
+    result: Mapping[str, Any],
+    credentials: str,
+) -> Dict[str, Any]:
+    if credentials is None:
+        raise UsageError("a diagnostic receipt requires an explicit fetch credentials mode")
+    validate_diagnostic_credentials(credentials, protocol, workload)
+    # Domain-separate both the receipt and its digest. There is deliberately
+    # no nested ordinary success receipt to extract into a formal campaign.
+    result_document = {
+        "kind": DIAGNOSTIC_KIND,
+        "fetch_credentials": credentials,
+        "evidence_scope": "calibration-only",
+        "protocol": protocol,
+        "workload": workload,
+        "sample_seed": seed,
+        "request_count": result["request_count"],
+        "response_bytes": result["response_bytes"],
+        "upload_bytes": result["upload_bytes"],
+        "resources": [
+            {"request_index": index, "next_hop_protocol": next_hop}
+            for index, next_hop in zip(result["resource_indexes"], result["next_hop_protocols"])
+        ],
+    }
+    receipt = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "insufficient_evidence",
+        "execution_status": "pass",
+        "kind": DIAGNOSTIC_KIND,
+        "evidence_scope": "calibration-only",
+        "fetch_credentials": credentials,
+        "client_implementation": identity.client_implementation,
+        "implementation_version": identity.implementation_version,
+        "browser_binary_sha256": identity.browser_binary_sha256,
+        "protocol": protocol,
+        "workload": workload,
+        "sample_seed": seed,
+        "next_hop_protocols": list(result["next_hop_protocols"]),
+        "request_count": result["request_count"],
+        "response_bytes": result["response_bytes"],
+        "result_sha256": canonical_json_sha256(result_document),
+    }
+    if set(receipt) != DIAGNOSTIC_SUCCESS_FIELDS:
+        raise AssertionError("diagnostic receipt fields changed")
+    return receipt
+
+
 def execute_browser_workload(args: argparse.Namespace) -> Dict[str, Any]:
+    diagnostic_credentials = validate_diagnostic_credentials(
+        getattr(args, "diagnostic_fetch_credentials", None), args.protocol, args.workload
+    )
     server = parse_server(args.server)
     identity = load_browser_identity(Path(args.browser_lock), args.browser)
     profile_root = Path(args.runtime_directory)
@@ -858,12 +952,26 @@ def execute_browser_workload(args: argparse.Namespace) -> Dict[str, Any]:
                 {"script": BOOTSTRAP_VERIFY_SCRIPT, "args": [args.seed]},
             )
             validate_bootstrap_result(bootstrap_result, args.protocol, args.seed)
+            script = WORKLOAD_SCRIPT
+            script_args = [args.workload, args.seed, args.idle_milliseconds]
+            if diagnostic_credentials is not None:
+                script = diagnostic_workload_script()
+                script_args.append(diagnostic_credentials)
             raw_result = client.request(
                 "POST",
                 "/session/%s/execute/async" % session_id,
-                {"script": WORKLOAD_SCRIPT, "args": [args.workload, args.seed, args.idle_milliseconds]},
+                {"script": script, "args": script_args},
             )
+            if diagnostic_credentials is not None and (
+                not isinstance(raw_result, dict)
+                or raw_result.get("fetch_credentials") != diagnostic_credentials
+            ):
+                raise RunnerError("browser diagnostic did not confirm the requested fetch credentials")
             checked = validate_workload_result(raw_result, args.workload, args.protocol)
+            if diagnostic_credentials is not None:
+                return diagnostic_workload_receipt(
+                    identity, args.protocol, args.workload, args.seed, checked, diagnostic_credentials
+                )
             return workload_receipt(identity, args.protocol, args.workload, args.seed, checked)
         finally:
             if session_id is not None:
@@ -881,6 +989,10 @@ def parser() -> StrictArgumentParser:
     result.add_argument("--server", required=True)
     result.add_argument("--workload", required=True, choices=tuple(WORKLOAD_SPECS))
     result.add_argument("--seed", required=True, type=parse_seed)
+    result.add_argument(
+        "--diagnostic-fetch-credentials", choices=DIAGNOSTIC_FETCH_CREDENTIALS,
+        help="diagnostic-only H3 download_1k treatment; emits non-campaign evidence even for omit",
+    )
     result.add_argument(
         "--browser-lock", default=os.environ.get("STEALTH_BROWSER_LOCK", "/campaign/browser-lock.json")
     )
@@ -968,6 +1080,33 @@ def self_test() -> None:
     receipt = workload_receipt(fake, "h2", "browser_h2", 7, checked)
     assert set(receipt) == SUCCESS_FIELDS and receipt["workload"] == "browser_h2"
     assert SHA256_RE.fullmatch(receipt["result_sha256"])
+    diagnostic_result = validate_workload_result({
+        "ok": True, "request_count": 1, "response_bytes": 1024, "upload_bytes": 0,
+        "resources": [{"request_index": 0, "next_hop_protocol": "h3"}],
+    }, "download_1k", "h3")
+    assert validate_diagnostic_credentials(None, "h2", "browser_h2") is None
+    assert "credentials: diagnosticFetchCredentials," in diagnostic_workload_script()
+    diagnostic_hashes = set()
+    for credentials in DIAGNOSTIC_FETCH_CREDENTIALS:
+        diagnostic_receipt = diagnostic_workload_receipt(
+            fake, "h3", "download_1k", 7, diagnostic_result, credentials
+        )
+        assert set(diagnostic_receipt) == DIAGNOSTIC_SUCCESS_FIELDS
+        assert diagnostic_receipt["kind"] == DIAGNOSTIC_KIND
+        assert diagnostic_receipt["status"] == "insufficient_evidence"
+        assert diagnostic_receipt["fetch_credentials"] == credentials
+        diagnostic_hashes.add(diagnostic_receipt["result_sha256"])
+    diagnostic_hashes.add(workload_receipt(fake, "h3", "download_1k", 7, diagnostic_result)["result_sha256"])
+    assert len(diagnostic_hashes) == 3
+    for credentials, protocol, workload in (
+        ("include", "h3", "download_1k"), ("omit", "h2", "download_1k"), ("omit", "h3", "idle"),
+    ):
+        try:
+            validate_diagnostic_credentials(credentials, protocol, workload)
+        except UsageError:
+            pass
+        else:
+            raise AssertionError("invalid diagnostic treatment was accepted")
     assert "--disable-quic" in browser_capabilities(
         fake, "h2", parse_server("10.0.0.1:443"), Path("/tmp/profile"), False, None
     )["goog:chromeOptions"]["args"]
@@ -1028,6 +1167,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             return 0
         args = parser().parse_args(values)
+        validate_diagnostic_credentials(args.diagnostic_fetch_credentials, args.protocol, args.workload)
         validate_certificate_spki_usage(
             args.browser, args.protocol, args.certificate_spki_sha256
         )

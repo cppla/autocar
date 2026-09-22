@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import runpy
 import stat
 import sys
 import tempfile
@@ -475,6 +476,203 @@ class BrowserRunnerTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("outside RFC1918", stderr.getvalue())
+
+
+class BrowserDiagnosticTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.identity = run_cover.BrowserIdentity(
+            "chromium", "Chromium", "Chromium 151.0.1.2",
+            "/usr/lib/chromium/chromium", "a" * 64,
+            "/usr/bin/chromedriver", "ChromeDriver 151.0.1.2", "b" * 64,
+        )
+        self.raw_workload = {
+            "ok": True,
+            "request_count": 1,
+            "response_bytes": 1024,
+            "upload_bytes": 0,
+            "resources": [{"request_index": 0, "next_hop_protocol": "h3"}],
+        }
+        self.checked = run_cover.validate_workload_result(self.raw_workload, "download_1k", "h3")
+        self.cli = [
+            "--browser", "chromium", "--protocol", "h3", "--server", "10.0.0.2:8443",
+            "--workload", "download_1k", "--seed", "5", "--certificate-spki-sha256", SPKI_PIN,
+        ]
+
+    @contextlib.contextmanager
+    def execution(self, credentials: str | None, raw_workload: dict | None = None):
+        raw = dict(self.raw_workload) if raw_workload is None else dict(raw_workload)
+        if raw_workload is None and credentials is not None:
+            raw["fetch_credentials"] = credentials
+        webdriver = mock.Mock()
+        webdriver.create_session.return_value = (
+            "session-1", {"browserName": "chrome", "browserVersion": "151.0.1.2"}
+        )
+        webdriver.request.side_effect = [
+            None, None, {"ok": True, "sample_seed": 5, "next_hop_protocol": "h3"}, raw, None,
+        ]
+        process = mock.Mock()
+        process.poll.return_value = None
+        args = run_cover.parser().parse_args(self.cli)
+        args.diagnostic_fetch_credentials = credentials
+        with tempfile.TemporaryDirectory() as directory:
+            args.runtime_directory = directory
+            with mock.patch.object(run_cover, "load_browser_identity", return_value=self.identity), \
+                    mock.patch.object(run_cover, "free_loopback_port", return_value=49151), \
+                    mock.patch.object(run_cover.subprocess, "Popen", return_value=process), \
+                    mock.patch.object(run_cover, "WebDriverClient", return_value=webdriver), \
+                    mock.patch.object(run_cover, "stop_process_group") as stop:
+                yield args, webdriver, stop
+
+    def test_default_scripts_and_receipt_contract_are_unchanged(self) -> None:
+        self.assertEqual(
+            hashlib.sha256(run_cover.WORKLOAD_SCRIPT.encode()).hexdigest(),
+            "48d93f56ad103ef7859eb8699d3bbcdb5fce4d787969922dc5bd1fa77c6bdac7",
+        )
+        self.assertEqual(
+            hashlib.sha256(run_cover.BOOTSTRAP_VERIFY_SCRIPT.encode()).hexdigest(),
+            "7d486176be671bcf7080e0d530913484145572e9f8915f08d8974e60653d9235",
+        )
+        self.assertIsNone(run_cover.parser().parse_args(self.cli).diagnostic_fetch_credentials)
+        with self.execution(None) as (args, webdriver, stop):
+            receipt = run_cover.execute_browser_workload(args)
+        payload = webdriver.request.call_args_list[3].args[2]
+        self.assertEqual(payload, {
+            "script": run_cover.WORKLOAD_SCRIPT,
+            "args": ["download_1k", 5, 1200],
+        })
+        self.assertEqual(set(receipt), run_cover.SUCCESS_FIELDS)
+        self.assertEqual(len(receipt), 13)
+        self.assertEqual(receipt["kind"], "real-browser-workload")
+        self.assertEqual(receipt["status"], "pass")
+        self.assertEqual(
+            receipt["result_sha256"],
+            run_cover.canonical_json_sha256({
+                "protocol": "h3", "workload": "download_1k", "sample_seed": 5,
+                "request_count": 1, "response_bytes": 1024, "upload_bytes": 0,
+                "resources": [{"request_index": 0, "next_hop_protocol": "h3"}],
+            }),
+        )
+        stop.assert_called_once()
+
+    def test_both_diagnostic_modes_are_explicitly_marked_and_passed_as_arguments(self) -> None:
+        for credentials in ("omit", "same-origin"):
+            with self.subTest(credentials=credentials):
+                parsed = run_cover.parser().parse_args(self.cli + ["--diagnostic-fetch-credentials", credentials])
+                self.assertEqual(parsed.diagnostic_fetch_credentials, credentials)
+                with self.execution(credentials) as (args, webdriver, stop):
+                    receipt = run_cover.execute_browser_workload(args)
+                payload = webdriver.request.call_args_list[3].args[2]
+                self.assertEqual(payload["script"], run_cover.diagnostic_workload_script())
+                self.assertEqual(payload["args"], ["download_1k", 5, 1200, credentials])
+                self.assertEqual(webdriver.request.call_args_list[1].args[2]["url"],
+                                 "https://10.0.0.2:8443/?autocar_browser_sample=5")
+                self.assertEqual(set(receipt), run_cover.DIAGNOSTIC_SUCCESS_FIELDS)
+                self.assertEqual(receipt["kind"], run_cover.DIAGNOSTIC_KIND)
+                self.assertEqual(receipt["status"], "insufficient_evidence")
+                self.assertEqual(receipt["execution_status"], "pass")
+                self.assertEqual(receipt["fetch_credentials"], credentials)
+                self.assertEqual(receipt["evidence_scope"], "calibration-only")
+                self.assertFalse(any(isinstance(value, dict) for value in receipt.values()))
+                self.assertEqual(webdriver.request.call_args_list[-1].args[0], "DELETE")
+                stop.assert_called_once()
+
+    def test_diagnostic_script_uses_validated_argument_not_interpolation(self) -> None:
+        script = run_cover.diagnostic_workload_script()
+        self.assertIn("const diagnosticFetchCredentials = arguments[3];", script)
+        self.assertIn("credentials: diagnosticFetchCredentials,", script)
+        self.assertIn("fetch_credentials: diagnosticFetchCredentials,", script)
+        self.assertNotIn('credentials: "omit",', script)
+        with mock.patch.object(run_cover, "WORKLOAD_SCRIPT", "different workload"):
+            with self.assertRaisesRegex(run_cover.RunnerError, "anchors differ"):
+                run_cover.diagnostic_workload_script()
+
+    def test_invalid_diagnostic_modes_and_combinations_fail_before_browser_launch(self) -> None:
+        for extra in (
+            ["--diagnostic-fetch-credentials", "include"],
+            ["--diagnostic-fetch-credentials", "omit", "--protocol", "h2"],
+            ["--diagnostic-fetch-credentials", "same-origin", "--workload", "idle"],
+            ["--diagnostic-fetch-credentials", "omit", "--workload", "parallel_20"],
+        ):
+            with self.subTest(extra=extra), mock.patch.object(run_cover, "execute_browser_workload") as execute:
+                output, error = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                    code = run_cover.main(self.cli + extra)
+                self.assertEqual(code, 2)
+                self.assertEqual(output.getvalue(), "")
+                self.assertTrue(error.getvalue())
+                execute.assert_not_called()
+        with mock.patch.object(run_cover, "load_browser_identity") as identity:
+            with self.assertRaises(run_cover.UsageError):
+                run_cover.execute_browser_workload(SimpleNamespace(
+                    diagnostic_fetch_credentials="omit", protocol="h2", workload="download_1k"
+                ))
+            identity.assert_not_called()
+
+    def test_missing_or_mismatched_treatment_echo_fails_and_cleans_up(self) -> None:
+        for raw in (
+            self.raw_workload,
+            {**self.raw_workload, "fetch_credentials": "omit"},
+            {"ok": False, "error": "failure"},
+        ):
+            with self.subTest(raw=raw), self.execution("same-origin", raw) as (args, webdriver, stop):
+                with self.assertRaisesRegex(run_cover.RunnerError, "did not confirm"):
+                    run_cover.execute_browser_workload(args)
+                self.assertEqual(webdriver.request.call_args_list[-1].args[0], "DELETE")
+                stop.assert_called_once()
+
+    def test_diagnostic_does_not_relax_protocol_or_payload_verification(self) -> None:
+        for raw in (
+            {**self.raw_workload, "response_bytes": 1023},
+            {**self.raw_workload, "resources": [{"request_index": 0, "next_hop_protocol": "h2"}]},
+        ):
+            raw["fetch_credentials"] = "omit"
+            with self.subTest(raw=raw), self.execution("omit", raw) as (args, webdriver, stop):
+                with self.assertRaises(run_cover.RunnerError):
+                    run_cover.execute_browser_workload(args)
+                self.assertEqual(webdriver.request.call_args_list[-1].args[0], "DELETE")
+                stop.assert_called_once()
+
+    def test_diagnostic_digest_binds_mode_and_cannot_be_stripped_into_formal_receipt(self) -> None:
+        formal = run_cover.workload_receipt(self.identity, "h3", "download_1k", 5, self.checked)
+        omit = run_cover.diagnostic_workload_receipt(self.identity, "h3", "download_1k", 5, self.checked, "omit")
+        same_origin = run_cover.diagnostic_workload_receipt(self.identity, "h3", "download_1k", 5, self.checked, "same-origin")
+        self.assertEqual(len({formal["result_sha256"], omit["result_sha256"], same_origin["result_sha256"]}), 3)
+        self.assertEqual(
+            omit,
+            run_cover.diagnostic_workload_receipt(self.identity, "h3", "download_1k", 5, self.checked, "omit"),
+        )
+        if sys.platform == "win32":
+            self.skipTest("formal capture driver imports Linux/Unix fcntl")
+        campaign = runpy.run_path(str(HERE.parent / "stealth-campaign.py"))
+        sample = SimpleNamespace(wire_profile="h3", workload="download_1k", sample_seed=5)
+        variant = SimpleNamespace(
+            client_implementation=self.identity.client_implementation,
+            implementation_version=self.identity.implementation_version,
+            browser_binary_sha256=self.identity.browser_binary_sha256,
+        )
+        validate = campaign["validate_browser_receipt"]
+        self.assertEqual(validate(formal, sample, variant), formal)
+        for diagnostic in (omit, same_origin):
+            with self.subTest(mode=diagnostic["fetch_credentials"]):
+                with self.assertRaises(campaign["CampaignError"]):
+                    validate(diagnostic, sample, variant)
+                disguised = {key: diagnostic[key] for key in run_cover.SUCCESS_FIELDS}
+                disguised["status"] = "pass"
+                disguised["kind"] = run_cover.KIND
+                with self.assertRaisesRegex(campaign["CampaignError"], "digest does not bind"):
+                    validate(disguised, sample, variant)
+
+    def test_diagnostic_stdout_is_one_marked_receipt(self) -> None:
+        receipt = run_cover.diagnostic_workload_receipt(
+            self.identity, "h3", "download_1k", 5, self.checked, "omit"
+        )
+        output, error = io.StringIO(), io.StringIO()
+        with mock.patch.object(run_cover, "execute_browser_workload", return_value=receipt):
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                code = run_cover.main(self.cli + ["--diagnostic-fetch-credentials", "omit"])
+        self.assertEqual(code, 0)
+        self.assertEqual(output.getvalue(), run_cover.compact_json(receipt) + "\n")
+        self.assertEqual(error.getvalue(), "")
 
 
 if __name__ == "__main__":
