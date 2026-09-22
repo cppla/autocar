@@ -18,16 +18,19 @@ import (
 // WebH3ServerConfig configures a real HTTP/3 cover origin whose authenticated
 // CONNECT requests carry TCP proxy streams.
 type WebH3ServerConfig struct {
-	Address              string
-	Token                string
-	TLSConfig            *tls.Config
-	QUICConfig           *quic.Config
-	Dialer               transport.Dialer
-	Cover                http.Handler
-	HandshakeTimeout     time.Duration
-	DialTimeout          time.Duration
-	MaxConcurrentStreams int
-	StreamAdmission      *StreamAdmission
+	Address          string
+	Token            string
+	TLSConfig        *tls.Config
+	QUICConfig       *quic.Config
+	Dialer           transport.Dialer
+	Cover            http.Handler
+	HandshakeTimeout time.Duration
+	DialTimeout      time.Duration
+	// DestinationWriteTimeout bounds each tunneled TCP destination write.
+	// Zero uses five minutes; negative values are invalid. Cover/UDP are unaffected.
+	DestinationWriteTimeout time.Duration
+	MaxConcurrentStreams    int
+	StreamAdmission         *StreamAdmission
 	// MaxConnections and MaxClientConnections bound accepted HTTPS
 	// connections globally and per source IPv4 or IPv6 /64. A combined
 	// WebServer shares these limits with HTTP/2.
@@ -83,6 +86,7 @@ func ListenWebH3(config WebH3ServerConfig) (*WebH3Server, error) {
 		config.Dialer,
 		config.HandshakeTimeout,
 		config.DialTimeout,
+		config.DestinationWriteTimeout,
 		config.MaxConcurrentStreams,
 		config.StreamAdmission,
 	)

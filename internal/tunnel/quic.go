@@ -26,14 +26,17 @@ const (
 
 // QUICServerConfig configures an encrypted QUIC exit listener.
 type QUICServerConfig struct {
-	Address              string
-	Token                string
-	TLSConfig            *tls.Config
-	QUICConfig           *quic.Config
-	Dialer               transport.Dialer
-	HandshakeTimeout     time.Duration
-	DialTimeout          time.Duration
-	MaxConcurrentStreams int
+	Address          string
+	Token            string
+	TLSConfig        *tls.Config
+	QUICConfig       *quic.Config
+	Dialer           transport.Dialer
+	HandshakeTimeout time.Duration
+	DialTimeout      time.Duration
+	// DestinationWriteTimeout bounds each TCP destination write. Zero uses
+	// five minutes; negative values are invalid. It does not apply to UDP.
+	DestinationWriteTimeout time.Duration
+	MaxConcurrentStreams    int
 	// StreamAdmission optionally shares the active-stream budget with other
 	// server transports. When set, MaxConcurrentStreams must be zero or equal
 	// to the admission limit. Nil preserves the independent-server behavior.
@@ -116,6 +119,7 @@ func ListenQUIC(config QUICServerConfig) (*QUICServer, error) {
 		config.Dialer,
 		config.HandshakeTimeout,
 		config.DialTimeout,
+		config.DestinationWriteTimeout,
 		config.MaxConcurrentStreams,
 		config.StreamAdmission,
 	)

@@ -24,11 +24,11 @@ func TestStreamAdmissionValidationAndCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := newServerCoreWithAdmission(testToken, nil, 0, 0, 1, shared)
+	first, err := newServerCoreWithAdmission(testToken, nil, 0, 0, 0, 1, shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := newServerCoreWithAdmission(testToken, nil, 0, 0, 0, shared)
+	second, err := newServerCoreWithAdmission(testToken, nil, 0, 0, 0, 0, shared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,10 +70,10 @@ func TestStreamAdmissionRejectsInvalidConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newServerCoreWithAdmission(testToken, nil, 0, 0, 1, shared); err == nil {
+	if _, err := newServerCoreWithAdmission(testToken, nil, 0, 0, 0, 1, shared); err == nil {
 		t.Fatal("mismatched MaxConcurrentStreams and StreamAdmission were accepted")
 	}
-	if _, err := newServerCoreWithAdmission(testToken, nil, 0, 0, 0, &StreamAdmission{}); err == nil {
+	if _, err := newServerCoreWithAdmission(testToken, nil, 0, 0, 0, 0, &StreamAdmission{}); err == nil {
 		t.Fatal("zero-value StreamAdmission was accepted")
 	}
 }

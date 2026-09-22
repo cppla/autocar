@@ -56,6 +56,7 @@ func runServer(parent context.Context, args []string) error {
 	allowClientRates := fs.Bool("allow-client-rates", false, "native protocol: allow authenticated clients to request rates within server maxima")
 	dialTimeout := fs.Duration("dial-timeout", 4*time.Second, "remote destination dial timeout")
 	handshakeTimeout := fs.Duration("handshake-timeout", 10*time.Second, "authentication and initial stream-open timeout")
+	destinationWriteTimeout := fs.Duration("destination-write-timeout", 5*time.Minute, "completion timeout for each TCP destination write of at most 32 KiB; zero uses 5m (not an idle timeout)")
 	if err := parseFlagsWithConfig(fs, args); err != nil {
 		return err
 	}
@@ -128,7 +129,7 @@ func runServer(parent context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateServerLocalLimits(token, *handshakeTimeout, *dialTimeout, maxUpload, maxDownload); err != nil {
+	if err := validateServerLocalLimits(token, *handshakeTimeout, *dialTimeout, *destinationWriteTimeout, maxUpload, maxDownload); err != nil {
 		return err
 	}
 	certificate, err := security.LoadKeyPair(*certFile, *keyFile)
@@ -188,22 +189,23 @@ func runServer(parent context.Context, args []string) error {
 	}
 	if serverProtocol == "web" {
 		webServer, err := tunnel.ListenWeb(tunnel.WebServerConfig{
-			TCPAddress:           *tcpListen,
-			UDPAddress:           *listen,
-			Token:                token,
-			TLSConfig:            tlsConfig,
-			Cover:                coverHandler,
-			Dialer:               safeDialer,
-			HandshakeTimeout:     *handshakeTimeout,
-			DialTimeout:          *dialTimeout,
-			MaxConcurrentStreams: *maxStreams,
-			StreamAdmission:      streamAdmission,
-			MaxConnections:       *maxConnections,
-			MaxClientConnections: *maxClientConnections,
-			MaxUDPSessions:       *maxUDPSessions,
-			MaxClientUDPSessions: *maxClientUDPSessions,
-			MaxUDPDestinations:   *maxUDPDestinations,
-			UDPReceiveQueue:      *udpReceiveQueue,
+			TCPAddress:              *tcpListen,
+			UDPAddress:              *listen,
+			Token:                   token,
+			TLSConfig:               tlsConfig,
+			Cover:                   coverHandler,
+			Dialer:                  safeDialer,
+			HandshakeTimeout:        *handshakeTimeout,
+			DialTimeout:             *dialTimeout,
+			DestinationWriteTimeout: *destinationWriteTimeout,
+			MaxConcurrentStreams:    *maxStreams,
+			StreamAdmission:         streamAdmission,
+			MaxConnections:          *maxConnections,
+			MaxClientConnections:    *maxClientConnections,
+			MaxUDPSessions:          *maxUDPSessions,
+			MaxClientUDPSessions:    *maxClientUDPSessions,
+			MaxUDPDestinations:      *maxUDPDestinations,
+			UDPReceiveQueue:         *udpReceiveQueue,
 		})
 		if err != nil {
 			return err
@@ -229,6 +231,7 @@ func runServer(parent context.Context, args []string) error {
 		AllowClientRates:         *allowClientRates,
 		HandshakeTimeout:         *handshakeTimeout,
 		DialTimeout:              *dialTimeout,
+		DestinationWriteTimeout:  *destinationWriteTimeout,
 		MaxConcurrentStreams:     *maxStreams,
 		StreamAdmission:          streamAdmission,
 		MaxConnections:           *maxConnections,
@@ -249,15 +252,16 @@ func runServer(parent context.Context, args []string) error {
 	var tlsServer *tunnel.TLSServer
 	if !*disableFallback {
 		tlsServer, err = tunnel.ListenTLS(tunnel.TLSServerConfig{
-			Address:              *tcpListen,
-			Token:                token,
-			TLSConfig:            tlsConfig,
-			Dialer:               safeDialer,
-			HandshakeTimeout:     *handshakeTimeout,
-			DialTimeout:          *dialTimeout,
-			MaxConcurrentStreams: *maxStreams,
-			StreamAdmission:      streamAdmission,
-			MaxClientConnections: *maxClientFallbackConnections,
+			Address:                 *tcpListen,
+			Token:                   token,
+			TLSConfig:               tlsConfig,
+			Dialer:                  safeDialer,
+			HandshakeTimeout:        *handshakeTimeout,
+			DialTimeout:             *dialTimeout,
+			DestinationWriteTimeout: *destinationWriteTimeout,
+			MaxConcurrentStreams:    *maxStreams,
+			StreamAdmission:         streamAdmission,
+			MaxClientConnections:    *maxClientFallbackConnections,
 		})
 		if err != nil {
 			return err

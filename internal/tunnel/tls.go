@@ -17,13 +17,16 @@ import (
 
 // TLSServerConfig configures the TCP+TLS fallback exit listener.
 type TLSServerConfig struct {
-	Address              string
-	Token                string
-	TLSConfig            *tls.Config
-	Dialer               transport.Dialer
-	HandshakeTimeout     time.Duration
-	DialTimeout          time.Duration
-	MaxConcurrentStreams int
+	Address          string
+	Token            string
+	TLSConfig        *tls.Config
+	Dialer           transport.Dialer
+	HandshakeTimeout time.Duration
+	DialTimeout      time.Duration
+	// DestinationWriteTimeout bounds each TCP destination write. Zero uses
+	// five minutes; negative values are invalid. Idle reads are unaffected.
+	DestinationWriteTimeout time.Duration
+	MaxConcurrentStreams    int
 	// StreamAdmission optionally shares the active-stream budget with other
 	// server transports. When set, MaxConcurrentStreams must be zero or equal
 	// to the admission limit. Nil preserves the independent-server behavior.
@@ -68,6 +71,7 @@ func ListenTLS(config TLSServerConfig) (*TLSServer, error) {
 		config.Dialer,
 		config.HandshakeTimeout,
 		config.DialTimeout,
+		config.DestinationWriteTimeout,
 		config.MaxConcurrentStreams,
 		config.StreamAdmission,
 	)

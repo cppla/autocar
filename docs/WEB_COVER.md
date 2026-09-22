@@ -45,11 +45,20 @@ uploading after receiving a destination EOF require the H3 stream transport.
 Canceled H2 requests and H3 send-side stream errors close the destination directly,
 including when both relay workers are blocked on destination I/O. Server or
 physical-connection shutdown also releases H3 destinations after a response
-FIN. One H3 edge case remains: after a clean response FIN, resetting only that
-stream cannot interrupt an already blocked destination upload write through
-the current QUIC API. The stream slot can remain occupied until the destination
-unblocks or the physical connection closes; a sibling stream can remain usable.
-This is not a guarantee that every canceled stream is immediately reclaimed.
+FIN. After a clean response FIN, resetting only that H3 stream still cannot
+directly interrupt an already blocked destination upload write through the
+current QUIC API. The server's `--destination-write-timeout` now bounds that
+pending write, releasing the stream slot without closing usable siblings.
+Its default is `5m`; `0` selects that default and negative values are invalid.
+This is bounded cleanup, not immediate reset detection.
+
+The limit is the completion deadline of each TCP destination write, in chunks
+of at most 32 KiB—not a kernel-level no-progress timer or a total upload limit.
+After a chunk completes successfully, the next write gets a new budget.
+Partial-write errors remain errors. Deadlines are cleared after writes, do not run while no write
+is pending, and never change destination read deadlines. Native QUIC/TLS TCP
+tunnels share this setting; UDP and ordinary cover traffic do not. See
+[deployment settings](DEPLOYMENT.md) for CLI and JSON examples.
 
 H2's handshake budget covers both TLS negotiation and the initial HTTP/2
 preface/SETTINGS write. Caller cancellation or client shutdown also interrupts
