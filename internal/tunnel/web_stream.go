@@ -128,6 +128,7 @@ type webH2Conn struct {
 	writeTimer    *time.Timer
 	closeOnce     sync.Once
 	closeErr      error
+	onClose       func()
 }
 
 func newWebH2Conn(reader io.ReadCloser, writer *io.PipeWriter, cancel context.CancelFunc, local, remote net.Addr) *webH2Conn {
@@ -171,7 +172,15 @@ func (c *webH2Conn) Close() error {
 func (c *webH2Conn) closeStream() error {
 	c.closeOnce.Do(func() {
 		c.cancel()
-		c.closeErr = errors.Join(c.writer.Close(), c.reader.Close())
+		writeErr := c.writer.Close()
+		// The request is now canceled and its pipe cannot accept more data.
+		// Release session ownership before Body.Close: that operation may need
+		// the HTTP/2 write lock to return flow-control credit. If this was the
+		// last retired stream, closing its wire first unblocks that write lock.
+		if c.onClose != nil {
+			c.onClose()
+		}
+		c.closeErr = errors.Join(writeErr, c.reader.Close())
 	})
 	return c.closeErr
 }

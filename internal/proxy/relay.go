@@ -31,12 +31,25 @@ func (c *activityConn) Read(p []byte) (int, error) {
 }
 
 func (c *activityConn) Write(p []byte) (int, error) {
-	if c.timeout > 0 {
-		if err := c.Conn.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
-			return 0, err
-		}
+	return writeWithStallDeadline(c.Conn, p, c.timeout)
+}
+
+// Bound only the pending write. In particular, H2 streams implement deadlines
+// by aborting the stream: leaving a completed write's timer armed would later
+// terminate an otherwise active download with no more uploads.
+func writeWithStallDeadline(conn net.Conn, p []byte, timeout time.Duration) (int, error) {
+	if timeout <= 0 {
+		return conn.Write(p)
 	}
-	return c.Conn.Write(p)
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return 0, err
+	}
+	n, err := conn.Write(p)
+	clearErr := conn.SetWriteDeadline(time.Time{})
+	if err == nil {
+		err = clearErr
+	}
+	return n, err
 }
 
 func (c *activityConn) CloseWrite() error {
@@ -61,11 +74,17 @@ func relay(left, right net.Conn, idleTimeout time.Duration) error {
 		err         error
 	}
 	results := make(chan result, 2)
+	activity := &relayActivity{left: left, right: right, timeout: idleTimeout}
+	if err := activity.refresh(); err != nil {
+		_ = left.Close()
+		_ = right.Close()
+		return err
+	}
 	go func() {
-		results <- result{destination: right, err: copyHalf(right, left, idleTimeout)}
+		results <- result{destination: right, err: copyHalf(right, left, activity)}
 	}()
 	go func() {
-		results <- result{destination: left, err: copyHalf(left, right, idleTimeout)}
+		results <- result{destination: left, err: copyHalf(left, right, activity)}
 	}()
 
 	var relayErrors []error
@@ -101,31 +120,54 @@ func relay(left, right net.Conn, idleTimeout time.Duration) error {
 	return errors.Join(relayErrors...)
 }
 
-func copyHalf(dst, src net.Conn, idleTimeout time.Duration) error {
+// relayActivity makes read inactivity a property of the whole tunnel, not
+// either direction independently. Downloads, uploads and server-push streams
+// may legitimately have no reverse-direction application data for minutes.
+// Serializing the update prevents an older activity event from overwriting a
+// newer deadline. Writes retain their own stall deadline for backpressure.
+type relayActivity struct {
+	mu          sync.Mutex
+	left, right net.Conn
+	timeout     time.Duration
+}
+
+func (a *relayActivity) refresh() error {
+	if a.timeout <= 0 {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	deadline := time.Now().Add(a.timeout)
+	return errors.Join(a.left.SetReadDeadline(deadline), a.right.SetReadDeadline(deadline))
+}
+
+func copyHalf(dst, src net.Conn, activity *relayActivity) error {
 	bufferPtr := relayBufferPool.Get().(*[]byte)
 	defer relayBufferPool.Put(bufferPtr)
 	buffer := *bufferPtr
 	for {
-		if idleTimeout > 0 {
-			_ = src.SetReadDeadline(time.Now().Add(idleTimeout))
-		}
 		n, readErr := src.Read(buffer)
 		if n < 0 || n > len(buffer) {
 			return errors.New("proxy: invalid read count")
 		}
 		if n > 0 {
+			if err := activity.refresh(); err != nil {
+				return err
+			}
 			written := 0
 			for written < n {
-				if idleTimeout > 0 {
-					_ = dst.SetWriteDeadline(time.Now().Add(idleTimeout))
-				}
-				m, writeErr := dst.Write(buffer[written:n])
+				m, writeErr := writeWithStallDeadline(dst, buffer[written:n], activity.timeout)
 				if m < 0 || m > n-written {
 					return errors.New("proxy: invalid write count")
 				}
 				written += m
 				if writeErr != nil {
 					return writeErr
+				}
+				if m > 0 {
+					if err := activity.refresh(); err != nil {
+						return err
+					}
 				}
 				if m == 0 {
 					return io.ErrShortWrite

@@ -492,24 +492,20 @@ func (c *WebClient) DialPacket(ctx context.Context) (transport.PacketConn, error
 		_ = packet.Close()
 		return nil, net.ErrClosed
 	}
-	return &webClientPacketConn{parent: c, inner: packet}, nil
+	if webPacket, ok := packet.(*webUDPPacketConn); ok {
+		webPacket.setAuthenticationObserver(c.recordOutOfBandPrimaryHealthy)
+	}
+	return &webClientPacketConn{inner: packet}, nil
 }
 
 type webClientPacketConn struct {
-	parent *WebClient
-	inner  transport.PacketConn
+	inner transport.PacketConn
 }
 
 func (c *webClientPacketConn) Send(payload []byte, address string) error {
-	if err := c.inner.Send(payload, address); err != nil {
-		var connectErr *WebConnectError
-		if errors.As(err, &connectErr) {
-			c.parent.recordOutOfBandPrimaryHealthy(false)
-		}
-		return err
-	}
-	c.parent.recordOutOfBandPrimaryHealthy(true)
-	return nil
+	// A cached UDP session only queues this datagram locally. It does not prove
+	// current path health; only a newly authenticated CONNECT-UDP response does.
+	return c.inner.Send(payload, address)
 }
 
 func (c *webClientPacketConn) Receive() ([]byte, string, error) { return c.inner.Receive() }

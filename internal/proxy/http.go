@@ -329,10 +329,7 @@ func writeGatewayError(w http.ResponseWriter, err error) {
 
 func writeAll(conn net.Conn, payload []byte, timeout time.Duration) error {
 	for len(payload) > 0 {
-		if timeout > 0 {
-			_ = conn.SetWriteDeadline(time.Now().Add(timeout))
-		}
-		written, err := conn.Write(payload)
+		written, err := writeWithStallDeadline(conn, payload, timeout)
 		if written < 0 || written > len(payload) {
 			return errors.New("proxy: invalid write count")
 		}

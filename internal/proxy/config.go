@@ -29,7 +29,10 @@ type Config struct {
 	Authenticator    Authenticator
 	HandshakeTimeout time.Duration
 	DialTimeout      time.Duration
-	IdleTimeout      time.Duration
+	// IdleTimeout bounds inactivity across either direction of a CONNECT
+	// tunnel, and separately bounds a blocked write. Ordinary HTTP request
+	// and response bodies retain their per-operation inactivity bound.
+	IdleTimeout time.Duration
 	// MaxConnections is the number of accepted client TCP connections that may
 	// be active at once. Zero uses a conservative default; a negative value is
 	// rejected.

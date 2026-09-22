@@ -165,6 +165,12 @@ both pacing fields as `not-applicable`, and `--pacing=fixed-rate` is rejected.
 `h2` does not advertise UDP. The H3-to-H2 fallback carries only new TCP
 streams: UDP never falls back to H2 and fails when H3 is unavailable.
 
+Only a newly authenticated CONNECT-UDP response is fresh evidence that the H3
+path has recovered. Sending on a cached UDP target merely queues a datagram
+locally; it does not clear the TCP fallback cooldown or change the last
+successful transport. A newly authenticated target rejection proves path
+health without being counted as a successful target connection.
+
 ## CONNECT-UDP boundary
 
 The H3 UDP path follows

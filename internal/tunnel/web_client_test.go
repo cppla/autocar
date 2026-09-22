@@ -648,6 +648,9 @@ func TestWebClientAuthenticatedUDPSuccessClosesCircuitAgainstOlderTCPFailure(t *
 	if err := packet.Send([]byte("healthy"), "example.com:53"); err != nil {
 		t.Fatal(err)
 	}
+	// This fake has no HTTP/3 handshake. Deliver its verified-response event
+	// explicitly; a successful local Send alone must never deliver that event.
+	client.recordOutOfBandPrimaryHealthy(true)
 	_ = packet.Close()
 	close(releaseProbe)
 	if err := <-probeDone; err != nil {
@@ -745,6 +748,9 @@ func TestWebClientAuthenticatedUDPErrorClosesCircuitAgainstOlderTCPFailure(t *te
 	if !errors.As(err, &gotTargetFailure) || gotTargetFailure != targetFailure {
 		t.Fatalf("packet error = %v, want exact authenticated target error", err)
 	}
+	// Model a newly verified rejection, not a replayed error from a cached
+	// packet implementation. Real H3 observer wiring is tested separately.
+	client.recordOutOfBandPrimaryHealthy(false)
 	_ = packet.Close()
 	if got := client.SelectedTransport(); got != webAuthTransportH2 {
 		t.Fatalf("failed CONNECT-UDP changed selection to %q", got)
