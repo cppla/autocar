@@ -71,6 +71,11 @@ type Snapshot struct {
 	LostBytes   uint64
 	MinRTT      time.Duration
 	SmoothedRTT time.Duration
+	// ApplicationIdleTime is the cumulative time for which the sender had no
+	// application writes in progress. Waiting for pacing or transport capacity
+	// is active, not idle. A zero value preserves adapters without idle tracking;
+	// a decrease, like a SentBytes reset, starts a new observation epoch.
+	ApplicationIdleTime time.Duration
 }
 
 // Clock provides the time operations used by pacing. Implementations must be
@@ -242,6 +247,9 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 	if snapshot.MinRTT < 0 || snapshot.SmoothedRTT < 0 {
 		return fmt.Errorf("%w: RTT values cannot be negative", ErrInvalidSnapshot)
 	}
+	if snapshot.ApplicationIdleTime < 0 {
+		return fmt.Errorf("%w: application idle time cannot be negative", ErrInvalidSnapshot)
+	}
 	if snapshot.At.IsZero() {
 		snapshot.At = c.clock.Now()
 	}
@@ -258,8 +266,8 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 		return fmt.Errorf("%w: sample time must increase", ErrInvalidSnapshot)
 	}
 
-	if snapshot.SentBytes < c.previous.SentBytes {
-		// A cumulative sent-byte reset denotes a new transport epoch. Rebaseline
+	if snapshot.SentBytes < c.previous.SentBytes || snapshot.ApplicationIdleTime < c.previous.ApplicationIdleTime {
+		// A cumulative counter reset denotes a new transport epoch. Rebaseline
 		// instead of interpreting wrapped counters as a huge delivery sample.
 		c.previous = snapshot
 		c.estimator.reset()
@@ -268,13 +276,15 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 	}
 
 	elapsed := snapshot.At.Sub(c.previous.At)
+	window := stableSampleWindow(snapshot.MinRTT)
 	// Connection counters are sampled by every writer. Ignore sub-window calls
 	// without advancing the baseline so concurrent streams cannot turn one packet
 	// observed a few microseconds later into a terabyte-per-second rate sample.
-	if elapsed < stableSampleWindow(snapshot.MinRTT) {
+	if elapsed < window {
 		return nil
 	}
 
+	idleDelta := snapshot.ApplicationIdleTime - c.previous.ApplicationIdleTime
 	sentDelta := snapshot.SentBytes - c.previous.SentBytes
 	lostDelta := uint64(0)
 	if snapshot.LostBytes >= c.previous.LostBytes {
@@ -282,6 +292,15 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 	}
 	c.previous = snapshot
 
+	if idleDelta >= window && idleDelta >= elapsed/2 {
+		// ACK/control traffic during application silence does not measure path
+		// capacity. Keep the learned target and estimator, but rebaseline so
+		// the next active interval does not inherit this idle time. Sub-window
+		// observations above retain both counters until this decision is made.
+		// Require idle time to dominate the interval: a short source gap after
+		// a long, flow-controlled write must not hide genuine path congestion.
+		return nil
+	}
 	if sentDelta == 0 || snapshot.MinRTT == 0 || snapshot.SmoothedRTT == 0 {
 		return nil
 	}

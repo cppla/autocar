@@ -60,6 +60,50 @@ type connectionPacer struct {
 	config     PacingConfig
 	controller *accel.Controller
 	fixedRate  uint64
+	activity   pacingWriteActivity
+}
+
+// pacingWriteActivity counts the union of pending application writes across
+// streams and datagram batches on a connection. Time spent waiting for pacing
+// or QUIC flow control is busy time, not application idle time. Its owner holds
+// p.mu.
+type pacingWriteActivity struct {
+	activeWrites int
+	idleSince    time.Time
+	idle         time.Duration
+}
+
+func (a *pacingWriteActivity) begin(at time.Time) {
+	if a.activeWrites == 0 && !a.idleSince.IsZero() {
+		a.idle += at.Sub(a.idleSince)
+	}
+	a.activeWrites++
+}
+
+func (a *pacingWriteActivity) end(at time.Time) {
+	a.activeWrites--
+	if a.activeWrites == 0 {
+		a.idleSince = at
+	}
+}
+
+func (a *pacingWriteActivity) idleTime(at time.Time) time.Duration {
+	if a.activeWrites == 0 && !a.idleSince.IsZero() {
+		return a.idle + at.Sub(a.idleSince)
+	}
+	return a.idle
+}
+
+func (p *connectionPacer) beginWrite() {
+	p.mu.Lock()
+	p.activity.begin(time.Now())
+	p.mu.Unlock()
+}
+
+func (p *connectionPacer) endWrite() {
+	p.mu.Lock()
+	p.activity.end(time.Now())
+	p.mu.Unlock()
 }
 
 func newConnectionPacer(config PacingConfig, fixedRate uint64) (*connectionPacer, error) {
@@ -119,18 +163,25 @@ func (p *connectionPacer) setFixedRate(rate uint64) error {
 func (p *connectionPacer) wait(ctx context.Context, bytes int, conn *quic.Conn) error {
 	p.mu.Lock()
 	controller := p.controller
-	p.mu.Unlock()
 	if controller == nil {
+		p.mu.Unlock()
 		return nil
 	}
-	stats := conn.ConnectionStats()
-	_ = controller.Observe(accel.Snapshot{
-		At:          time.Now(),
-		SentBytes:   stats.BytesSent,
-		LostBytes:   stats.BytesLost,
-		MinRTT:      stats.MinRTT,
-		SmoothedRTT: stats.SmoothedRTT,
-	})
+	if controller.Mode() == accel.ModeAdaptive {
+		// Keep counter reads and observations ordered across concurrent streams.
+		// Only the sample is serialized: never hold p.mu during admission or I/O.
+		stats := conn.ConnectionStats()
+		now := time.Now()
+		_ = controller.Observe(accel.Snapshot{
+			At:                  now,
+			SentBytes:           stats.BytesSent,
+			LostBytes:           stats.BytesLost,
+			MinRTT:              stats.MinRTT,
+			SmoothedRTT:         stats.SmoothedRTT,
+			ApplicationIdleTime: p.activity.idleTime(now),
+		})
+	}
+	p.mu.Unlock()
 	return controller.Wait(ctx, bytes)
 }
 

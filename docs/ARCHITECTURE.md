@@ -205,6 +205,13 @@ apply only to QUIC. A TCP flow taken by `auto`'s TLS fallback is unpaced; explic
 congestion control, packetization, ACK handling and RFC 9002 recovery: upstream
 quic-go for native, and the pinned fork for web H3.
 
+Native adaptive samples include connection-wide application-send idle time.
+Intervals that are at least half idle, with a stable sampling window of no
+pending sends, are rebaselined instead of turning ACK-only traffic into a low
+bandwidth estimate. Predominantly busy intervals remain eligible. Pending
+pacing waits and blocked transport writes are not idle; concurrent streams
+share the activity accounting and ordered counter observations.
+
 Web H2/H3 streams do not use the native pacing negotiation and report client
 and relay pacing as `not-applicable`. Fixed-rate is rejected with
 `web-auto`, `h3`, and `h2`.
