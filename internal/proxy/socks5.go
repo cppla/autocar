@@ -72,6 +72,9 @@ func NewSOCKS5Server(cfg Config) (*SOCKS5Server, error) {
 func (s *SOCKS5Server) Serve(listener net.Listener) error {
 	managed, err := s.lifecycle.manage(listener)
 	if err != nil {
+		if errors.Is(err, net.ErrClosed) {
+			return nil
+		}
 		return err
 	}
 	for {

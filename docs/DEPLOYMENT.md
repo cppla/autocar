@@ -420,6 +420,11 @@ those listeners on loopback or enable the local HTTPS proxy. A non-loopback
 plaintext listener requires an explicit override and should still be protected
 by a trusted private network/firewall.
 
+When HTTP or HTTPS is enabled, `--proxy-user` must not contain `:` because HTTP
+Basic uses it to separate the username and password. Startup and `--check`
+reject this configuration. SOCKS-only usernames and passwords may contain `:`;
+passwords containing `:` also remain valid for HTTP/HTTPS.
+
 ## 7. systemd example
 
 `/etc/systemd/system/autocar.service`:
