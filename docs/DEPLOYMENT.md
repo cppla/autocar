@@ -381,6 +381,12 @@ per-request HMAC ticket remains mandatory for tunnel access.
 An explicitly configured empty or malformed client CA file is an error, not a
 request to turn off mTLS. Both normal startup and `--check` reject it.
 
+CA, certificate and private-key files must be regular files no larger than
+4 MiB each. Symlinks to valid regular files are allowed; named pipes and devices
+are rejected before opening. Private keys still require Unix mode `0600`.
+Keep the configuration directory protected from untrusted writers: these input
+checks are not a guarantee against hostile file replacement races.
+
 SOCKS5 username/password and HTTP Basic are cleartext on the local hop. Keep
 those listeners on loopback or enable the local HTTPS proxy. A non-loopback
 plaintext listener requires an explicit override and should still be protected
