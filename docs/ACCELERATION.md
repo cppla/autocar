@@ -78,6 +78,26 @@ backpressure cannot be hidden by small idle gaps. Subsequent active samples can
 still reduce the target when capacity, RTT or loss changes. Fixed-rate and bypass
 modes are unchanged.
 
+The controller separately measures time actually spent waiting for missing
+tokens. Only one admission owner can sleep at a time, so concurrent writers do
+not multiply that duration; observations include an in-progress sleep and use
+the controller's own clock for its cumulative wait baseline. When this waiting
+occupies at least half a valid observation interval, a lower observed rate does
+not replace the unpenalized capacity history. Higher observations are still
+accepted. For valid delivery observations, current RTT and loss factors still
+apply to that capacity, not to a rate already reduced by the previous penalty. With no
+capacity history yet, a pacing-limited sample uses the configured initial rate
+as a prior; an unconstrained sample can replace it with a lower capacity.
+
+This qualification never subtracts waiting time from the delivery-rate
+denominator: QUIC can send already-queued bytes during an application wait.
+Actual transport backpressure remains outside token sleep. When a slower path
+fills the finite send buffers, predominantly transport-bound samples can age
+out the old bandwidth maximum. Sleep share is still an application-level
+heuristic, not proof that the path is uncongested. The controller does not add
+a separate capacity-probing phase: sustained RTT penalties can limit discovery
+of spare capacity until conditions or higher delivery observations change.
+
 This is intentionally not a full BBR state machine. In particular AutoCAR has
 no transport-visible BDP congestion window, ACK aggregation model, ProbeRTT
 drain, ECN policy, inflight bounds or BBRv2/BBRv3 logic. Calling it “real BBR”
