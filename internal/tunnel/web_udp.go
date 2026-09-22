@@ -438,7 +438,10 @@ type webUDPPacketConn struct {
 	closed   bool
 	sessions map[string]*webUDPClientSession
 	pending  map[string]*webUDPPendingSession
-	once     sync.Once
+	// Reports only a newly verified CONNECT-UDP response, never local enqueue.
+	// Protected by mu; invoked after releasing mu to avoid a Close lock cycle.
+	onAuthenticated func(bool)
+	once            sync.Once
 }
 
 func newWebUDPPacketConn(client *WebH3Client) *webUDPPacketConn {
@@ -458,6 +461,21 @@ func newWebUDPPacketConn(client *WebH3Client) *webUDPPacketConn {
 		packet.shutdown()
 	}()
 	return packet
+}
+
+func (p *webUDPPacketConn) setAuthenticationObserver(observer func(bool)) {
+	p.mu.Lock()
+	p.onAuthenticated = observer
+	p.mu.Unlock()
+}
+
+func (p *webUDPPacketConn) authenticatedResponse(connected bool) {
+	p.mu.Lock()
+	observer := p.onAuthenticated
+	p.mu.Unlock()
+	if observer != nil {
+		observer(connected)
+	}
 }
 
 func (p *webUDPPacketConn) Send(payload []byte, address string) error {
@@ -555,8 +573,13 @@ func (p *webUDPPacketConn) openSession(target string) (*webUDPClientSession, err
 	defer cancelOpen()
 	opened, err := p.client.openConnectUDPSession(openContext, target)
 	if err != nil {
+		var connectErr *WebConnectError
+		if errors.As(err, &connectErr) {
+			p.authenticatedResponse(false)
+		}
 		return nil, err
 	}
+	p.authenticatedResponse(true)
 	sessionContext, cancelSession := context.WithCancel(p.ctx)
 	session := &webUDPClientSession{
 		packet:     p,

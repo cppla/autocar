@@ -244,6 +244,12 @@ behavior and limits are in [WEB_COVER.md](WEB_COVER.md).
 Default local endpoints are loopback-only SOCKS5 `127.0.0.1:1080` and HTTP
 `127.0.0.1:8080`. Use `socks5h://` when the relay should resolve names.
 
+For SOCKS5 TCP and HTTP CONNECT tunnels, `--idle-timeout` (default `5m`)
+measures inactivity across both directions: an active download or upload does
+not need reverse-direction application traffic to stay open. A blocked write
+still has its own timeout, so an unresponsive receiver cannot retain a tunnel
+indefinitely. Ordinary forwarded HTTP bodies keep per-operation timeouts.
+
 Before leaving a client running, verify a real authenticated relay path with
 the same connection flags:
 
