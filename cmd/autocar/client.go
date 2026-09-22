@@ -64,7 +64,7 @@ func runClient(parent context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := validateProxyCredentials(*proxyUser, password, *socksAddress != ""); err != nil {
+		if err := validateProxyCredentials(*proxyUser, password, *socksAddress != "", *httpAddress != "" || *httpsAddress != ""); err != nil {
 			return err
 		}
 		authenticator = proxy.StaticAuthenticator(*proxyUser, password)
@@ -214,9 +214,12 @@ func runClient(parent context.Context, args []string) error {
 	return nil
 }
 
-func validateProxyCredentials(username, password string, socksEnabled bool) error {
+func validateProxyCredentials(username, password string, socksEnabled, httpEnabled bool) error {
 	if len(password) < 16 {
 		return errors.New("local proxy password must be at least 16 bytes")
+	}
+	if httpEnabled && strings.Contains(username, ":") {
+		return errors.New("local proxy username must not contain ':' when HTTP or HTTPS is enabled")
 	}
 	// RFC 1929 encodes both lengths in one byte. HTTP Basic itself allows
 	// longer values, so apply this compatibility bound only when SOCKS is on.

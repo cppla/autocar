@@ -144,19 +144,19 @@ func TestEnsureProtectedPlaintextListener(t *testing.T) {
 }
 
 func TestValidateProxyCredentials(t *testing.T) {
-	if err := validateProxyCredentials("alice", strings.Repeat("x", 16), true); err != nil {
+	if err := validateProxyCredentials("alice", strings.Repeat("x", 16), true, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateProxyCredentials("alice", "too-short", true); err == nil {
+	if err := validateProxyCredentials("alice", "too-short", true, true); err == nil {
 		t.Fatal("short local proxy password accepted")
 	}
-	if err := validateProxyCredentials(strings.Repeat("u", 256), strings.Repeat("p", 16), true); err == nil {
+	if err := validateProxyCredentials(strings.Repeat("u", 256), strings.Repeat("p", 16), true, true); err == nil {
 		t.Fatal("oversized SOCKS5 username accepted")
 	}
-	if err := validateProxyCredentials("alice", strings.Repeat("p", 256), true); err == nil {
+	if err := validateProxyCredentials("alice", strings.Repeat("p", 256), true, true); err == nil {
 		t.Fatal("oversized SOCKS5 password accepted")
 	}
-	if err := validateProxyCredentials(strings.Repeat("u", 256), strings.Repeat("p", 256), false); err != nil {
+	if err := validateProxyCredentials(strings.Repeat("u", 256), strings.Repeat("p", 256), false, true); err != nil {
 		t.Fatalf("HTTP-only credentials were incorrectly limited to RFC 1929: %v", err)
 	}
 }

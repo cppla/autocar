@@ -85,6 +85,9 @@ func NewHTTPServer(cfg Config) (*HTTPServer, error) {
 func (s *HTTPServer) Serve(listener net.Listener) error {
 	managed, err := s.lifecycle.manage(listener)
 	if err != nil {
+		if errors.Is(err, net.ErrClosed) {
+			return nil
+		}
 		return err
 	}
 	err = s.server.Serve(managed)

@@ -237,6 +237,7 @@ type serverLifecycle struct {
 	mu       sync.Mutex
 	listener net.Listener
 	tracker  *connTracker
+	stopped  bool
 }
 
 func newServerLifecycle(max int) *serverLifecycle {
@@ -248,17 +249,26 @@ func (s *serverLifecycle) manage(listener net.Listener) (*managedListener, error
 		return nil, errors.New("proxy: nil listener")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.stopped {
+		s.mu.Unlock()
+		// Shutdown may finish before the Serve goroutine is scheduled. Own
+		// and close this late listener, but never perform I/O under the lock.
+		_ = listener.Close()
+		return nil, net.ErrClosed
+	}
 	if s.listener != nil {
+		s.mu.Unlock()
 		return nil, errors.New("proxy: server is already serving")
 	}
 	s.listener = listener
+	s.mu.Unlock()
 	return &managedListener{Listener: listener, tracker: s.tracker}, nil
 }
 
 func (s *serverLifecycle) stopAccepting() error {
-	s.tracker.stopAccepting()
 	s.mu.Lock()
+	s.stopped = true
+	s.tracker.stopAccepting()
 	listener := s.listener
 	s.mu.Unlock()
 	if listener == nil {
