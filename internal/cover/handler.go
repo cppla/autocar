@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 var hopByHopHeaders = [...]string{
@@ -83,6 +84,11 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 		},
 		ModifyResponse: func(response *http.Response) error {
 			removeUnsafeHeaders(response.Header)
+			removeUnsafeHeaders(response.Trailer)
+			// An upgraded body is duplex, not an HTTP message with trailers.
+			if response.Body != nil && response.StatusCode != http.StatusSwitchingProtocols {
+				response.Body = &responseTrailerBody{body: response.Body, response: response}
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
@@ -91,6 +97,50 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
 	return proxy, nil
+}
+
+// responseTrailerBody filters fields that a transport discovers only at EOF
+// or Close, including replacement Trailer maps. It does not buffer the body.
+// Trailer must not be inspected while Read is in progress. Close may interrupt
+// that Read, so neither I/O operation holds mu: defer cleanup until concurrent
+// operations have returned rather than blocking Close on the reader.
+type responseTrailerBody struct {
+	body     io.ReadCloser
+	response *http.Response
+	mu       sync.Mutex
+	active   int
+	pending  bool
+}
+
+func (b *responseTrailerBody) Read(p []byte) (int, error) {
+	b.beginOperation()
+	n, err := b.body.Read(p)
+	b.finishOperation(err != nil)
+	return n, err
+}
+
+func (b *responseTrailerBody) Close() error {
+	b.beginOperation()
+	err := b.body.Close()
+	b.finishOperation(true)
+	return err
+}
+
+func (b *responseTrailerBody) beginOperation() {
+	b.mu.Lock()
+	b.active++
+	b.mu.Unlock()
+}
+
+func (b *responseTrailerBody) finishOperation(terminal bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.active--
+	b.pending = b.pending || terminal
+	if b.active == 0 && b.pending {
+		removeUnsafeHeaders(b.response.Trailer)
+		b.pending = false
+	}
 }
 
 func normalizeOrigin(origin *url.URL) (*url.URL, error) {
