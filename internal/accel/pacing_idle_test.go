@@ -84,6 +84,79 @@ func TestAdaptiveApplicationShortIdleGapsStillUpdateRate(t *testing.T) {
 	}
 }
 
+func TestAdaptiveMostlyActiveSamplesStillRespondToPath(t *testing.T) {
+	for _, condition := range []string{"slower_delivery", "loss", "rtt"} {
+		t.Run(condition, func(t *testing.T) {
+			controller := newTestAdaptive(t, ProfileBalanced)
+			snapshot := Snapshot{At: time.Unix(1, 0), MinRTT: time.Millisecond, SmoothedRTT: time.Millisecond}
+			mustObserveIdleSnapshot(t, controller, snapshot)
+			snapshot.At = snapshot.At.Add(time.Second)
+			snapshot.SentBytes = 1_000_000
+			mustObserveIdleSnapshot(t, controller, snapshot)
+			learned := controller.TargetBytesPerSecond()
+			for range deliveryRateWindow {
+				// A one-second paced or transport-blocked write is active demand.
+				// Its 20ms source-read gap exceeds the 10ms sample window, but
+				// must not discard the much longer active congestion observation.
+				snapshot.At = snapshot.At.Add(time.Second + 20*time.Millisecond)
+				snapshot.ApplicationIdleTime += 20 * time.Millisecond
+				delivered := uint64(1_000_000)
+				switch condition {
+				case "slower_delivery":
+					delivered = 100_000
+				case "loss":
+					snapshot.LostBytes += 200_000
+				case "rtt":
+					snapshot.SmoothedRTT = 2 * time.Millisecond
+				}
+				snapshot.SentBytes += delivered
+				beforeNext := controller.estimator.next
+				mustObserveIdleSnapshot(t, controller, snapshot)
+				if controller.estimator.next != (beforeNext+1)%deliveryRateWindow {
+					t.Fatal("mostly active interval did not update bandwidth history")
+				}
+			}
+			if got := controller.TargetBytesPerSecond(); got >= learned {
+				t.Fatalf("mostly active %s did not reduce target: %d >= %d", condition, got, learned)
+			}
+		})
+	}
+}
+
+func TestAdaptiveApplicationIdleHalfIntervalBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		idle     time.Duration
+		filtered bool
+	}{
+		{name: "just below half", idle: 12*time.Millisecond - time.Nanosecond},
+		{name: "exactly half", idle: 12 * time.Millisecond, filtered: true},
+		{name: "above half", idle: 13 * time.Millisecond, filtered: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			controller := newTestAdaptive(t, ProfileBalanced)
+			base := Snapshot{At: time.Unix(1, 0), MinRTT: time.Millisecond, SmoothedRTT: time.Millisecond}
+			mustObserveIdleSnapshot(t, controller, base)
+			sample := base
+			sample.At = base.At.Add(24 * time.Millisecond)
+			sample.SentBytes = 24_000
+			sample.ApplicationIdleTime = test.idle
+			mustObserveIdleSnapshot(t, controller, sample)
+			wantRate, wantCount := int64(1_080_000), 1
+			if test.filtered {
+				wantRate, wantCount = 1_000_000, 0
+			}
+			if controller.TargetBytesPerSecond() != wantRate || controller.estimator.count != wantCount {
+				t.Fatalf("idle=%s: target/history = %d/%d, want %d/%d", test.idle,
+					controller.TargetBytesPerSecond(), controller.estimator.count, wantRate, wantCount)
+			}
+			if controller.previous != sample {
+				t.Fatal("stable sample did not rebaseline counters")
+			}
+		})
+	}
+}
+
 func TestAdaptiveApplicationIdleRejectsNegativeTime(t *testing.T) {
 	for _, established := range []bool{false, true} {
 		controller := newTestAdaptive(t, ProfileBalanced)

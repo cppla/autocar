@@ -292,11 +292,13 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 	}
 	c.previous = snapshot
 
-	if idleDelta >= window {
+	if idleDelta >= window && idleDelta >= elapsed/2 {
 		// ACK/control traffic during application silence does not measure path
 		// capacity. Keep the learned target and estimator, but rebaseline so
 		// the next active interval does not inherit this idle time. Sub-window
 		// observations above retain both counters until this decision is made.
+		// Require idle time to dominate the interval: a short source gap after
+		// a long, flow-controlled write must not hide genuine path congestion.
 		return nil
 	}
 	if sentDelta == 0 || snapshot.MinRTT == 0 || snapshot.SmoothedRTT == 0 {

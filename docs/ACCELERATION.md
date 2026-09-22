@@ -61,8 +61,8 @@ Every target is clamped to configured minimum and maximum rates.
 The native adapter also tracks cumulative application-send idle time across
 the whole connection. Stream writes and datagram batches remain active while
 waiting for pacing tokens or QUIC capacity; overlapping sends count as one busy
-interval. If a
-sample contains at least one stable sampling window of idle time, the controller
+interval. If idle time spans both at least one stable sampling window and at
+least half the observed interval, the controller
 rebaselines the counters without changing its target or bandwidth history.
 The window is one quarter of minimum RTT, bounded to 10–250 ms. Cumulative
 accounting keeps idle gaps visible even when several writers sample inside
@@ -72,9 +72,11 @@ from being mistaken for low outbound capacity when traffic changes direction.
 This is a conservative application-idle filter, not transport-level knowledge
 of every queued packet. A discarded interval also does not update the
 application-layer RTT/loss response; the underlying QUIC congestion controller
-remains active throughout. Subsequent active samples can still reduce the
-target when capacity, RTT or loss changes. Fixed-rate and bypass modes are
-unchanged.
+remains active throughout. Predominantly busy intervals still update the
+estimate even when a short source gap exceeds one sampling window, so repeated
+backpressure cannot be hidden by small idle gaps. Subsequent active samples can
+still reduce the target when capacity, RTT or loss changes. Fixed-rate and bypass
+modes are unchanged.
 
 This is intentionally not a full BBR state machine. In particular AutoCAR has
 no transport-visible BDP congestion window, ACK aggregation model, ProbeRTT

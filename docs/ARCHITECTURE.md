@@ -206,8 +206,9 @@ congestion control, packetization, ACK handling and RFC 9002 recovery: upstream
 quic-go for native, and the pinned fork for web H3.
 
 Native adaptive samples include connection-wide application-send idle time.
-Intervals with a stable sampling window of no pending writes are rebaselined
-instead of turning ACK-only traffic into a low bandwidth estimate. Pending
+Intervals that are at least half idle, with a stable sampling window of no
+pending sends, are rebaselined instead of turning ACK-only traffic into a low
+bandwidth estimate. Predominantly busy intervals remain eligible. Pending
 pacing waits and blocked transport writes are not idle; concurrent streams
 share the activity accounting and ordered counter observations.
 
