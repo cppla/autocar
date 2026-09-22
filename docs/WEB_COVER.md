@@ -111,6 +111,12 @@ the upstream cannot be reached. Consequently, an upstream that requires an
 `Authorization` request header is not suitable without a separate authorized
 front end.
 
+Response credential filtering also covers trailers, including fields that an
+upstream adds only when its body ends. Ordinary end-to-end response trailers
+remain available, and the body is still streamed rather than buffered in full.
+This is defensive handling of upstream metadata, not an additional tunnel
+authentication mechanism.
+
 In web mode:
 
 - `--listen` is the UDP/H3 bind address and `--tcp-listen` is the TCP/H1/H2
