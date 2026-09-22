@@ -129,6 +129,15 @@ type Controller struct {
 	haveSnapshot bool
 	previous     Snapshot
 	estimator    adaptiveEstimator
+
+	// Only the admission owner sleeps for missing tokens. Count this interval
+	// once, not the overlapping Wait durations of queued writers. Observation
+	// baselines use our own clock, independently of a caller's Snapshot.At.
+	pacingSleepStarted      time.Time
+	pacingSleeping          bool
+	pacingSleepTime         time.Duration
+	previousPacingSleep     time.Duration
+	previousObservationTime time.Time
 }
 
 type normalizedConfig struct {
@@ -187,7 +196,7 @@ func New(config Config) (*Controller, error) {
 		lastRefill:  normalized.clock.Now(),
 		admission:   makeAdmissionToken(),
 		stateChange: make(chan struct{}),
-		estimator:   newAdaptiveEstimator(normalized.profile),
+		estimator:   newAdaptiveEstimator(normalized.profile, normalized.initialRate),
 	}, nil
 }
 
@@ -258,7 +267,7 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 	defer c.mu.Unlock()
 
 	if !c.haveSnapshot {
-		c.previous = snapshot
+		c.recordObservationLocked(snapshot, c.clock.Now())
 		c.haveSnapshot = true
 		return nil
 	}
@@ -269,7 +278,7 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 	if snapshot.SentBytes < c.previous.SentBytes || snapshot.ApplicationIdleTime < c.previous.ApplicationIdleTime {
 		// A cumulative counter reset denotes a new transport epoch. Rebaseline
 		// instead of interpreting wrapped counters as a huge delivery sample.
-		c.previous = snapshot
+		c.recordObservationLocked(snapshot, c.clock.Now())
 		c.estimator.reset()
 		c.setTargetRateLocked(c.initialRate)
 		return nil
@@ -284,13 +293,17 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 		return nil
 	}
 
+	now := c.clock.Now()
+	observationElapsed := now.Sub(c.previousObservationTime)
+	pacingElapsed := c.pacingTimeLocked(now) - c.previousPacingSleep
+	pacingLimited := observationElapsed > 0 && pacingElapsed > 0 && pacingElapsed >= observationElapsed/2
 	idleDelta := snapshot.ApplicationIdleTime - c.previous.ApplicationIdleTime
 	sentDelta := snapshot.SentBytes - c.previous.SentBytes
 	lostDelta := uint64(0)
 	if snapshot.LostBytes >= c.previous.LostBytes {
 		lostDelta = snapshot.LostBytes - c.previous.LostBytes
 	}
-	c.previous = snapshot
+	c.recordObservationLocked(snapshot, now)
 
 	if idleDelta >= window && idleDelta >= elapsed/2 {
 		// ACK/control traffic during application silence does not measure path
@@ -313,10 +326,27 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 	deliveredRate := float64(deliveredDelta) / elapsed.Seconds()
 	lossRatio := float64(lostDelta) / float64(sentDelta)
 
-	target := c.estimator.observe(deliveredRate, lossRatio, snapshot.MinRTT, snapshot.SmoothedRTT)
+	// QUIC can transmit queued bytes while our writer waits for tokens. Do not
+	// subtract pacing time from elapsed to invent a larger delivery rate. It
+	// only qualifies lower capacity samples; RTT/loss still affect the target.
+	target := c.estimator.observe(deliveredRate, lossRatio, snapshot.MinRTT, snapshot.SmoothedRTT, pacingLimited)
 	target = math.Max(float64(c.minimumRate), math.Min(float64(c.maximumRate), target))
 	c.setTargetRateLocked(int64(math.Round(target)))
 	return nil
+}
+
+func (c *Controller) recordObservationLocked(snapshot Snapshot, now time.Time) {
+	c.previous = snapshot
+	c.previousObservationTime = now
+	c.previousPacingSleep = c.pacingTimeLocked(now)
+}
+
+func (c *Controller) pacingTimeLocked(now time.Time) time.Duration {
+	elapsed := c.pacingSleepTime
+	if c.pacingSleeping && now.After(c.pacingSleepStarted) {
+		elapsed += now.Sub(c.pacingSleepStarted)
+	}
+	return elapsed
 }
 
 func stableSampleWindow(minimumRTT time.Duration) time.Duration {
@@ -388,9 +418,21 @@ func (c *Controller) admit(ctx context.Context, amount float64) error {
 		missing := amount - c.tokens
 		delay := durationForBytes(missing, c.targetRate)
 		stateChange := c.stateChange
+		if c.mode == ModeAdaptive {
+			c.pacingSleepStarted = c.clock.Now()
+			c.pacingSleeping = true
+		}
 		c.mu.Unlock()
 
-		if err := c.sleepUntilStateChange(ctx, delay, stateChange); err != nil {
+		err := c.sleepUntilStateChange(ctx, delay, stateChange)
+		if c.mode == ModeAdaptive {
+			c.mu.Lock()
+			c.pacingSleepTime = c.pacingTimeLocked(c.clock.Now())
+			c.pacingSleepStarted = time.Time{}
+			c.pacingSleeping = false
+			c.mu.Unlock()
+		}
+		if err != nil {
 			return err
 		}
 	}

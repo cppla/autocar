@@ -212,6 +212,13 @@ bandwidth estimate. Predominantly busy intervals remain eligible. Pending
 pacing waits and blocked transport writes are not idle; concurrent streams
 share the activity accounting and ordered counter observations.
 
+The controller also records its single admission owner's actual token sleeps.
+In pacing-dominated intervals, lower observations do not overwrite capacity
+history, but current RTT/loss penalties still apply. Transport-bound intervals
+can lower the estimate. This prevents an application-imposed rate reduction
+from repeatedly becoming the next capacity estimate; it neither bypasses
+QUIC congestion control nor infers wire capacity by subtracting sleep time.
+
 Web H2/H3 streams do not use the native pacing negotiation and report client
 and relay pacing as `not-applicable`. Fixed-rate is rejected with
 `web-auto`, `h3`, and `h2`.

@@ -22,13 +22,14 @@ type adaptiveSettings struct {
 // deliberately smaller than a transport congestion controller and has no
 // control over the transport's congestion window or retransmission behavior.
 type adaptiveEstimator struct {
-	settings adaptiveSettings
-	rates    [deliveryRateWindow]float64
-	next     int
-	count    int
+	settings    adaptiveSettings
+	initialRate float64
+	rates       [deliveryRateWindow]float64
+	next        int
+	count       int
 }
 
-func newAdaptiveEstimator(profile Profile) adaptiveEstimator {
+func newAdaptiveEstimator(profile Profile, initialRate int64) adaptiveEstimator {
 	settings := adaptiveSettings{}
 	switch profile {
 	case ProfileConservative:
@@ -59,7 +60,7 @@ func newAdaptiveEstimator(profile Profile) adaptiveEstimator {
 			minimumLossFactor: 0.60,
 		}
 	}
-	return adaptiveEstimator{settings: settings}
+	return adaptiveEstimator{settings: settings, initialRate: float64(initialRate)}
 }
 
 func (e *adaptiveEstimator) reset() {
@@ -73,17 +74,26 @@ func (e *adaptiveEstimator) observe(
 	lossRatio float64,
 	minimumRTT time.Duration,
 	smoothedRTT time.Duration,
+	pacingLimited bool,
 ) float64 {
-	e.rates[e.next] = math.Max(0, deliveredRate)
-	e.next = (e.next + 1) % len(e.rates)
-	if e.count < len(e.rates) {
-		e.count++
+	deliveredRate = math.Max(0, deliveredRate)
+	bottleneckRate := e.bandwidthEstimate()
+	if !pacingLimited || deliveredRate > bottleneckRate {
+		// An application pacing limit censors lower capacity observations. Do
+		// not let those samples replace the unpenalized bandwidth history with
+		// the result of our own previous RTT/loss reduction. Higher observations
+		// remain useful evidence, and unconstrained samples can age out an old
+		// maximum when the path really becomes slower.
+		e.rates[e.next] = deliveredRate
+		e.next = (e.next + 1) % len(e.rates)
+		if e.count < len(e.rates) {
+			e.count++
+		}
+		bottleneckRate = e.bandwidthEstimate()
 	}
 
-	bottleneckRate := float64(0)
-	for index := 0; index < e.count; index++ {
-		bottleneckRate = math.Max(bottleneckRate, e.rates[index])
-	}
+	// Always apply current congestion signals to capacity evidence, even when
+	// a pacing-limited sample was not allowed to change that evidence.
 	target := bottleneckRate * e.settings.pacingGain
 
 	rttRatio := float64(smoothedRTT) / float64(minimumRTT)
@@ -96,4 +106,17 @@ func (e *adaptiveEstimator) observe(
 		target *= math.Max(e.settings.minimumLossFactor, lossFactor)
 	}
 	return target
+}
+
+func (e *adaptiveEstimator) bandwidthEstimate() float64 {
+	if e.count == 0 {
+		// This is only a prior, not a permanent minimum or a history entry. The
+		// first non-limited observation may establish a lower path capacity.
+		return e.initialRate
+	}
+	maximum := float64(0)
+	for index := 0; index < e.count; index++ {
+		maximum = math.Max(maximum, e.rates[index])
+	}
+	return maximum
 }
