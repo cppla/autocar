@@ -991,8 +991,18 @@ func sendQUICDatagram(
 	pacer *connectionPacer,
 	queued queuedDatagram,
 ) error {
-	frameSize := defaultUDPFrameSize
 	frames := queued.frames
+	if len(frames) == 0 {
+		return nil
+	}
+	if err := context.Cause(queued.ctx); err != nil {
+		return err
+	}
+	if pacer != nil {
+		pacer.beginWrite()
+		defer pacer.endWrite()
+	}
+	frameSize := defaultUDPFrameSize
 	for attempt := 0; attempt < 2; attempt++ {
 		var err error
 		for index, frame := range frames {

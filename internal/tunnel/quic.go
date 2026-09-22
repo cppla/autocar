@@ -1155,6 +1155,13 @@ type quicWritePacer interface {
 	maxChunkBytes() int
 }
 
+// quicWriteActivity optionally tracks application write demand across pacing
+// waits and transport backpressure, rather than just time spent admitting bytes.
+type quicWriteActivity interface {
+	beginWrite()
+	endWrite()
+}
+
 type quicStreamConn struct {
 	stream               quicStream
 	conn                 *quic.Conn
@@ -1207,6 +1214,12 @@ func (c *quicStreamConn) Write(p []byte) (int, error) {
 	c.writeStateMu.Unlock()
 	if closed {
 		return 0, net.ErrClosed
+	}
+	if len(p) > 0 {
+		if activity, ok := c.pacer.(quicWriteActivity); ok {
+			activity.beginWrite()
+			defer activity.endWrite()
+		}
 	}
 	chunkSize := len(p)
 	if c.pacer != nil {
