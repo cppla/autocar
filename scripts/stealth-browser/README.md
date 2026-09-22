@@ -85,9 +85,12 @@ docker run --rm --network '<owned-internal-network>' \
   --server 10.203.0.10:8443 \
   --workload download_128k \
   --seed 12345 \
+  --certificate-spki-sha256 '<canonical leaf SPKI SHA-256 in Base64>' \
   --accept-insecure-certs
 ```
 
+Replace the SPKI placeholder with the lab certificate's pin; Chromium H3
+requires it. Do not supply this option to Firefox or an H2 run.
 `--accept-insecure-certs` is an explicit option for an isolated, owned RFC1918
 lab certificate. Omit it when the runner image already trusts the lab CA.
 
@@ -95,6 +98,28 @@ On success, stdout contains exactly one compact JSON object with the frozen
 receipt fields. Browser and WebDriver diagnostics never share stdout. Any
 navigation, payload, result-length, Resource Timing, identity, or requested
 protocol mismatch exits nonzero without printing a success receipt.
+
+## Optional credentials diagnostic
+
+For a separate connection-reuse diagnostic, add
+`--diagnostic-fetch-credentials omit` or
+`--diagnostic-fetch-credentials same-origin` to an otherwise working invocation
+with **`--protocol h3 --workload download_1k`**. The runner still verifies the
+bootstrap navigation, response bytes, browser identity and actual H3 protocol;
+only the subsequent fetch's credentials mode changes.
+
+Without the option, the frozen workload, 13-field formal receipt and result
+hash remain unchanged. Explicit `omit` is diagnostic too: both treatments emit
+the distinct `browser-h3-credentials-diagnostic` kind with
+`status: insufficient_evidence` and `execution_status: pass`. The digest binds
+the treatment; these receipts cannot be submitted as formal campaign evidence.
+Keep their outputs in a separate diagnostic artifact directory, without
+rewriting prior captures or preregistrations.
+
+This workflow still requires the RFC1918 fixture contract above. The separate
+[loopback connection fixture](../browser-connection-fixture/README.md) serves
+`/probe` instead and is **not** an interchangeable server for this runner.
+Neither diagnostic is the formal corpus or a production traffic optimization.
 
 Offline checks do not start Docker, a browser, or a network listener:
 

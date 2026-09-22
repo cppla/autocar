@@ -44,6 +44,12 @@ jobs:
       - name: Release contract regression tests
         if: matrix.go == '1.27.x'
         run: make release-recipe-check
+      - name: Browser runner diagnostic regression tests (offline)
+        if: matrix.go == '1.27.x'
+        run: |
+          python3 -m unittest scripts/stealth-browser/test_run_cover.py
+          python3 scripts/stealth-browser/run_cover.py --self-test
+          python3 scripts/stealth-campaign.py --self-test
       - name: Test with coverage
         run: go test -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
       - name: Upload coverage

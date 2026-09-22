@@ -1,6 +1,7 @@
 /bin/
 /dist/
 /artifacts/
+/output/playwright/
 /testdata/stealth/pcaps/
 /coverage.out
 *.prof
