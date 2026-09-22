@@ -35,6 +35,8 @@ func run(ctx context.Context, args []string) (err error) {
 		err = runServer(ctx, args[1:])
 	case "cert":
 		err = runCert(args[1:])
+	case "init":
+		err = runInit(args[1:])
 	case "token":
 		err = runToken(args[1:])
 	case "bench-server":
@@ -65,6 +67,7 @@ func printUsage() {
 Usage:
   autocar server [options]       run the remote native or web-cover relay
   autocar client [options]       run local SOCKS5 and HTTP(S) proxies
+  autocar init [options]         generate a new private native deployment bundle
   autocar cert [options]         generate a self-signed TLS certificate
   autocar token [options]        generate a strong shared token
   autocar bench-server [options] run a benchmark source/sink target

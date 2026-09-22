@@ -9,6 +9,48 @@ relay and an `auto` client; installing v1.0.1 does not enable web-cover.
 
 ## 1. Build and create credentials
 
+### Generate a new paired bundle
+
+With a build containing `init` and `--check` (not the published v1.0.1 binary),
+you can generate matching native server/client configuration without contacting
+any network:
+
+```bash
+go build -trimpath -o autocar ./cmd/autocar
+./autocar init --server relay.example.com:8443 --out ./autocar-config
+./autocar server --config ./autocar-config/server/server.json --check
+./autocar client --config ./autocar-config/client/client.json --check
+```
+
+Replace the relay address with yours. The output parent directory must exist;
+the output directory must NOT exist. Existing paths, including empty directories
+and symlinks, are refused. `init` is for new deployments, not credential rotation.
+It generates a random 32-byte shared token and an ECDSA self-signed certificate;
+`--days` controls certificate validity (default 365, range 1-1825). The default
+certificate name comes from the relay host; `--server-name` selects an explicit
+DNS/IP certificate identity, for example when connecting to an IP. No DNS lookup
+is needed. Plan certificate renewal and trust-anchor redistribution separately.
+
+Transfer only `server/` to the relay and only `client/` to the client through an
+authenticated channel. The private key stays in `server/`. Both directories
+contain the shared token and must remain private. Unix directories are `0700`
+and files `0600`; Windows deployments must restrict their ACLs independently.
+Assign ownership/read access to each host's runtime user. Generated `.gitignore`
+files help prevent accidental Git adds; they are not a storage/access boundary.
+If writing fails, the incomplete private directory is preserved for inspection;
+do not deploy it or expect a retry to overwrite it.
+
+Run `server --config /path/to/server/server.json` on the relay and
+`client --config /path/to/client/client.json` locally. Config-relative paths make
+the two directories independently movable. Both TCP and UDP listeners use the
+numeric port in `--server`. No firewall, DNS, service installation or system
+settings are changed. Low ports still require appropriate capability/port
+mapping; don't use root simply to bind a low port. Local proxy listeners stay
+loopback-only and the default destination policy is unchanged. For public-CA or
+experimental web-cover deployments, use the manual configuration below instead.
+
+### Manual credentials and runtime user
+
 ```bash
 go build -trimpath -o autocar ./cmd/autocar
 sudo install -o root -g root -m 0755 autocar /usr/local/bin/autocar
@@ -277,6 +319,19 @@ Server files are separate and cannot be used as client connection profiles.
 Use a trusted, runtime-readable config and restart the process after editing it.
 `--help` never reads config files or starts a network probe.
 
+Before starting either endpoint, add `--check` to its normal `client` or `server`
+command. It validates local option combinations and credential files without
+binding a listener, resolving a hostname, connecting a peer, or modifying files.
+Web-cover paths are checked locally but upstream health is not requested.
+It can succeed even when the configured ports are occupied or the relay is
+unreachable. It does not validate remote certificate identity, reachability,
+firewalls, host-local port availability, or permissions needed to bind a port.
+Address ports must be numeric for `--check`, avoiding service-name resolution;
+normal startup continues to accept its existing service-name syntax.
+`--check` is a command-line-only operation: a JSON `check` key is rejected even
+if false or overridden, so a saved service configuration cannot silently turn
+startup into a one-shot check. Remove the flag to actually run the service.
+
 For routine diagnosis, use the same file with `doctor`, then temporarily require
 `--transport=tls` (native) or `--transport=h2` (web) to isolate the TCP path. A
 successful TCP check does not validate UDP. Fallback/recovery applies to new
@@ -322,6 +377,9 @@ To require a client certificate, configure `--client-ca` on the relay and
 authorization factor. This is available only in native mode. Web-cover rejects
 mTLS on both sides so that ordinary visitors can reach the cover site; its
 per-request HMAC ticket remains mandatory for tunnel access.
+
+An explicitly configured empty or malformed client CA file is an error, not a
+request to turn off mTLS. Both normal startup and `--check` reject it.
 
 SOCKS5 username/password and HTTP Basic are cleartext on the local hop. Keep
 those listeners on loopback or enable the local HTTPS proxy. A non-loopback

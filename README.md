@@ -86,7 +86,44 @@ cd autocar
 go build -trimpath -o autocar ./cmd/autocar
 ```
 
-生成独立令牌与含真实 SAN 的证书：
+### 新部署：生成两端配置并先检查
+
+以下 `init` 与 `--check` 需要包含这些功能的源码构建，已发布的 v1.0.1 不支持。
+将示例地址换成你的中继地址；无需 DNS 查询或连接远端即可生成：
+
+```bash
+./autocar init --server relay.example.com:8443 --out ./autocar-config
+./autocar server --config ./autocar-config/server/server.json --check
+./autocar client --config ./autocar-config/client/client.json --check
+```
+
+生成的 `server/` 包含服务端配置、证书、私钥和随机令牌；`client/` 只包含客户端配置、
+信任证书和相同令牌，不含私钥。通过可信通道把两份目录分别送到对应机器，保持权限
+并交给服务运行用户，再执行：
+
+```bash
+# 在中继机器上，路径换成实际 server/ 目录
+autocar server --config /path/to/server/server.json
+# 在客户端，路径换成实际 client/ 目录
+autocar doctor --config /path/to/client/client.json --target example.com:443
+autocar client --config /path/to/client/client.json
+```
+
+`init` 只生成 native/auto 的新部署，不安装服务、不改防火墙、不轮换现有凭据。
+`--out` 的父目录必须存在，目标目录必须不存在；即使已有目录为空也拒绝覆盖。
+默认生成有效期 365 天的自签名证书（`--days` 可调）；用 IP 连接但希望使用 DNS 证书名时，
+可指定 `--server-name`。服务端监听与 `--server` 相同的数字端口，仍须自行开放 TCP/UDP。
+Unix 目录权限为 `0700`、文件为 `0600`；Windows 需另行限制 ACL。
+不要分享或提交这些目录到 Git，自动生成的 `.gitignore` 只是防误操作。
+
+`--check` 只读取本地配置和凭据，不查询 DNS、不开监听端口、不连接中继或目标。
+它不能证明端口可绑定、网络可达或远端证书身份正确；真实链路仍用 `doctor` 检查。
+离线检查要求地址使用数字端口；正常启动的服务名端口用法保留。
+`check` 不能写入 JSON 配置，必须在命令行显式指定。
+
+### 手动配置
+
+也可分别生成独立令牌与含真实 SAN 的证书：
 
 ```bash
 ./autocar token --out token

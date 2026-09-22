@@ -27,6 +27,7 @@ func runClient(parent context.Context, args []string) error {
 	fs := flag.NewFlagSet("client", flag.ContinueOnError)
 	var tf tunnelFlags
 	addTunnelFlags(fs, &tf)
+	check := fs.Bool("check", false, "validate local configuration and exit without DNS, network connections, or listeners (numeric ports required)")
 	socksAddress := fs.String("socks", "127.0.0.1:1080", "local SOCKS5 address; empty disables")
 	httpAddress := fs.String("http", "127.0.0.1:8080", "local HTTP proxy address; empty disables")
 	httpsAddress := fs.String("https", "", "local HTTPS proxy address; empty disables")
@@ -46,6 +47,9 @@ func runClient(parent context.Context, args []string) error {
 	}
 	if *maxConnections <= 0 {
 		return errors.New("--max-connections must be positive")
+	}
+	if *idleTimeout < 0 {
+		return errors.New("--idle-timeout must not be negative")
 	}
 	if (*proxyCert == "") != (*proxyKey == "") {
 		return errors.New("--proxy-cert and --proxy-key must be supplied together")
@@ -82,12 +86,31 @@ func runClient(parent context.Context, args []string) error {
 			}
 		}
 	}
+	if *check {
+		if err := checkClientAddresses(tf, *socksAddress, *httpAddress, *httpsAddress); err != nil {
+			return err
+		}
+	}
+	var proxyCertificate tls.Certificate
+	if *httpsAddress != "" {
+		var err error
+		proxyCertificate, err = security.LoadKeyPair(*proxyCert, *proxyKey)
+		if err != nil {
+			return err
+		}
+	}
 
 	dialer, err := buildTunnelDialer(tf)
 	if err != nil {
 		return err
 	}
 	defer dialer.Close()
+	if *check {
+		// Transport constructors validate credentials and options, but open no
+		// connections. Close the prepared dialer without ever calling Dial.
+		reportLocalConfigurationCheck("client")
+		return nil
+	}
 	proxyConfig := proxy.Config{
 		Dialer:           dialer,
 		Authenticator:    authenticator,
@@ -140,16 +163,10 @@ func runClient(parent context.Context, args []string) error {
 			closePrepared()
 			return fmt.Errorf("listen HTTPS proxy: %w", err)
 		}
-		certificate, err := security.LoadKeyPair(*proxyCert, *proxyKey)
-		if err != nil {
-			listener.Close()
-			closePrepared()
-			return err
-		}
 		listener = tls.NewListener(listener, &tls.Config{
 			MinVersion:   tls.VersionTLS13,
 			MaxVersion:   tls.VersionTLS13,
-			Certificates: []tls.Certificate{certificate},
+			Certificates: []tls.Certificate{proxyCertificate},
 			NextProtos:   []string{"http/1.1"},
 		})
 		server, err := proxy.NewHTTPServer(proxyConfig)

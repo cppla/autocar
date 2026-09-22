@@ -461,20 +461,25 @@ create_secret_volume "$invalid_client_volume"
 	--cap-drop=ALL \
 	--security-opt no-new-privileges:true \
 	--mount "type=volume,src=${relay_volume},dst=/run/autocar" \
-	"$integration_image_id" cert \
-	--hosts=relay \
-	--cert=/run/autocar/server.crt \
-	--key=/run/autocar/server.key
+	"$integration_image_id" init \
+	--server=relay:8443 \
+	--out=/run/autocar/setup
+
+# Both checks run without network access and outside the configuration
+# directory. They must load paths relative to each JSON file, without
+# resolving the relay hostname, binding listeners, or changing credentials.
 "$docker_bin" run --rm \
 	--name "$token_container" \
 	--label "$integration_label" \
 	--network none \
+	--workdir=/licenses \
 	--read-only \
 	--cap-drop=ALL \
 	--security-opt no-new-privileges:true \
-	--mount "type=volume,src=${relay_volume},dst=/run/autocar" \
-	"$integration_image_id" token \
-	--out=/run/autocar/relay-token
+	--mount "type=volume,src=${relay_volume},dst=/run/autocar,readonly" \
+	"$integration_image_id" server \
+	--config=/run/autocar/setup/server/server.json \
+	--check
 "$docker_bin" run --rm \
 	--name "$wrong_token_container" \
 	--label "$integration_label" \
@@ -498,18 +503,40 @@ create_secret_volume "$invalid_client_volume"
 	--mount "type=volume,src=${valid_client_volume},dst=/run/valid-client" \
 	--mount "type=volume,src=${invalid_client_volume},dst=/run/invalid-client" \
 	"$alpine_image" /bin/sh -eu -c '
-		cp /run/relay/server.crt /run/valid-client/server.crt
-		cp /run/relay/relay-token /run/valid-client/relay-token
-		cp /run/relay/server.crt /run/invalid-client/server.crt
-		chmod 0600 /run/valid-client/server.crt /run/valid-client/relay-token
+		for directory in /run/relay/setup /run/relay/setup/server /run/relay/setup/client; do
+			test "$(stat -c %a "$directory")" = 700
+		done
+		cp /run/relay/setup/client/client.json /run/valid-client/client.json
+		cp /run/relay/setup/client/server.crt /run/valid-client/server.crt
+		cp /run/relay/setup/client/relay-token /run/valid-client/relay-token
+		cp /run/relay/setup/client/server.crt /run/invalid-client/server.crt
+		chmod 0600 /run/valid-client/client.json /run/valid-client/server.crt /run/valid-client/relay-token
 		chmod 0600 /run/invalid-client/server.crt /run/invalid-client/wrong-token
-		test -r /run/relay/server.key
-		test ! -e /run/relay/wrong-token
+		test -r /run/relay/setup/server/server.key
+		test ! -e /run/relay/setup/server/wrong-token
+		test ! -e /run/relay/setup/client/server.key
+		test ! -e /run/relay/setup/client/client.key
 		test ! -e /run/valid-client/server.key
 		test ! -e /run/valid-client/wrong-token
 		test ! -e /run/invalid-client/server.key
 		test ! -e /run/invalid-client/relay-token
 	'
+
+# Reuse the already removed check container name so cleanup retains the same
+# exact, uniquely labeled resource scope. Only the exported client bundle is
+# mounted: this also catches accidental dependencies on server private files.
+"$docker_bin" run --rm \
+	--name "$token_container" \
+	--label "$integration_label" \
+	--network none \
+	--workdir=/licenses \
+	--read-only \
+	--cap-drop=ALL \
+	--security-opt no-new-privileges:true \
+	--mount "type=volume,src=${valid_client_volume},dst=/run/autocar,readonly" \
+	"$integration_image_id" client \
+	--config=/run/autocar/client.json \
+	--check
 
 integration_network_id=$("$docker_bin" network create --label "$integration_label" "$integration_network")
 network_label=$("$docker_bin" network inspect \
@@ -544,11 +571,7 @@ relay_container_id=$("$docker_bin" run -d \
 	--security-opt no-new-privileges:true \
 	--mount "type=volume,src=${relay_volume},dst=/run/autocar,readonly" \
 	"$integration_image_id" server \
-	--listen=:8443 \
-	--tcp-listen=:8443 \
-	--cert=/run/autocar/server.crt \
-	--key=/run/autocar/server.key \
-	--token-file=/run/autocar/relay-token \
+	--config=/run/autocar/setup/server/server.json \
 	--allow-private \
 	--max-streams=8 \
 	--max-connections=4 \
@@ -584,12 +607,10 @@ if doctor_output=$("$docker_bin" run --rm \
 	--security-opt no-new-privileges:true \
 	--mount "type=volume,src=${valid_client_volume},dst=/run/autocar,readonly" \
 	"$integration_image_id" doctor \
+	--config=/run/autocar/client.json \
 	--transport=auto \
 	--server=relay:9443 \
 	--fallback-server=relay:8443 \
-	--server-name=relay \
-	--ca=/run/autocar/server.crt \
-	--token-file=/run/autocar/relay-token \
 	--target=target:9000 \
 	--dial-timeout=1s \
 	--quic-attempt-timeout=750ms \
@@ -613,4 +634,4 @@ expect_auth_rejected tls relay:8443
 assert_services_running
 
 integration_passed=1
-echo "docker integration passed: QUIC, TLS, auto fallback, doctor, token rejection, non-root read-only containers"
+echo "docker integration passed: init, offline config checks, QUIC, TLS, auto fallback, doctor, token rejection, non-root read-only containers"

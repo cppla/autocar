@@ -36,6 +36,7 @@ func TestValidateServerProtocolOptions(t *testing.T) {
 		{name: "web missing cover", protocol: "web", wantError: "exactly one"},
 		{name: "web ambiguous cover", protocol: "web", root: "/srv/www", upstream: "https://cover.example", wantError: "exactly one"},
 		{name: "web client CA", protocol: "web", root: "/srv/www", clientCA: "clients.pem", wantError: "incompatible"},
+		{name: "web whitespace client CA", protocol: "web", root: "/srv/www", clientCA: " ", wantError: "incompatible"},
 		{name: "web without H2", protocol: "web", root: "/srv/www", disableFallback: true, wantError: "HTTP/2"},
 	}
 	for _, test := range tests {
