@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +24,7 @@ import (
 
 func runServer(parent context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	check := fs.Bool("check", false, "validate local configuration and exit without DNS, network connections, or listeners (numeric ports required)")
 	serverProtocolText := fs.String("protocol", "native", "relay protocol: native or web")
 	listen := fs.String("listen", ":443", "primary UDP listen address")
 	tcpListen := fs.String("tcp-listen", "", "TCP listener address; defaults to --listen")
@@ -127,20 +128,25 @@ func runServer(parent context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateServerLocalLimits(token, *handshakeTimeout, *dialTimeout, maxUpload, maxDownload); err != nil {
+		return err
+	}
 	certificate, err := security.LoadKeyPair(*certFile, *keyFile)
 	if err != nil {
 		return err
 	}
-	var clientCAPEM []byte
+	var clientCAs *x509.CertPool
 	if *clientCAFile != "" {
-		clientCAPEM, err = os.ReadFile(*clientCAFile)
+		// An explicitly configured but empty CA must fail closed. Passing an
+		// empty PEM slice to NewServerTLSConfig means mTLS was not requested.
+		clientCAs, err = security.LoadCertPool(*clientCAFile)
 		if err != nil {
 			return fmt.Errorf("read client CA: %w", err)
 		}
 	}
 	tlsConfig, err := security.NewServerTLSConfig(security.ServerTLSOptions{
 		Certificates: []tls.Certificate{certificate},
-		ClientCAPEM:  clientCAPEM,
+		ClientCAs:    clientCAs,
 	})
 	if err != nil {
 		return err
@@ -152,6 +158,20 @@ func runServer(parent context.Context, args []string) error {
 	deniedPrefixes, err := parseDeniedPrefixes(*deniedCIDRsText)
 	if err != nil {
 		return err
+	}
+	var coverHandler http.Handler
+	if serverProtocol == "web" {
+		coverHandler, err = buildCoverHandler(*coverRoot, *coverUpstream)
+		if err != nil {
+			return err
+		}
+	}
+	if *check {
+		if err := checkServerAddresses(serverProtocol, *listen, *tcpListen, *disableFallback); err != nil {
+			return err
+		}
+		reportLocalConfigurationCheck("server")
+		return nil
 	}
 	safeDialer := security.NewSafeDialer(security.SafeDialerOptions{
 		AllowPrivate:   *allowPrivate,
@@ -167,10 +187,6 @@ func runServer(parent context.Context, args []string) error {
 		return fmt.Errorf("configure stream admission: %w", err)
 	}
 	if serverProtocol == "web" {
-		coverHandler, err := buildCoverHandler(*coverRoot, *coverUpstream)
-		if err != nil {
-			return err
-		}
 		webServer, err := tunnel.ListenWeb(tunnel.WebServerConfig{
 			TCPAddress:           *tcpListen,
 			UDPAddress:           *listen,
@@ -302,7 +318,7 @@ func validateServerProtocolOptions(protocolMode, clientCAFile, coverRoot, coverU
 		return fmt.Errorf("invalid --protocol %q; want native or web", protocolMode)
 	}
 
-	if strings.TrimSpace(clientCAFile) != "" {
+	if clientCAFile != "" {
 		return errors.New("--client-ca is incompatible with --protocol=web because the cover origin must remain publicly reachable")
 	}
 	if disableFallback {

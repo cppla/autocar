@@ -121,9 +121,10 @@ func CertPoolFromPEM(caPEM []byte) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// LoadCertPool reads PEM trust anchors from path.
+// LoadCertPool reads PEM trust anchors from a regular file no larger than 4 MiB.
+// Symlinks to regular files are supported.
 func LoadCertPool(path string) (*x509.CertPool, error) {
-	caPEM, err := os.ReadFile(path)
+	caPEM, err := readTLSMaterialFile(path, "CA file", false)
 	if err != nil {
 		return nil, fmt.Errorf("read CA file: %w", err)
 	}
@@ -135,60 +136,71 @@ func LoadCertPool(path string) (*x509.CertPool, error) {
 }
 
 // LoadKeyPair loads a PEM certificate and private key suitable for the TLS
-// option types in this package.
+// option types in this package. Both inputs must resolve to regular files no
+// larger than 4 MiB; private keys require mode 0600 on Unix.
 func LoadKeyPair(certFile, keyFile string) (tls.Certificate, error) {
-	key, err := os.Open(keyFile)
+	keyPEM, err := readTLSMaterialFile(keyFile, "TLS private key", true)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("open TLS private key: %w", err)
+		return tls.Certificate{}, err
 	}
-	defer key.Close()
-	info, err := key.Stat()
+	certPEM, err := readTLSMaterialFile(certFile, "TLS certificate", false)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("stat TLS private key: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return tls.Certificate{}, errors.New("security: TLS private key is not a regular file")
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		return tls.Certificate{}, fmt.Errorf("security: TLS private key %q permissions are %04o; want 0600", keyFile, info.Mode().Perm())
-	}
-	if info.Size() > maxTLSMaterialSize {
-		return tls.Certificate{}, fmt.Errorf("security: TLS private key exceeds %d bytes", maxTLSMaterialSize)
-	}
-	keyPEM, err := io.ReadAll(io.LimitReader(key, maxTLSMaterialSize+1))
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("read TLS private key: %w", err)
-	}
-	if len(keyPEM) > maxTLSMaterialSize {
-		return tls.Certificate{}, fmt.Errorf("security: TLS private key exceeds %d bytes", maxTLSMaterialSize)
-	}
-	certFileHandle, err := os.Open(certFile)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("open TLS certificate: %w", err)
-	}
-	defer certFileHandle.Close()
-	certInfo, err := certFileHandle.Stat()
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("stat TLS certificate: %w", err)
-	}
-	if !certInfo.Mode().IsRegular() {
-		return tls.Certificate{}, errors.New("security: TLS certificate is not a regular file")
-	}
-	if certInfo.Size() > maxTLSMaterialSize {
-		return tls.Certificate{}, fmt.Errorf("security: TLS certificate exceeds %d bytes", maxTLSMaterialSize)
-	}
-	certPEM, err := io.ReadAll(io.LimitReader(certFileHandle, maxTLSMaterialSize+1))
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("read TLS certificate: %w", err)
-	}
-	if len(certPEM) > maxTLSMaterialSize {
-		return tls.Certificate{}, fmt.Errorf("security: TLS certificate exceeds %d bytes", maxTLSMaterialSize)
+		return tls.Certificate{}, err
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("load TLS key pair: %w", err)
 	}
 	return cert, nil
+}
+
+// readTLSMaterialFile accepts bounded regular files, including symlinks to
+// them. The pre-open check prevents accidental FIFO/device inputs from blocking
+// at Open. It is not a race-free guarantee for attacker-writable directories;
+// deployment credentials and their parent directories must remain trusted.
+func readTLSMaterialFile(path, description string, private bool) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		// Keep the public loader's existing open-error category for unavailable
+		// paths, even when preflight can detect that failure before Open.
+		return nil, fmt.Errorf("open %s: %w", description, err)
+	}
+	if err := validateTLSMaterialFile(info, path, description, private); err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", description, err)
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", description, err)
+	}
+	if err := validateTLSMaterialFile(info, path, description, private); err != nil {
+		return nil, err
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maxTLSMaterialSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", description, err)
+	}
+	if len(contents) > maxTLSMaterialSize {
+		return nil, fmt.Errorf("security: %s exceeds %d bytes", description, maxTLSMaterialSize)
+	}
+	return contents, nil
+}
+
+func validateTLSMaterialFile(info os.FileInfo, path, description string, private bool) error {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("security: %s is not a regular file", description)
+	}
+	if private && runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("security: %s %q permissions are %04o; want 0600", description, path, info.Mode().Perm())
+	}
+	if info.Size() > maxTLSMaterialSize {
+		return fmt.Errorf("security: %s exceeds %d bytes", description, maxTLSMaterialSize)
+	}
+	return nil
 }
 
 func explicitCertPool(base *x509.CertPool, caPEM []byte) (*x509.CertPool, error) {

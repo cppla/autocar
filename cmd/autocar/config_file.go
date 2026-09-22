@@ -49,7 +49,7 @@ func parseFlagsWithConfig(fs *flag.FlagSet, args []string) error {
 	sort.Strings(keys)
 	for _, name := range keys {
 		f := fs.Lookup(name)
-		if f == nil || name == "config" {
+		if f == nil || name == "config" || name == "check" {
 			return fmt.Errorf("unknown or unsupported config option %q for %s", name, fs.Name())
 		}
 		value, err := commandConfigValue(f, values[name])
