@@ -13,25 +13,39 @@ var relayBufferPool = sync.Pool{New: func() any {
 	return &buffer
 }}
 
-// activityConn applies an inactivity timeout to every blocking read and
-// write. It is used for HTTP origin connections, whose request/response body
-// phase is otherwise not covered by net/http's header and keepalive timeouts.
+// activityConn bounds HTTP origin reads by connection inactivity and writes
+// by their own stall timeout. Upload progress keeps the concurrent response
+// read alive even when the origin waits for the full request body to respond.
 type activityConn struct {
 	net.Conn
-	timeout time.Duration
+	timeout        time.Duration
+	readDeadlineMu sync.Mutex
 }
 
 func (c *activityConn) Read(p []byte) (int, error) {
-	if c.timeout > 0 {
-		if err := c.Conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
-			return 0, err
-		}
+	if err := c.refreshReadActivity(); err != nil {
+		return 0, err
 	}
 	return c.Conn.Read(p)
 }
 
 func (c *activityConn) Write(p []byte) (int, error) {
-	return writeWithStallDeadline(c.Conn, p, c.timeout)
+	n, err := writeWithStallDeadline(c.Conn, p, c.timeout)
+	if n > 0 {
+		if activityErr := c.refreshReadActivity(); err == nil {
+			err = activityErr
+		}
+	}
+	return n, err
+}
+
+func (c *activityConn) refreshReadActivity() error {
+	if c.timeout <= 0 {
+		return nil
+	}
+	c.readDeadlineMu.Lock()
+	defer c.readDeadlineMu.Unlock()
+	return c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
 }
 
 // Bound only the pending write. In particular, H2 streams implement deadlines

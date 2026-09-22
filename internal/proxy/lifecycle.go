@@ -111,7 +111,22 @@ func (c *trackedConn) Write(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	return c.Conn.Write(p)
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		if activityErr := c.refreshReadActivity(); err == nil {
+			err = activityErr
+		}
+	}
+	return n, err
+}
+
+func (c *trackedConn) refreshReadActivity() error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	if timeout := time.Duration(c.activityTimeout.Load()); timeout > 0 {
+		return c.Conn.SetReadDeadline(earlierDeadline(time.Now().Add(timeout), c.externalRead))
+	}
+	return nil
 }
 
 // SetDeadline records deadlines imposed by net/http. Activity deadlines are

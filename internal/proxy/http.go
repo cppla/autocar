@@ -30,6 +30,8 @@ type HTTPServer struct {
 	transport *http.Transport
 }
 
+type httpConnContextKey struct{}
+
 // NewHTTPServer validates cfg and creates an HTTP forward proxy.
 func NewHTTPServer(cfg Config) (*HTTPServer, error) {
 	normalized, err := normalizeConfig(cfg)
@@ -56,6 +58,12 @@ func NewHTTPServer(cfg Config) (*HTTPServer, error) {
 		ReadHeaderTimeout: normalized.handshakeTimeout,
 		IdleTimeout:       normalized.idleTimeout,
 		MaxHeaderBytes:    64 << 10,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			if tracked, ok := conn.(*trackedConn); ok {
+				return context.WithValue(ctx, httpConnContextKey{}, tracked)
+			}
+			return ctx
+		},
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			tracked, ok := conn.(*trackedConn)
 			if !ok {
@@ -272,13 +280,35 @@ func (s *HTTPServer) serveForward(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, response.Body)
+	var body io.Reader = response.Body
+	if conn, ok := r.Context().Value(httpConnContextKey{}).(*trackedConn); ok {
+		// net/http waits for disconnects in a background read after the
+		// request body ends. Origin data is activity even while the response
+		// writer buffers small chunks and the client sends nothing more.
+		body = &httpResponseActivityReader{Reader: body, conn: conn}
+	}
+	_, _ = io.Copy(w, body)
 	for key, values := range response.Trailer {
 		if isHopByHopHeader(key) {
 			continue
 		}
 		w.Header()[textproto.CanonicalMIMEHeaderKey(key)] = append([]string(nil), values...)
 	}
+}
+
+type httpResponseActivityReader struct {
+	io.Reader
+	conn *trackedConn
+}
+
+func (r *httpResponseActivityReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if n > 0 {
+		if activityErr := r.conn.refreshReadActivity(); err == nil {
+			err = activityErr
+		}
+	}
+	return n, err
 }
 
 func validateAbsoluteTarget(target *url.URL) error {
