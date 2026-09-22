@@ -42,6 +42,19 @@ finish its response while continuing to receive an independent upload. Other
 streams on the same connection remain usable. Applications that need to keep
 uploading after receiving a destination EOF require the H3 stream transport.
 
+Canceled H2 requests and H3 send-side stream errors close the destination directly,
+including when both relay workers are blocked on destination I/O. Server or
+physical-connection shutdown also releases H3 destinations after a response
+FIN. One H3 edge case remains: after a clean response FIN, resetting only that
+stream cannot interrupt an already blocked destination upload write through
+the current QUIC API. The stream slot can remain occupied until the destination
+unblocks or the physical connection closes; a sibling stream can remain usable.
+This is not a guarantee that every canceled stream is immediately reclaimed.
+
+H2's handshake budget covers both TLS negotiation and the initial HTTP/2
+preface/SETTINGS write. Caller cancellation or client shutdown also interrupts
+that initialization, before the connection enters the reusable session pool.
+
 There is no `autocar/2` ALPN or AutoCAR binary stream header on these paths.
 The web ALPNs are `h2`, `h3`, and `http/1.1`. Native and web transports remain
 separate modes and are not wire-compatible.

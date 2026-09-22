@@ -39,7 +39,7 @@ type WebH2Client struct {
 	tlsConfig        *tls.Config
 	fingerprint      FingerprintProfile
 	handshakeTimeout time.Duration
-	dialer           net.Dialer
+	dialer           transport.Dialer
 	auth             *webAuthSigner
 	claims           webAuthClaims
 	transport        *http2.Transport
@@ -141,7 +141,7 @@ func newWebH2ClientWithSigner(config WebH2ClientConfig, auth *webAuthSigner, cla
 		tlsConfig:        tlsConfig,
 		fingerprint:      fingerprint,
 		handshakeTimeout: handshakeTimeout,
-		dialer:           net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
+		dialer:           &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
 		auth:             auth,
 		claims:           claims,
 		transport: &http2.Transport{
@@ -477,31 +477,64 @@ func (c *WebH2Client) openSession(ctx context.Context) (*webH2ClientSession, err
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: dial web-cover HTTP/2 server: %w", err)
 	}
+	// NewClientConn synchronously writes the HTTP/2 preface and SETTINGS after
+	// TLS succeeds. Until that finishes, the connection is not in c.sessions,
+	// so Close cannot find it there. Keep raw I/O tied to both establishment
+	// contexts through initialization, not just through the TLS handshake.
+	initializationCtx, initializationCancel := context.WithTimeout(dialCtx, c.handshakeTimeout)
+	defer initializationCancel()
+	rawClosed := make(chan struct{})
+	stopRawClose := context.AfterFunc(initializationCtx, func() {
+		_ = raw.Close()
+		close(rawClosed)
+	})
+	watcherDetached := false
+	defer func() {
+		if !watcherDetached && !stopRawClose() {
+			<-rawClosed
+		}
+	}()
 	tlsConn, err := newWebH2TLSClientConn(raw, c.tlsConfig, c.fingerprint, c.utlsSessionCache)
 	if err != nil {
 		_ = raw.Close()
 		return nil, err
 	}
-	handshakeCtx, handshakeCancel := context.WithTimeout(dialCtx, c.handshakeTimeout)
-	err = tlsConn.HandshakeContext(handshakeCtx)
-	handshakeCancel()
+	err = tlsConn.HandshakeContext(initializationCtx)
 	if err != nil {
 		_ = raw.Close()
+		if cause := context.Cause(initializationCtx); cause != nil {
+			err = cause
+		}
 		return nil, fmt.Errorf("tunnel: web-cover HTTP/2 TLS handshake: %w", err)
 	}
 	state := tlsConn.ConnectionState()
 	if state.Version != tls.VersionTLS13 {
-		_ = tlsConn.Close()
+		_ = raw.Close()
 		return nil, errors.New("tunnel: web-cover HTTP/2 connection did not negotiate TLS 1.3")
 	}
 	if state.NegotiatedProtocol != webH2ALPN {
-		_ = tlsConn.Close()
+		_ = raw.Close()
 		return nil, errors.New("tunnel: web-cover HTTP/2 connection did not negotiate h2")
 	}
 	clientConn, err := c.transport.NewClientConn(tlsConn)
 	if err != nil {
-		_ = tlsConn.Close()
+		_ = raw.Close()
+		if cause := context.Cause(initializationCtx); cause != nil {
+			err = cause
+		}
 		return nil, fmt.Errorf("tunnel: initialize web-cover HTTP/2 connection: %w", err)
+	}
+	// Stop the watcher before the deferred initialization cancellation. If it
+	// already started, join it and reject the connection instead of handing a
+	// caller a session whose wire is concurrently being closed.
+	watcherDetached = stopRawClose()
+	if !watcherDetached {
+		<-rawClosed
+	}
+	if cause := context.Cause(initializationCtx); cause != nil {
+		_ = raw.Close()
+		_ = clientConn.Close()
+		return nil, fmt.Errorf("tunnel: initialize web-cover HTTP/2 connection: %w", cause)
 	}
 	return &webH2ClientSession{
 		raw:       raw,

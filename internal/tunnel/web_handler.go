@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
 )
 
@@ -126,6 +127,23 @@ func (h *webTunnelHandler) serveH3Connect(
 	remote, _ := r.Context().Value(http3.RemoteAddrContextKey).(net.Addr)
 	conn := newWebH3Conn(stream, local, remote)
 	_ = conn.SetDeadline(time.Time{})
+	// Both copies may be blocked in the destination (one Read, one Write),
+	// so closing only the QUIC stream cannot wake either of them. A normal
+	// response FIN also cancels the stream context, however: preserve that
+	// half-close and abort the destination only for an actual stream error.
+	stopStream := context.AfterFunc(stream.Context(), func() {
+		if !errors.Is(context.Cause(stream.Context()), context.Canceled) {
+			_ = upstream.Close()
+		}
+	})
+	defer stopStream()
+	// After a clean response FIN the stream context is already canceled and
+	// cannot report a later connection failure. Keep that shutdown signal
+	// separate so a still-running upload is also released by server Close.
+	if physical, ok := r.Context().Value(webH3ConnectionContextKey{}).(*quic.Conn); ok {
+		stopConnection := context.AfterFunc(physical.Context(), func() { _ = upstream.Close() })
+		defer stopConnection()
+	}
 	relay(conn, upstream)
 }
 
@@ -135,6 +153,11 @@ func (h *webTunnelHandler) serveH2Connect(
 	upstream net.Conn,
 	authentication *webRequestAuthentication,
 ) {
+	// The request context is canceled on stream reset or server shutdown,
+	// unlike an orderly upload FIN. Closing the destination directly also
+	// releases a copy already blocked in its Write, not just a body Read.
+	stop := context.AfterFunc(r.Context(), func() { _ = upstream.Close() })
+	defer stop()
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.writeAuthenticatedError(w, authentication, http.StatusBadGateway)

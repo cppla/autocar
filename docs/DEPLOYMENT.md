@@ -248,7 +248,10 @@ For SOCKS5 TCP and HTTP CONNECT tunnels, `--idle-timeout` (default `5m`)
 measures inactivity across both directions: an active download or upload does
 not need reverse-direction application traffic to stay open. A blocked write
 still has its own timeout, so an unresponsive receiver cannot retain a tunnel
-indefinitely. Ordinary forwarded HTTP bodies keep per-operation timeouts.
+indefinitely. Ordinary HTTP forwarding also counts upload/download body
+progress as activity, including small buffered responses. Stalled request or
+response bodies and blocked writes remain bounded; header and keepalive
+timeouts are unchanged.
 
 Before leaving a client running, verify a real authenticated relay path with
 the same connection flags:
