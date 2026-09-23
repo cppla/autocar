@@ -244,6 +244,17 @@ behavior and limits are in [WEB_COVER.md](WEB_COVER.md).
 Default local endpoints are loopback-only SOCKS5 `127.0.0.1:1080` and HTTP
 `127.0.0.1:8080`. Use `socks5h://` when the relay should resolve names.
 
+In source builds, closing the SOCKS5 UDP ASSOCIATE control connection also
+cancels that request's pending endpoint lookup or packet setup, releasing its
+local connection slot without waiting for the full dial timeout. A successful
+setup cancels its setup timer without terminating the established UDP session;
+the control connection must remain open for that session. Native QUIC's shared
+physical dial is client-owned and is not canceled just because one caller
+leaves. This does not change H3's existing cold-dial retry policy, graceful
+shutdown semantics or TCP CONNECT handling, and is not included in v1.0.1.
+Cancellation requires context-aware resolvers/dialers; custom implementations
+that ignore cancellation cannot be forcibly interrupted by the proxy.
+
 For SOCKS5 TCP and HTTP CONNECT tunnels, `--idle-timeout` (default `5m`)
 measures inactivity across both directions: an active download or upload does
 not need reverse-direction application traffic to stay open. A blocked write

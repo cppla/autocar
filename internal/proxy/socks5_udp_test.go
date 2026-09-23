@@ -289,6 +289,13 @@ func TestSOCKS5UDPAssociateRejectsMismatchedRequestedAddressBeforeUpstream(t *te
 	if reply != socksReplyNotAllowed {
 		t.Fatalf("reply = %d, want not allowed", reply)
 	}
+	// A validation failure must interrupt and join the early control reader
+	// even though this peer deliberately leaves its control connection open.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := server.lifecycle.tracker.wait(ctx); err != nil {
+		t.Fatalf("invalid request retained its admission: %v", err)
+	}
 	select {
 	case <-dialCalled:
 		t.Fatal("invalid UDP ASSOCIATE request allocated an upstream session")

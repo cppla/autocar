@@ -163,52 +163,80 @@ func (s *SOCKS5Server) serveConnect(client net.Conn, request socksRequest) {
 }
 
 func (s *SOCKS5Server) serveUDPAssociate(client net.Conn, request socksRequest) {
-	ctx := context.Background()
-	cancel := func() {}
+	var ctx context.Context
+	var cancel context.CancelFunc
 	if s.cfg.dialTimeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, s.cfg.dialTimeout)
+		ctx, cancel = context.WithTimeout(context.Background(), s.cfg.dialTimeout)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
 	}
-	defer cancel()
+	// The full request has already been parsed. UDP control bytes carry no
+	// payload, so one reader can now monitor closure during DNS, packet setup
+	// and the established association without consuming another reader's data.
+	controlDone := watchSOCKSUDPControl(client, cancel)
+	defer func() {
+		cancel()
+		// Join the reader before serveConn releases the tracked connection.
+		// Only interrupt reads: setup replies have their own write deadline.
+		_ = client.SetReadDeadline(time.Now())
+		<-controlDone
+	}()
+	reply := func(code byte, address net.Addr) error {
+		if s.cfg.handshakeTimeout > 0 {
+			_ = client.SetWriteDeadline(time.Now().Add(s.cfg.handshakeTimeout))
+		}
+		return writeSOCKSReply(client, code, address)
+	}
 
 	peerIP, err := addressIP(client.RemoteAddr())
 	if err != nil {
-		_ = writeSOCKSReply(client, socksReplyGeneralFailure, nil)
+		_ = reply(socksReplyGeneralFailure, nil)
 		return
 	}
 	requestedPort, err := validateUDPAssociateRequest(ctx, request, peerIP, net.DefaultResolver.LookupIPAddr)
 	if err != nil {
-		reply := byte(socksReplyGeneralFailure)
+		code := byte(socksReplyGeneralFailure)
 		var protocolErr *socksProtocolError
 		if errors.As(err, &protocolErr) {
-			reply = protocolErr.reply
+			code = protocolErr.reply
 		}
-		_ = writeSOCKSReply(client, reply, nil)
+		_ = reply(code, nil)
+		return
+	}
+	// Literal-IP validation need not perform a context-aware operation. Avoid
+	// starting a shared upstream dial when cancellation is already known.
+	if err := ctx.Err(); err != nil {
+		_ = reply(socksReplyForError(err), nil)
 		return
 	}
 
 	udpConn, err := listenSOCKSUDP(client)
 	if err != nil {
-		_ = writeSOCKSReply(client, socksReplyGeneralFailure, nil)
+		_ = reply(socksReplyGeneralFailure, nil)
 		return
 	}
 	defer udpConn.Close()
 
 	upstream, err := s.cfg.packetDialer.DialPacket(ctx)
+	if upstream != nil {
+		// Own any returned connection, including a late success after control
+		// closure or a custom dialer returning both a connection and an error.
+		upstream = &closeOncePacketConn{PacketConn: upstream}
+		defer upstream.Close()
+	}
 	if err != nil || upstream == nil {
 		if err == nil {
 			err = errors.New("socks5: packet dialer returned a nil connection")
 		}
-		_ = writeSOCKSReply(client, socksReplyForError(err), nil)
+		_ = reply(socksReplyForError(err), nil)
 		return
 	}
-	upstream = &closeOncePacketConn{PacketConn: upstream}
-	defer upstream.Close()
-	cancel()
-
-	if s.cfg.handshakeTimeout > 0 {
-		_ = client.SetWriteDeadline(time.Now().Add(s.cfg.handshakeTimeout))
+	if err := ctx.Err(); err != nil {
+		_ = reply(socksReplyForError(err), nil)
+		return
 	}
-	if err := writeSOCKSReply(client, socksReplySucceeded, udpConn.LocalAddr()); err != nil {
+	cancel() // Setup is done; the packet session and control reader live on.
+	if err := reply(socksReplySucceeded, udpConn.LocalAddr()); err != nil {
 		return
 	}
 	_ = client.SetWriteDeadline(time.Time{})
@@ -217,7 +245,25 @@ func (s *SOCKS5Server) serveUDPAssociate(client net.Conn, request socksRequest) 
 		peerIP:        peerIP,
 		requestedPort: requestedPort,
 	}
-	runSOCKSUDPAssociation(client, udpConn, upstream, endpoint, s.cfg.idleTimeout)
+	runSOCKSUDPAssociation(controlDone, udpConn, upstream, endpoint, s.cfg.idleTimeout)
+}
+
+// watchSOCKSUDPControl is the sole control reader after parsing UDP ASSOCIATE.
+// Successful setup cancels its context too, so the reader must not use that
+// context as its lifetime. The caller interrupts and joins it on every exit.
+func watchSOCKSUDPControl(control net.Conn, cancelSetup context.CancelFunc) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer cancelSetup()
+		var buffer [1]byte
+		for {
+			if _, err := control.Read(buffer[:]); err != nil {
+				return
+			}
+		}
+	}()
+	return done
 }
 
 type lookupIPFunc func(context.Context, string) ([]net.IPAddr, error)
@@ -394,7 +440,7 @@ func (e *socksUDPClientEndpoint) current() *net.UDPAddr {
 }
 
 func runSOCKSUDPAssociation(
-	control net.Conn,
+	controlDone <-chan struct{},
 	local *net.UDPConn,
 	upstream transport.PacketConn,
 	endpoint *socksUDPClientEndpoint,
@@ -406,7 +452,7 @@ func runSOCKSUDPAssociation(
 			maxPayloadSize = limit
 		}
 	}
-	finished := make(chan struct{}, 3)
+	finished := make(chan struct{}, 2)
 	activity := make(chan struct{}, 1)
 	signalActivity := func() {
 		select {
@@ -467,16 +513,6 @@ func runSOCKSUDPAssociation(
 		}
 	}()
 
-	go func() {
-		defer finish()
-		buffer := make([]byte, 1)
-		for {
-			if _, err := control.Read(buffer); err != nil {
-				return
-			}
-		}
-	}()
-
 	var timer *time.Timer
 	var idle <-chan time.Time
 	if idleTimeout > 0 {
@@ -490,6 +526,8 @@ wait:
 		select {
 		case <-finished:
 			completed++
+			break wait
+		case <-controlDone:
 			break wait
 		case <-activity:
 			if timer != nil {
@@ -506,13 +544,11 @@ wait:
 		}
 	}
 
-	// Closing both packet endpoints interrupts their blocking reads. A read
-	// deadline interrupts the control watcher without removing the connection
-	// from lifecycle tracking before all association goroutines have exited.
+	// Join packet workers before the caller joins its control reader and
+	// releases the tracked connection. Closing endpoints interrupts their I/O.
 	_ = local.Close()
 	_ = upstream.Close()
-	_ = control.SetReadDeadline(time.Now())
-	for completed < 3 {
+	for completed < 2 {
 		<-finished
 		completed++
 	}
