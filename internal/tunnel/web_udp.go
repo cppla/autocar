@@ -488,9 +488,22 @@ func (p *webUDPPacketConn) Send(payload []byte, address string) error {
 	}
 	session, err := p.session(canonical)
 	if err != nil {
-		return err
+		return webUDPTargetSendError(err)
 	}
 	return session.send(payload)
+}
+
+// CONNECT-UDP opens a stream lazily for each target. A signed target rejection
+// or a local admission limit does not invalidate other targets on this logical
+// PacketConn. Keep the original cause (including authentication-proven status)
+// visible, without retrying or hiding real transport/authentication failures.
+func webUDPTargetSendError(err error) error {
+	var connectErr *WebConnectError
+	if errors.Is(err, ErrUDPDestinationCapacity) || errors.Is(err, ErrUDPSessionCapacity) ||
+		(errors.As(err, &connectErr) && (connectErr.StatusCode == http.StatusBadGateway || connectErr.StatusCode == http.StatusServiceUnavailable)) {
+		return fmt.Errorf("%w: %w", transport.ErrPacketTargetUnavailable, err)
+	}
+	return err
 }
 
 func (p *webUDPPacketConn) session(target string) (*webUDPClientSession, error) {

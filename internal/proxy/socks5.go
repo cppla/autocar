@@ -431,9 +431,9 @@ func runSOCKSUDPAssociation(
 				continue
 			}
 			if err := upstream.Send(payload, target); err != nil {
-				if errors.Is(err, transport.ErrPacketQueueFull) {
-					// QUIC DATAGRAM is unreliable. Local queue pressure drops this
-					// packet, not the authenticated UDP association.
+				if errors.Is(err, transport.ErrPacketQueueFull) || errors.Is(err, transport.ErrPacketTargetUnavailable) {
+					// Datagram delivery is best effort. Queue pressure or a rejected
+					// target drops this packet, not other targets on the association.
 					signalActivity()
 					continue
 				}
