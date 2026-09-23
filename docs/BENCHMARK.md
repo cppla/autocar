@@ -30,6 +30,12 @@ Measure direct and tunneled paths with the same payload, warmup and iterations:
 JSON contains raw `results_mbps` and `durations_ms`, plus `median_mbps`,
 `p05_mbps`, `p95_mbps`, `median_duration_ms` and `p95_duration_ms`. The throughput
 p95 is the upper tail; use throughput p05 or duration p95 to discuss slow runs.
+Both medians use the middle observation for an odd sample count and the average
+of the two middle observations for an even count. Tail percentiles retain the
+nearest order statistic at index `round((n-1)*p)` (zero-based); they do not
+interpolate and are descriptive summaries, not confidence bounds. Older builds
+used that rounded index for medians too, selecting the upper middle observation
+for even counts. Recompute from raw samples when comparing those reports.
 The selected transport and sender metadata must remain identical across all
 measured iterations or the command fails. `transport` is the requested policy
 (`auto`, `quic`, `tls` or `direct`); `selected_transport` records the actual
