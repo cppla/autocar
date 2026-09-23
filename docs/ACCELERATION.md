@@ -94,9 +94,45 @@ denominator: QUIC can send already-queued bytes during an application wait.
 Actual transport backpressure remains outside token sleep. When a slower path
 fills the finite send buffers, predominantly transport-bound samples can age
 out the old bandwidth maximum. Sleep share is still an application-level
-heuristic, not proof that the path is uncongested. The controller does not add
-a separate capacity-probing phase: sustained RTT penalties can limit discovery
-of spare capacity until conditions or higher delivery observations change.
+heuristic, not proof that the path is uncongested.
+
+For `balanced` and `aggressive`, a bounded capacity-recovery probe can break a
+low-rate lock-in after real backpressure subsides while RTT stays elevated.
+It requires at least three consecutive valid, loss-free, pacing-limited samples
+spanning at least one second on the controller clock, without a material RTT
+increase. It runs only when the steady target is below 95% of learned capacity.
+The temporary admission rate is at most 1.25 times capacity (`balanced`) or
+1.50 times capacity (`aggressive`), also capped at twice the steady target and
+the configured maximum. Only a real higher wire sample can raise the capacity
+estimate; starting or finishing a probe does not add tokens or change history.
+The reported `TargetBytesPerSecond` remains the steady target, not this transient
+admission rate.
+
+The connection-wide byte allowance covers two bursts or two sampling windows,
+whichever is larger, with a hard 1 MiB ceiling. The deadline covers service of
+that allowance plus one sample window, or two smoothed RTTs, with a 100 ms
+minimum and a two-second maximum. Configurations whose complete allowance
+cannot fit those byte/time bounds are not probed. Deadline accounting splits
+token refill at expiry even without another observation; cancellation refunds
+normal tokens but never replenishes the probe allowance. Admission can finish
+before the last wire feedback, so a bounded 250–500 ms grace period accepts
+that outcome without allowing further probe-rate admission.
+
+Any newly observed loss, a relative RTT rise above 25% (with a 1 ms noise
+tolerance), or transport-bound delivery without a real capacity increase ends
+the probe. Idle intervals and counter resets clear qualification. Successful
+probes require more than 2% observed capacity growth and are separated by at
+least one second or eight smoothed RTTs (the latter capped at 16 seconds).
+Unsuccessful attempts back off from two to at most 16 seconds. RTT/loss penalties
+continue to determine the steady target; the underlying QUIC controller remains
+active. `conservative`, fixed-rate, and bypass modes do not perform these probes.
+
+This is bounded recovery, not a guarantee of recovering all spare capacity:
+large bandwidth-delay products or custom bursts can exceed the probe limits;
+long-delayed feedback and persistent congestion can prevent discovery. Tests
+cover fixed-RTT synthetic fast/slow/fast phases and a small-window real loopback
+QUIC receiver slowdown. They do not establish Internet throughput, fairness,
+browser similarity, or performance superiority.
 
 This is intentionally not a full BBR state machine. In particular AutoCAR has
 no transport-visible BDP congestion window, ACK aggregation model, ProbeRTT
