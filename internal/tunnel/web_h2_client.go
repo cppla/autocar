@@ -19,6 +19,8 @@ import (
 	"golang.org/x/net/http2"
 )
 
+const defaultWebH2WriteByteTimeout = 30 * time.Second
+
 // WebH2ClientConfig configures the HTTP/2 side of the web-cover transport.
 type WebH2ClientConfig struct {
 	ServerAddress string
@@ -29,6 +31,13 @@ type WebH2ClientConfig struct {
 	FingerprintProfile FingerprintProfile
 	HandshakeTimeout   time.Duration
 	DialTimeout        time.Duration
+	// WriteByteTimeout limits stalled writes on the shared HTTP/2 connection.
+	// Zero uses a conservative thirty-second default; negative values are
+	// invalid. This is a TLS write-call budget, not a precise TCP byte-idle
+	// timer: it can expire despite partial network progress. A timeout can
+	// terminate all streams on that physical TLS connection; it is not a
+	// stream deadline or an idle-connection timeout.
+	WriteByteTimeout time.Duration
 }
 
 // WebH2Client implements transport.Dialer with one standard HTTP/2 CONNECT
@@ -107,7 +116,7 @@ func newWebH2ClientWithSigner(config WebH2ClientConfig, auth *webAuthSigner, cla
 	if err := validateWebAuthClaims(claims); err != nil {
 		return nil, err
 	}
-	if config.HandshakeTimeout < 0 || config.DialTimeout < 0 {
+	if config.HandshakeTimeout < 0 || config.DialTimeout < 0 || config.WriteByteTimeout < 0 {
 		return nil, errors.New("tunnel: web-cover HTTP/2 timeouts cannot be negative")
 	}
 	tlsConfig, err := webClientTLSConfig(config.TLSConfig, config.ServerAddress, webH2ALPN)
@@ -135,6 +144,10 @@ func newWebH2ClientWithSigner(config WebH2ClientConfig, auth *webAuthSigner, cla
 	if dialTimeout == 0 {
 		dialTimeout = defaultDialTimeout
 	}
+	writeByteTimeout := config.WriteByteTimeout
+	if writeByteTimeout == 0 {
+		writeByteTimeout = defaultWebH2WriteByteTimeout
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WebH2Client{
 		address:          config.ServerAddress,
@@ -148,6 +161,7 @@ func newWebH2ClientWithSigner(config WebH2ClientConfig, auth *webAuthSigner, cla
 			DisableCompression:         true,
 			StrictMaxConcurrentStreams: true,
 			MaxHeaderListSize:          defaultWebClientMaxResponseHeaderBytes,
+			WriteByteTimeout:           writeByteTimeout,
 		},
 		utlsSessionCache: utlsSessionCache,
 		ctx:              ctx,

@@ -281,6 +281,25 @@ it on the server as `--destination-write-timeout=30s` or JSON
 32 KiB writes can legitimately take longer. Negative durations are rejected by
 normal startup and `--check`.
 
+Source builds provide a separate client `--h2-write-timeout` for explicit `h2`
+and the H2 fallback of `web-auto`. Its default is `30s`; `0` selects that
+default, and negative values are rejected. JSON uses
+`"h2-write-timeout": "30s"`. It is independent of `--open-timeout`, local proxy
+idle timeouts and server destination-write timeouts, and does not change H3 or
+native transport settings. This option is not in the v1.0.1 release.
+
+This bounds pending HTTP/2 physical-connection writes, including control
+frames, so a non-reading peer cannot indefinitely hold the shared writer lock
+and prevent stream cleanup. No write is pending on a purely idle connection,
+and successful writes clear their deadlines. It is a TLS write-call budget,
+not a precise kernel-level byte-idleness timer: an exceptionally slow write
+can time out despite partial network progress. Increase it if needed for such
+links. The `30s` default is an operational choice, not a measured universal
+optimum. A TLS write timeout can terminate **all streams on that connection**;
+new requests establish a fresh authenticated session. Normal per-stream
+cancellation remains isolated. Stream close may wait for the pending write's
+budget and cleanup; this is bounded recovery, not an immediate-close promise.
+
 Before leaving a client running, verify a real authenticated relay path with
 the same connection flags:
 

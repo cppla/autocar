@@ -34,6 +34,7 @@ type tunnelFlags struct {
 	dialTimeout    time.Duration
 	primaryTimeout time.Duration
 	openTimeout    time.Duration
+	h2WriteTimeout time.Duration
 	fallbackTTL    time.Duration
 	h3Fingerprint  string
 	pacing         string
@@ -56,6 +57,7 @@ func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
 	fs.DurationVar(&flags.dialTimeout, "dial-timeout", 5*time.Second, "transport network dial timeout")
 	fs.DurationVar(&flags.primaryTimeout, "quic-attempt-timeout", 5*time.Second, "entire UDP primary phase budget before auto-mode TCP fallback")
 	fs.DurationVar(&flags.openTimeout, "open-timeout", 15*time.Second, "overall remote stream open timeout")
+	fs.DurationVar(&flags.h2WriteTimeout, "h2-write-timeout", 30*time.Second, "shared H2 connection write timeout (h2/web-auto only; 0 uses 30s; not an idle or per-stream timeout)")
 	fs.DurationVar(&flags.fallbackTTL, "fallback-cooldown", 30*time.Second, "base time to prefer the TCP fallback after a UDP path failure (each retry is jittered +/-20%)")
 	fs.StringVar(&flags.h3Fingerprint, "h3-fingerprint", string(tunnel.H3FingerprintChrome202608), "web H3 wire profile: chrome-2026-08 or native")
 	fs.StringVar(&flags.pacing, "pacing", "adaptive", "QUIC application pacing: adaptive, reno, or fixed-rate")
@@ -79,6 +81,9 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 	}
 	if flags.dialTimeout <= 0 || flags.openTimeout <= 0 {
 		return nil, errors.New("--dial-timeout and --open-timeout must be positive")
+	}
+	if flags.h2WriteTimeout < 0 {
+		return nil, errors.New("--h2-write-timeout must not be negative; zero uses the 30s default")
 	}
 	if (mode == "auto" || mode == "web-auto") && (flags.primaryTimeout <= 0 || flags.primaryTimeout >= flags.openTimeout) {
 		return nil, fmt.Errorf("%s mode requires 0 < --quic-attempt-timeout < --open-timeout so the TCP fallback retains time", mode)
@@ -225,6 +230,7 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 			TLSConfig:        tlsConfig,
 			HandshakeTimeout: flags.openTimeout,
 			DialTimeout:      flags.dialTimeout,
+			WriteByteTimeout: flags.h2WriteTimeout,
 		})
 		if err != nil {
 			return nil, err
@@ -239,6 +245,7 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 			HandshakeTimeout:      flags.openTimeout,
 			H3DialTimeout:         flags.dialTimeout,
 			H2DialTimeout:         flags.dialTimeout,
+			H2WriteByteTimeout:    flags.h2WriteTimeout,
 			PrimaryAttemptTimeout: flags.primaryTimeout,
 			FallbackCooldown:      flags.fallbackTTL,
 		})
