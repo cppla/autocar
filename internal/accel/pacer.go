@@ -129,6 +129,7 @@ type Controller struct {
 	haveSnapshot bool
 	previous     Snapshot
 	estimator    adaptiveEstimator
+	probe        capacityProbe
 
 	// Only the admission owner sleeps for missing tokens. Count this interval
 	// once, not the overlapping Wait durations of queued writers. Observation
@@ -213,8 +214,8 @@ func (c *Controller) Mode() Mode { return c.mode }
 // and fixed-rate modes so shared configuration and telemetry stay consistent.
 func (c *Controller) Profile() Profile { return c.profile }
 
-// TargetBytesPerSecond reports the current application pacing target. It
-// returns zero in bypass mode.
+// TargetBytesPerSecond reports the steady application pacing target, excluding
+// short bounded capacity probes. It returns zero in bypass mode.
 func (c *Controller) TargetBytesPerSecond() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -280,12 +281,20 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 		// instead of interpreting wrapped counters as a huge delivery sample.
 		c.recordObservationLocked(snapshot, c.clock.Now())
 		c.estimator.reset()
+		c.resetProbeLocked()
 		c.setTargetRateLocked(c.initialRate)
 		return nil
 	}
 
 	elapsed := snapshot.At.Sub(c.previous.At)
 	window := stableSampleWindow(snapshot.MinRTT)
+	now := c.clock.Now()
+	c.refillLocked(now)
+	// Loss and a growing queue must end an excursion even if this writer's
+	// observation is too early to form a stable delivery sample.
+	if snapshot.LostBytes > c.previous.LostBytes || c.probeRTTRoseLocked(snapshot.SmoothedRTT) {
+		c.abortProbeLocked(now)
+	}
 	// Connection counters are sampled by every writer. Ignore sub-window calls
 	// without advancing the baseline so concurrent streams cannot turn one packet
 	// observed a few microseconds later into a terabyte-per-second rate sample.
@@ -293,7 +302,6 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 		return nil
 	}
 
-	now := c.clock.Now()
 	observationElapsed := now.Sub(c.previousObservationTime)
 	pacingElapsed := c.pacingTimeLocked(now) - c.previousPacingSleep
 	pacingLimited := observationElapsed > 0 && pacingElapsed > 0 && pacingElapsed >= observationElapsed/2
@@ -312,9 +320,11 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 		// observations above retain both counters until this decision is made.
 		// Require idle time to dominate the interval: a short source gap after
 		// a long, flow-controlled write must not hide genuine path congestion.
+		c.abortProbeLocked(now)
 		return nil
 	}
 	if sentDelta == 0 || snapshot.MinRTT == 0 || snapshot.SmoothedRTT == 0 {
+		c.abortProbeLocked(now)
 		return nil
 	}
 	if lostDelta > sentDelta {
@@ -332,6 +342,7 @@ func (c *Controller) Observe(snapshot Snapshot) error {
 	target := c.estimator.observe(deliveredRate, lossRatio, snapshot.MinRTT, snapshot.SmoothedRTT, pacingLimited)
 	target = math.Max(float64(c.minimumRate), math.Min(float64(c.maximumRate), target))
 	c.setTargetRateLocked(int64(math.Round(target)))
+	c.observeProbeLocked(snapshot, now, pacingLimited, lostDelta != 0)
 	return nil
 }
 
@@ -409,14 +420,29 @@ func (c *Controller) admit(ctx context.Context, amount float64) error {
 		}
 
 		c.mu.Lock()
-		c.refillLocked(c.clock.Now())
+		now := c.clock.Now()
+		c.refillLocked(now)
+		// Never partially charge a chunk to an exhausted probe allowance.
+		// Existing tokens remain bounded; ending a probe does not refill them.
+		if c.probe.active && amount > c.probe.remaining {
+			c.finishProbeLocked(now)
+		}
 		if c.tokens >= amount {
 			c.tokens -= amount
+			if c.probe.active {
+				c.probe.remaining -= amount
+				if c.probe.remaining == 0 {
+					c.finishProbeLocked(now)
+				}
+			}
 			c.mu.Unlock()
 			return nil
 		}
 		missing := amount - c.tokens
-		delay := durationForBytes(missing, c.targetRate)
+		delay := durationForBytes(missing, c.pacingRateLocked())
+		if c.probe.active {
+			delay = min(delay, c.probe.deadline.Sub(now))
+		}
 		stateChange := c.stateChange
 		if c.mode == ModeAdaptive {
 			c.pacingSleepStarted = c.clock.Now()
@@ -593,11 +619,24 @@ func durationForBytes(amount float64, rate int64) time.Duration {
 }
 
 func (c *Controller) refillLocked(now time.Time) {
+	if c.probe.active && !now.Before(c.probe.deadline) {
+		// Split the interval: a late wakeup must not mint high-rate tokens for
+		// time beyond the deadline. No Observe call is required for expiry.
+		c.refillAtRateLocked(c.probe.deadline, c.probe.rate)
+		c.finishProbeLocked(c.probe.deadline)
+	}
+	c.refillAtRateLocked(now, c.pacingRateLocked())
+	if c.probe.pending && !now.Before(c.probe.outcomeDeadline) {
+		c.resolveProbeLocked(now, false)
+	}
+}
+
+func (c *Controller) refillAtRateLocked(now time.Time, rate int64) {
 	elapsed := now.Sub(c.lastRefill)
 	if elapsed <= 0 {
 		return
 	}
-	c.tokens += elapsed.Seconds() * float64(c.targetRate)
+	c.tokens += elapsed.Seconds() * float64(rate)
 	if c.tokens > c.burst {
 		c.tokens = c.burst
 	}
