@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -205,7 +204,7 @@ func TestQUICDatagramClosedPortPreservesAssociation(t *testing.T) {
 		// closed-destination write attempt before reopening the guard socket.
 		checkEcho([]byte{byte(round), 'o', 'k'})
 		guard, err = net.ListenUDP("udp4", closedEndpoint)
-		if errors.Is(err, syscall.EADDRINUSE) {
+		if isWebTestAddressInUse(err) {
 			t.Skip("closed-port fixture became inconclusive: another socket reused the port")
 		}
 		if err != nil {

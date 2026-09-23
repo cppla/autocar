@@ -71,6 +71,33 @@ jobs:
       - name: Test
         run: go test -shuffle=on -count=1 ./...
 
+  windows-udp-test:
+    name: Windows UDP continuity (Go 1.25.13)
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.25.13
+          cache: true
+      - name: Exercise native UDP continuity and platform bind errors
+        shell: pwsh
+        run: |
+          $testOutput = & go test ./internal/tunnel -run '^(TestWebTestAddressInUse|TestQUICDatagramClosedPortPreservesAssociation)$' -count=5 -timeout=60s -json
+          $testExit = $LASTEXITCODE
+          $testOutput | Write-Output
+          if ($testExit -ne 0) { exit $testExit }
+          $testEvents = @($testOutput | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+          foreach ($testName in @('TestWebTestAddressInUse', 'TestQUICDatagramClosedPortPreservesAssociation')) {
+            $passes = @($testEvents | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' }).Count
+            $skips = @($testEvents | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' }).Count
+            if ($passes -ne 5 -or $skips -ne 0) {
+              throw "$testName requires exactly 5 passes and 0 skips; got $passes passes and $skips skips"
+            }
+            Write-Output "Verified ${testName}: $passes passes, $skips skips"
+          }
+
   race:
     name: Race detector
     runs-on: ubuntu-24.04
