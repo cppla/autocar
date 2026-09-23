@@ -64,6 +64,15 @@ H2's handshake budget covers both TLS negotiation and the initial HTTP/2
 preface/SETTINGS write. Caller cancellation or client shutdown also interrupts
 that initialization, before the connection enters the reusable session pool.
 
+Source builds additionally bound H2 physical writes with a separate
+`--h2-write-timeout` (default `30s`, zero selects the default). It applies to
+explicit `h2` and `web-auto`'s H2 fallback, including shared control-frame
+writes; a stalled peer can no longer hold that writer indefinitely. This is
+not an idle or per-stream deadline. A physical TLS write timeout can end all
+streams on the affected connection, while ordinary stream cancellation must
+preserve healthy siblings. See [timeout semantics and configuration](DEPLOYMENT.md)
+for partial-progress and cleanup boundaries. This setting is not in v1.0.1.
+
 There is no `autocar/2` ALPN or AutoCAR binary stream header on these paths.
 The web ALPNs are `h2`, `h3`, and `http/1.1`. Native and web transports remain
 separate modes and are not wire-compatible.

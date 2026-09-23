@@ -34,6 +34,12 @@ type WebClientConfig struct {
 	HandshakeTimeout time.Duration
 	H3DialTimeout    time.Duration
 	H2DialTimeout    time.Duration
+	// H2WriteByteTimeout limits physical HTTP/2 writes, not stream lifetime or
+	// idle time. Zero uses thirty seconds; negative values are invalid. As with
+	// WebH2ClientConfig.WriteByteTimeout, partial network progress does not
+	// guarantee survival. A timeout can terminate every stream sharing the H2
+	// fallback connection; it does not affect HTTP/3.
+	H2WriteByteTimeout time.Duration
 
 	// PrimaryAttemptTimeout bounds an HTTP/3 CONNECT attempt, including a
 	// request on an already warm connection. Zero defaults to five seconds.
@@ -98,7 +104,7 @@ func NewWebClient(config WebClientConfig) (*WebClient, error) {
 	if config.ServerAddress == "" {
 		return nil, errors.New("tunnel: web-cover server address is required")
 	}
-	if config.HandshakeTimeout < 0 || config.H3DialTimeout < 0 || config.H2DialTimeout < 0 ||
+	if config.HandshakeTimeout < 0 || config.H3DialTimeout < 0 || config.H2DialTimeout < 0 || config.H2WriteByteTimeout < 0 ||
 		config.PrimaryAttemptTimeout < 0 || config.FallbackCooldown < 0 {
 		return nil, errors.New("tunnel: web-cover client timeouts cannot be negative")
 	}
@@ -133,6 +139,7 @@ func NewWebClient(config WebClientConfig) (*WebClient, error) {
 		TLSConfig:        config.TLSConfig,
 		HandshakeTimeout: config.HandshakeTimeout,
 		DialTimeout:      config.H2DialTimeout,
+		WriteByteTimeout: config.H2WriteByteTimeout,
 	})
 	if err != nil {
 		_ = h3.Close()
