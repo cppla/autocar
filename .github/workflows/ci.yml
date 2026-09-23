@@ -82,7 +82,21 @@ jobs:
           go-version: 1.25.13
           cache: true
       - name: Exercise native UDP continuity and platform bind errors
-        run: go test ./internal/tunnel -run '^(TestWebTestAddressInUse|TestQUICDatagramClosedPortPreservesAssociation)$' -count=5 -timeout=60s -v
+        shell: pwsh
+        run: |
+          $testOutput = & go test ./internal/tunnel -run '^(TestWebTestAddressInUse|TestQUICDatagramClosedPortPreservesAssociation)$' -count=5 -timeout=60s -json
+          $testExit = $LASTEXITCODE
+          $testOutput | Write-Output
+          if ($testExit -ne 0) { exit $testExit }
+          $testEvents = @($testOutput | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+          foreach ($testName in @('TestWebTestAddressInUse', 'TestQUICDatagramClosedPortPreservesAssociation')) {
+            $passes = @($testEvents | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' }).Count
+            $skips = @($testEvents | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' }).Count
+            if ($passes -ne 5 -or $skips -ne 0) {
+              throw "$testName requires exactly 5 passes and 0 skips; got $passes passes and $skips skips"
+            }
+            Write-Output "Verified ${testName}: $passes passes, $skips skips"
+          }
 
   race:
     name: Race detector
