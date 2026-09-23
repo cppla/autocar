@@ -559,9 +559,10 @@ func TestWebH3ConnectUDPCapacityAndCloseUnblocksReceive(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertWebUDPEcho(t, packet, []byte("capacity"), firstTarget)
-	if err := packet.Send([]byte("rejected"), secondTarget); !errors.Is(err, ErrUDPDestinationCapacity) {
+	if err := packet.Send([]byte("rejected"), secondTarget); !errors.Is(err, ErrUDPDestinationCapacity) || !errors.Is(err, transport.ErrPacketTargetUnavailable) {
 		t.Fatalf("second target error = %v, want %v", err, ErrUDPDestinationCapacity)
 	}
+	assertWebUDPEcho(t, packet, []byte("existing target survives local limit"), firstTarget)
 
 	receiveDone := make(chan error, 1)
 	go func() {
@@ -600,9 +601,14 @@ func TestWebH3ConnectUDPClientGlobalSessionLimit(t *testing.T) {
 	}
 	defer second.Close()
 	assertWebUDPEcho(t, first, []byte("reserved"), target)
-	if err := second.Send([]byte("over capacity"), target); !errors.Is(err, ErrUDPSessionCapacity) {
+	if err := second.Send([]byte("over capacity"), target); !errors.Is(err, ErrUDPSessionCapacity) || !errors.Is(err, transport.ErrPacketTargetUnavailable) {
 		t.Fatalf("second PacketConn Send = %v, want %v", err, ErrUDPSessionCapacity)
 	}
+	assertWebUDPEcho(t, first, []byte("existing association survives global limit"), target)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertWebUDPEcho(t, second, []byte("reuse after capacity released"), target)
 }
 
 func TestWebH3ConnectUDPConfigValidation(t *testing.T) {

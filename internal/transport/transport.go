@@ -11,8 +11,16 @@ import (
 
 // ErrPacketQueueFull means a best-effort datagram was not accepted because a
 // bounded local transport queue is full. Datagram frontends may drop that
-// packet and keep the association alive; other send errors are terminal.
+// packet and keep the association alive.
 var ErrPacketQueueFull = errors.New("transport: packet send queue is full")
+
+// ErrPacketTargetUnavailable means a datagram was not accepted because its
+// target was rejected or a target/session admission limit was reached. It is
+// specific to one Send, not failure of the whole multi-target association.
+// Datagram frontends may drop that packet and continue using the association.
+// Implementations retain the underlying cause for typed diagnostics. Unknown,
+// authentication, cancellation and connection errors must not use this marker.
+var ErrPacketTargetUnavailable = errors.New("transport: packet target unavailable")
 
 // Dialer creates remote TCP connections through an authenticated tunnel.
 type Dialer interface {
@@ -29,6 +37,9 @@ type PacketDialer interface {
 // PacketConn carries independent datagrams through an authenticated tunnel.
 // Send consumes payload before returning. Close must unblock a concurrent
 // Receive call so proxy shutdown cannot leak goroutines.
+// Send errors other than ErrPacketQueueFull and ErrPacketTargetUnavailable are
+// terminal for a frontend association. Neither recoverable error implies that
+// the packet was delivered; callers must not transparently retry it.
 type PacketConn interface {
 	Send(payload []byte, address string) error
 	Receive() (payload []byte, address string, err error)

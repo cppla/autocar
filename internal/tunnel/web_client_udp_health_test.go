@@ -138,6 +138,9 @@ func TestWebClientH3UDPOnlyNewAuthenticatedResponseRecoversCircuit(t *testing.T)
 	if !errors.As(err, &rejection) {
 		t.Fatalf("expected authenticated H3 target rejection, got %v", err)
 	}
+	if !errors.Is(err, transport.ErrPacketTargetUnavailable) {
+		t.Fatalf("authenticated target failure was terminal for the packet association: %v", err)
+	}
 	client.mu.Lock()
 	recovered = client.primaryFailedAt.IsZero() && client.primaryStateID > generation
 	client.mu.Unlock()
@@ -175,8 +178,8 @@ func TestWebClientH3UDPAuthenticationFailureDoesNotRecoverCircuit(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = packet.Close() })
-	if err := packet.Send([]byte("wrong credential"), "missing.example:53"); err == nil {
-		t.Fatal("incorrect credentials were accepted")
+	if err := packet.Send([]byte("wrong credential"), "missing.example:53"); err == nil || errors.Is(err, transport.ErrPacketTargetUnavailable) {
+		t.Fatalf("incorrect credentials accepted or mislabeled as a recoverable target failure: %v", err)
 	}
 	assertWebPrimaryFailureGeneration(t, client, generation)
 }

@@ -219,6 +219,16 @@ are bounded. The relay applies the UDP destination policy, resolves once, and
 freezes the session to one successfully opened numeric endpoint; replies from
 other sources cannot enter that target stream.
 
+A signed target rejection (`502`) or admission rejection (`503`), and local
+target/session capacity limits, fail only that datagram send. The SOCKS5 frontend
+drops the packet and retains the association and its other live targets; it
+does not retry the failed packet. Later packets can use a target after capacity
+is released. Typed causes remain available to direct PacketConn callers through
+`errors.Is` / `errors.As`, with `transport.ErrPacketTargetUnavailable` marking
+this narrow recoverable case. Authentication, cancellation, connection and
+unknown errors remain terminal. A successful local enqueue still does not
+prove delivery or refresh path health.
+
 The current maximum UDP payload is 1,150 bytes. This leaves room in the
 mandatory 1,200-byte QUIC path for QUIC and DATAGRAM framing, the HTTP
 quarter-stream ID, and Context ID `0`. A larger logical payload would not be

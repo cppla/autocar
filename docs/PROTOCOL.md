@@ -315,6 +315,13 @@ its UDP socket and releases admission. Capsule data fallback and CONNECT-UDP
 over H2 are not implemented; negotiated H3 HTTP Datagram and Extended CONNECT
 settings are required.
 
+Target failure is not association failure: an authenticated HTTP `502`/`503`
+response when opening one target, or a local target/session admission limit,
+marks only that Send as unavailable. The SOCKS5 frontend drops that datagram
+without retrying and keeps other target streams alive. Authentication,
+connection, cancellation and unclassified failures remain terminal. No wire
+format, admission bound or credential verification rule is relaxed.
+
 ### Web automatic fallback
 
 `web-auto` first opens the standard CONNECT stream over H3. A transport failure
@@ -326,8 +333,10 @@ configured duration is a base randomized independently by +/-20% after each
 failure; after that interval exactly one concurrent flow probes H3.
 
 SOCKS5 UDP in `web-auto` always uses H3 CONNECT-UDP. It never enters the H2
-fallback or changes the TCP fallback circuit; it fails when the H3 path or HTTP
-Datagram negotiation is unavailable. Explicit `h3` supports CONNECT-UDP, while
+fallback; it fails when the H3 path or HTTP Datagram negotiation is unavailable.
+A newly authenticated CONNECT-UDP response can restore H3 path health (a target
+rejection does not count as a successful target connection); a cached-target
+enqueue cannot clear the TCP cooldown. Explicit `h3` supports CONNECT-UDP, while
 explicit `h2` does not advertise UDP.
 
 This is a reliability policy, not a wire downgrade: each new physical H2 or H3
