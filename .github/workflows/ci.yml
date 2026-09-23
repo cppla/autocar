@@ -71,6 +71,19 @@ jobs:
       - name: Test
         run: go test -shuffle=on -count=1 ./...
 
+  windows-udp-test:
+    name: Windows UDP continuity (Go 1.25.13)
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.25.13
+          cache: true
+      - name: Exercise native UDP continuity and platform bind errors
+        run: go test ./internal/tunnel -run '^(TestWebTestAddressInUse|TestQUICDatagramClosedPortPreservesAssociation)$' -count=5 -timeout=60s -v
+
   race:
     name: Race detector
     runs-on: ubuntu-24.04
