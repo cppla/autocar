@@ -256,9 +256,18 @@ func populateAccelerationMetadata(output *benchOutput, mode byte, dialer transpo
 	}
 }
 
+// percentile expects sorted, nonnegative measurements. The median averages
+// both central values for even sample counts; tail percentiles retain the
+// nearest-order-statistic convention instead of interpolating observations.
 func percentile(sorted []float64, fraction float64) float64 {
 	if len(sorted) == 0 {
 		return 0
+	}
+	if fraction == 0.5 && len(sorted)%2 == 0 {
+		middle := len(sorted) / 2
+		lower, upper := sorted[middle-1], sorted[middle]
+		// Avoid overflowing the sum for large, finite measurements.
+		return lower + (upper-lower)/2
 	}
 	index := int(float64(len(sorted)-1)*fraction + 0.5)
 	if index < 0 {
