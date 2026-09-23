@@ -253,6 +253,15 @@ progress as activity, including small buffered responses. Stalled request or
 response bodies and blocked writes remain bounded; header and keepalive
 timeouts are unchanged.
 
+Source builds also forward unknown-length HTTP response bodies and
+`text/event-stream` events without waiting for the origin to finish. Fixed-size
+non-streaming responses retain normal buffering. If copying an origin response
+fails, the proxy aborts that response instead of emitting a successful final
+chunk: HTTP/1.1 clients can detect truncation. Failure before buffered headers
+are sent can instead appear as a connection error. Declared trailers are
+forwarded only after the body completes successfully. This does not add HTTP
+Upgrade support or change CONNECT tunnels, and is not included in v1.0.1.
+
 The relay's separate `--destination-write-timeout` defaults to `5m`; `0`
 also selects `5m`, rather than disabling the limit. It bounds the completion
 of each TCP destination write, split into chunks of at most 32 KiB. Each

@@ -375,12 +375,17 @@ func TestHTTPActiveBodyIdleTimeouts(t *testing.T) {
 		server, proxyURL, stopProxy := startHTTPProxy(t, Config{Dialer: directDialer(), IdleTimeout: idle})
 		defer stopProxy(server)
 		client := proxyHTTPClient(t, proxyURL, nil)
+		started := time.Now()
 		response, err := client.Get(origin.URL + "/stall")
 		if err != nil {
-			t.Fatal(err)
+			// A fixed-size response with no body can remain buffered. Aborting
+			// the failed origin copy may therefore close before headers arrive.
+			if !errors.Is(err, io.EOF) || time.Since(started) > time.Second {
+				t.Fatalf("stalled response did not abort promptly: %v", err)
+			}
+			return
 		}
 		defer response.Body.Close()
-		started := time.Now()
 		_, err = io.ReadAll(response.Body)
 		if err == nil {
 			t.Fatal("truncated stalled response unexpectedly completed successfully")
