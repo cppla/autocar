@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -290,13 +291,55 @@ func (s *HTTPServer) serveForward(w http.ResponseWriter, r *http.Request) {
 		// writer buffers small chunks and the client sends nothing more.
 		body = &httpResponseActivityReader{Reader: body, conn: conn}
 	}
-	_, _ = io.Copy(w, body)
+	if err := copyHTTPResponse(w, body, response); err != nil {
+		// Headers may already be on the wire. Returning normally would let
+		// net/http finalize a chunked response (or infer a short Content-Length),
+		// hiding a truncated origin body from the client. Abort only this
+		// response; net/http handles the sentinel without logging a stack trace.
+		panic(http.ErrAbortHandler)
+	}
 	for key, values := range response.Trailer {
 		if isHopByHopHeader(key) {
 			continue
 		}
 		w.Header()[textproto.CanonicalMIMEHeaderKey(key)] = append([]string(nil), values...)
 	}
+}
+
+// Unknown-length responses and server-sent events can remain open indefinitely.
+// Flush their headers and each body write so small events don't wait in the
+// HTTP server's response buffer until the origin finishes. Ordinary fixed-size
+// responses retain net/http's buffering and copy optimizations.
+func copyHTTPResponse(w http.ResponseWriter, body io.Reader, response *http.Response) error {
+	contentType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	var destination io.Writer = w
+	if response.ContentLength == -1 || contentType == "text/event-stream" {
+		flush := http.NewResponseController(w).Flush
+		if err := flush(); err != nil {
+			// Serve's native ResponseWriter supports flushing. Preserve Handler
+			// compatibility for embedders whose wrappers don't expose it.
+			if !errors.Is(err, http.ErrNotSupported) {
+				return err
+			}
+		} else {
+			destination = httpResponseFlushWriter{writer: w, flush: flush}
+		}
+	}
+	_, err := io.Copy(destination, body)
+	return err
+}
+
+type httpResponseFlushWriter struct {
+	writer io.Writer
+	flush  func() error
+}
+
+func (w httpResponseFlushWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 && err == nil {
+		err = w.flush()
+	}
+	return n, err
 }
 
 type httpResponseActivityReader struct {
