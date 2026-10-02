@@ -273,6 +273,12 @@ that caller's wait, not a shared native client's physical dial. This does not
 add immediate peer-disconnect detection during a pending TCP dial, and is not
 included in v1.0.1.
 
+Source builds close any non-nil TCP connection returned alongside a custom
+dialer's setup error, before replying with failure. The original error still
+determines the SOCKS5 or HTTP failure response; a cleanup error does not replace
+it. A nil connection with no error is also rejected. This covers SOCKS5 TCP,
+HTTP CONNECT and ordinary HTTP forwarding, and is not included in v1.0.1.
+
 For SOCKS5 TCP and HTTP CONNECT tunnels, `--idle-timeout` (default `5m`)
 measures inactivity across both directions: an active download or upload does
 not need reverse-direction application traffic to stay open. A blocked write
