@@ -230,11 +230,55 @@ func removeUnsafeHeaders(header http.Header) {
 }
 
 func removeConnectionNominatedHeaders(header, connectionSource http.Header) {
+	var nominations map[string]struct{}
+	var scratch [64]byte
+	folded := scratch[:0]
 	for _, value := range headerValuesFold(connectionSource, "Connection") {
 		for token := range strings.SplitSeq(value, ",") {
-			if name := strings.TrimSpace(token); name != "" {
-				deleteHeaderFold(header, name)
+			name := strings.TrimSpace(token)
+			if !httpToken(name) {
+				continue
+			}
+			folded = foldASCIIHeaderName(folded, name)
+			if _, exists := nominations[string(folded)]; !exists {
+				if nominations == nil {
+					nominations = make(map[string]struct{})
+				}
+				// Only a new nomination owns a copied key. Repeated tokens
+				// reuse scratch; they never rescan the destination header.
+				nominations[string(folded)] = struct{}{}
 			}
 		}
 	}
+	if len(nominations) == 0 {
+		return
+	}
+	// Collect first: header and connectionSource may be the same map, and
+	// Connection itself may be nominated without hiding later nominations.
+	for field := range header {
+		if !httpToken(field) {
+			continue
+		}
+		folded = foldASCIIHeaderName(folded, field)
+		if _, nominated := nominations[string(folded)]; nominated {
+			delete(header, field)
+		}
+	}
+}
+
+// Call only for validated ASCII HTTP tokens. The scratch buffer is local to
+// one filtering call; map lookups need no separately retained folded string.
+func foldASCIIHeaderName(buffer []byte, name string) []byte {
+	if cap(buffer) < len(name) {
+		buffer = make([]byte, len(name))
+	}
+	buffer = buffer[:len(name)]
+	for index := range name {
+		char := name[index]
+		if char >= 'A' && char <= 'Z' {
+			char += 'a' - 'A'
+		}
+		buffer[index] = char
+	}
+	return buffer
 }

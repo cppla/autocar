@@ -6,12 +6,14 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -415,6 +417,122 @@ func TestWebsocketHeaderLookupUsesASCIIFieldNames(t *testing.T) {
 			}
 			if _, exists := header[alias]; !exists {
 				t.Fatal("deletion treated an invalid Unicode field as an ASCII alias")
+			}
+		})
+	}
+}
+
+func websocketUnitNominationHeaders(fields int) http.Header {
+	header := make(http.Header, fields)
+	for index := range fields {
+		header[fmt.Sprintf("X-%04d", index)] = []string{"a"}
+	}
+	return header
+}
+
+func websocketUnitNominationList(tokens int, distinct bool, name string) string {
+	if !distinct {
+		return strings.Repeat(name+",", tokens-1) + name
+	}
+	names := make([]string, tokens)
+	for index := range tokens {
+		names[index] = fmt.Sprintf("m%03x", index)
+	}
+	return strings.Join(names, ",")
+}
+
+func TestWebsocketConnectionNominationFilterBounded(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		tokens   int
+		distinct bool
+	}{
+		{"repeated_unmatched", 1600, false},
+		{"distinct_unmatched", 1024, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			header := websocketUnitNominationHeaders(800)
+			before := header.Clone()
+			source := http.Header{"Connection": {websocketUnitNominationList(test.tokens, test.distinct, "MiSsInG")}}
+			sourceBefore := source.Clone()
+			removeConnectionNominatedHeaders(header, source)
+			if !reflect.DeepEqual(header, before) || !reflect.DeepEqual(source, sourceBefore) {
+				t.Fatal("unmatched nominations mutated ordinary fields or a separate source")
+			}
+		})
+	}
+	t.Run("ascii_case_aliases_and_trimspace", func(t *testing.T) {
+		header := http.Header{
+			"X-Private": {"one"}, "x-private": {"two"}, "AUTHORIZATION": {"credential"},
+			"proxy-authorization": {"proxy credential"}, "Sec-Websocket-Key": {websocketUnitKey},
+			"X-Ordinary": {"kept"}, "X-Key": {"invalid name"}, "X-Key": {"ordinary"},
+		}
+		source := http.Header{"connection": {"\u00a0 X-private \u00a0, Authorization, PROXY-AUTHORIZATION, Sec-WebSocket-Key, X-Key,,bad(token"}}
+		removeConnectionNominatedHeaders(header, source)
+		want := http.Header{"X-Ordinary": {"kept"}, "X-Key": {"invalid name"}, "X-Key": {"ordinary"}}
+		if !reflect.DeepEqual(header, want) {
+			t.Fatalf("ASCII aliases/TrimSpace/invalid Unicode behavior = %v, want %v", header, want)
+		}
+	})
+	t.Run("same_map_collects_before_deletion", func(t *testing.T) {
+		header := http.Header{
+			"Connection": {"Connection, X-Private"}, "connection": {"Authorization, X-Later"},
+			"x-private": {"private"}, "AUTHORIZATION": {"credential"}, "X-Later": {"late"}, "X-Ordinary": {"kept"},
+		}
+		removeConnectionNominatedHeaders(header, header)
+		if !reflect.DeepEqual(header, http.Header{"X-Ordinary": {"kept"}}) {
+			t.Fatalf("self-nomination hid later source values: %v", header)
+		}
+	})
+	t.Run("full_scrub_with_large_unmatched_list", func(t *testing.T) {
+		header := websocketUnitNominationHeaders(800)
+		before := header.Clone()
+		header["connection"] = []string{websocketUnitNominationList(1600, false, "ABSENT")}
+		header["authorization"] = []string{"credential"}
+		header["PROXY-AUTHORIZATION"] = []string{"proxy credential"}
+		header["Upgrade"] = []string{"websocket"}
+		removeUnsafeHeaders(header)
+		if !reflect.DeepEqual(header, before) {
+			t.Fatal("unmatched nominations bypassed credential/hop scrubbing or removed ordinary fields")
+		}
+	})
+	t.Run("long_names_keep_owned_folded_keys", func(t *testing.T) {
+		name := "X-" + strings.Repeat("A", 96)
+		header := http.Header{name: {"private"}, "X-Other": {"kept"}}
+		source := http.Header{"Connection": {name + ",x-other"}}
+		removeConnectionNominatedHeaders(header, source)
+		if len(header) != 0 {
+			t.Fatal("resizing or reusing fold scratch changed a stored nomination")
+		}
+	})
+}
+
+// Local helper microbenchmark only: no listener, request, transport or network
+// traffic. Header/list setup and semantic checks are outside measured loops.
+func BenchmarkWebsocketConnectionNominationFilter(b *testing.B) {
+	for _, test := range []struct {
+		name     string
+		fields   int
+		tokens   int
+		distinct bool
+		token    string
+	}{
+		{"repeated_absent_32x1", 32, 1, false, "q"},
+		{"repeated_absent_800x1600", 800, 1600, false, "q"},
+		{"repeated_mixed_case_800x1600", 800, 1600, false, "MiSsInG"},
+		{"distinct_absent_800x1024", 800, 1024, true, ""},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			header := websocketUnitNominationHeaders(test.fields)
+			source := http.Header{"Connection": {websocketUnitNominationList(test.tokens, test.distinct, test.token)}}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				removeConnectionNominatedHeaders(header, source)
+			}
+			b.StopTimer()
+			if len(header) != test.fields {
+				b.Fatal("benchmark's absent nominations changed header fields")
 			}
 		})
 	}
