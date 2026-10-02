@@ -255,6 +255,15 @@ shutdown semantics or TCP CONNECT handling, and is not included in v1.0.1.
 Cancellation requires context-aware resolvers/dialers; custom implementations
 that ignore cancellation cannot be forcibly interrupted by the proxy.
 
+Source builds also cancel an HTTP connection's request contexts when that
+tracked connection is closed. This lets forced shutdown cancel a pending
+upstream request even when HTTP/1.1 pipelining has stopped the background
+reader from noticing socket closure. Graceful shutdown still allows active
+requests and CONNECT tunnels to finish until its deadline. Expiry returns the
+shutdown context error and initiates request cancellation and socket cleanup;
+it does not wait indefinitely for custom handlers that ignore cancellation.
+This change is not included in v1.0.1.
+
 For SOCKS5 TCP and HTTP CONNECT tunnels, `--idle-timeout` (default `5m`)
 measures inactivity across both directions: an active download or upload does
 not need reverse-direction application traffic to stay open. A blocked write

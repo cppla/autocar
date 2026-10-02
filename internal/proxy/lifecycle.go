@@ -88,12 +88,33 @@ func (t *connTracker) closeAll() {
 
 type trackedConn struct {
 	net.Conn
-	once            sync.Once
-	tracker         *connTracker
-	activityTimeout atomic.Int64
-	deadlineMu      sync.Mutex
-	externalRead    time.Time
-	externalWrite   time.Time
+	once             sync.Once
+	tracker          *connTracker
+	activityTimeout  atomic.Int64
+	deadlineMu       sync.Mutex
+	externalRead     time.Time
+	externalWrite    time.Time
+	closeMu          sync.Mutex
+	closed           bool
+	connectionCancel context.CancelFunc
+}
+
+// connectionContext binds net/http's connection context to explicit socket
+// closure. Its background reader can stop after caching a pipelined byte, so
+// closing the socket alone need not produce a read error that cancels a request.
+// ConnContext calls this once per accepted connection. Registration and Close
+// may race during shutdown; either ordering must return a canceled context.
+func (c *trackedConn) connectionContext(parent context.Context) context.Context {
+	ctx, cancel := context.WithCancel(parent)
+	c.closeMu.Lock()
+	if c.closed {
+		c.closeMu.Unlock()
+		cancel()
+		return ctx
+	}
+	c.connectionCancel = cancel
+	c.closeMu.Unlock()
+	return ctx
 }
 
 func (c *trackedConn) Read(p []byte) (int, error) {
@@ -193,7 +214,17 @@ func (c *trackedConn) setActivityTimeout(timeout time.Duration) {
 
 func (c *trackedConn) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(func() { c.tracker.remove(c) })
+	c.once.Do(func() {
+		c.closeMu.Lock()
+		c.closed = true
+		cancel := c.connectionCancel
+		c.connectionCancel = nil
+		c.closeMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		c.tracker.remove(c)
+	})
 	return err
 }
 

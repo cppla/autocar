@@ -61,7 +61,7 @@ func NewHTTPServer(cfg Config) (*HTTPServer, error) {
 		MaxHeaderBytes:    64 << 10,
 		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
 			if tracked, ok := conn.(*trackedConn); ok {
-				return context.WithValue(ctx, httpConnContextKey{}, tracked)
+				return context.WithValue(tracked.connectionContext(ctx), httpConnContextKey{}, tracked)
 			}
 			return ctx
 		},
