@@ -264,6 +264,15 @@ shutdown context error and initiates request cancellation and socket cleanup;
 it does not wait indefinitely for custom handlers that ignore cancellation.
 This change is not included in v1.0.1.
 
+Source builds also cancel pending SOCKS5 TCP CONNECT setup when its tracked
+client connection is forcibly closed, without waiting for the full dial
+timeout. Successful setup still cancels the temporary dialing context without
+tying the established tunnel to that timeout. There is no competing TCP reader:
+early payload and write-half-close remain usable. Cancellation affects only
+that caller's wait, not a shared native client's physical dial. This does not
+add immediate peer-disconnect detection during a pending TCP dial, and is not
+included in v1.0.1.
+
 For SOCKS5 TCP and HTTP CONNECT tunnels, `--idle-timeout` (default `5m`)
 measures inactivity across both directions: an active download or upload does
 not need reverse-direction application traffic to stay open. A blocked write

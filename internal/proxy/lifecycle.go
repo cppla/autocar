@@ -99,10 +99,11 @@ type trackedConn struct {
 	connectionCancel context.CancelFunc
 }
 
-// connectionContext binds net/http's connection context to explicit socket
-// closure. Its background reader can stop after caching a pipelined byte, so
-// closing the socket alone need not produce a read error that cancels a request.
-// ConnContext calls this once per accepted connection. Registration and Close
+// connectionContext binds frontend work to explicit socket closure. A caller
+// waiting for upstream setup need not be reading the socket; net/http's reader
+// can also stop after caching a pipelined byte. Socket closure alone therefore
+// need not cancel that work. The frontend calls this once per accepted
+// connection, from HTTP ConnContext or SOCKS TCP setup. Registration and Close
 // may race during shutdown; either ordering must return a canceled context.
 func (c *trackedConn) connectionContext(parent context.Context) context.Context {
 	ctx, cancel := context.WithCancel(parent)

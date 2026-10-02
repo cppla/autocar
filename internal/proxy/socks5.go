@@ -137,11 +137,23 @@ func (s *SOCKS5Server) serveConn(client net.Conn) {
 
 func (s *SOCKS5Server) serveConnect(client net.Conn, request socksRequest) {
 	ctx := context.Background()
-	cancel := func() {}
+	if tracked, ok := client.(*trackedConn); ok {
+		// Bind only this caller's setup wait to full socket close. Do not add
+		// a reader that could consume early payload or treat half-close as
+		// abandonment, and do not close the shared upstream dialer.
+		ctx = tracked.connectionContext(ctx)
+	}
+	var cancel context.CancelFunc
 	if s.cfg.dialTimeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, s.cfg.dialTimeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
 	}
-	upstream, err := s.cfg.dialer.DialContext(ctx, "tcp", request.address)
+	var upstream net.Conn
+	err := ctx.Err()
+	if err == nil {
+		upstream, err = s.cfg.dialer.DialContext(ctx, "tcp", request.address)
+	}
 	cancel()
 	if s.cfg.handshakeTimeout > 0 {
 		_ = client.SetWriteDeadline(time.Now().Add(s.cfg.handshakeTimeout))
