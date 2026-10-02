@@ -279,6 +279,13 @@ determines the SOCKS5 or HTTP failure response; a cleanup error does not replace
 it. A nil connection with no error is also rejected. This covers SOCKS5 TCP,
 HTTP CONNECT and ordinary HTTP forwarding, and is not included in v1.0.1.
 
+The same source-build ownership rule applies to custom destination dialers on
+the relay: native QUIC/TLS and authenticated H2/H3 close any connection returned
+with an error and reject a nil connection with no error. Failure replies retain
+their existing sanitized native status or authenticated HTTP 502; neither dial
+nor cleanup details are exposed. Healthy forwarding and shared connections are
+unchanged. This is not included in v1.0.1.
+
 For SOCKS5 TCP and HTTP CONNECT tunnels, `--idle-timeout` (default `5m`)
 measures inactivity across both directions: an active download or upload does
 not need reverse-direction application traffic to stay open. A blocked write

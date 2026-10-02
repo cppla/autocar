@@ -218,7 +218,11 @@ func (s *serverCore) handleStream(
 	dialCtx, cancel := context.WithTimeout(ctx, s.dialTimeout)
 	upstream, err := s.dialer.DialContext(dialCtx, req.Network.String(), req.Address)
 	cancel()
-	if err != nil {
+	if err != nil || upstream == nil {
+		// A custom dialer may return an owned connection even on failure.
+		if upstream != nil {
+			_ = upstream.Close()
+		}
 		// Do not expose resolver, topology or operating-system details to the
 		// peer. The ingress only needs a stable typed failure.
 		_ = protocol.WriteResponse(stream, protocol.Response{Status: protocol.StatusDialFailed, Message: "destination unavailable"})
