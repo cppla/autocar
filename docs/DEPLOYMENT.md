@@ -148,6 +148,15 @@ headers, and preserves the request path and query. Treat that origin as an
 Internet-facing application; do not point it at metadata or control-plane
 services.
 
+Source builds after v1.0.1 can forward narrowly validated H1.1 WebSocket GET
+upgrades to this same fixed origin; no new flag or arbitrary Upgrade proxy is
+introduced. Authorization and nominated hop fields are still stripped.
+Printable, parseable malformed upgrades remain ordinary scrubbed website requests;
+Go can reject invalid raw/header characters earlier. Invalid upstream
+101 responses become generic 502. Shutdown aborts owned upgraded sockets.
+See [WebSocket boundaries](WEB_COVER.md#website-websocket-support-in-source-builds)
+for handshake, application-policy and close semantics.
+
 `--listen` binds H3/UDP and `--tcp-listen` binds HTTPS/H1/H2. They must use the
 same numeric port; if `--tcp-listen` is omitted it inherits `--listen`. Open both
 TCP and UDP in the deployment firewall. `--disable-tcp-fallback` is invalid in

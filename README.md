@@ -21,6 +21,10 @@ AutoCAR 在本地提供 SOCKS5、HTTP 和 HTTPS Proxy，在远端解析并连接
 HTTP/3/UDP，UDP 不可用时让新 TCP 流继续走 HTTPS/HTTP/2/TCP；SOCKS5 UDP
 使用 H3 RFC 9298 CONNECT-UDP，不跨入 H2 fallback。
 
+源代码版本还支持固定上游网站的 HTTP/1.1 WebSocket，并在服务端关闭时回收
+升级连接；它仍是网站流量，不是新的代理隧道。限制见
+[WebSocket 网站兼容性](docs/WEB_COVER.md#website-websocket-support-in-source-builds)。
+
 v1.0.1 是功能增强与问题修复版本。默认仍为 `native` 服务端与 `auto` 客户端；
 **Web-cover 是需要显式开启的实验性功能**，发布不代表其被动抗识别能力已经验证。
 变更、升级与限制见 [v1.0.1 发布说明](docs/releases/v1.0.1.md)。

@@ -170,6 +170,15 @@ HTTP stream; there is no AutoCAR binary stream preface. H3 additionally
 recognizes an authenticated Extended CONNECT with `:protocol=connect-udp` as
 described below.
 
+Source builds after v1.0.1 support the configured website's narrowly validated
+H1.1 WebSocket GET/101 exchange. It remains fixed-origin cover traffic, never
+an authenticated H1 tunnel, arbitrary Upgrade, h2c or H2/H3 WebSocket extended
+CONNECT. Ordinary combined H3 cover responses also use the bound Alt-Svc
+policy; authenticated writers and standalone H3 policy are unchanged.
+See [website WebSocket support](WEB_COVER.md#website-websocket-support-in-source-builds)
+for exact validation and abort/cleanup limits; raw upgraded 101 advertisement
+is not covered by the ordinary-response override.
+
 An authenticated request that exceeds stream admission receives generic HTTP
 `503`; an allowed request whose destination cannot be opened receives generic
 HTTP `502`. These responses are available only after a valid credential has
