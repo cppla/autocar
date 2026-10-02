@@ -126,6 +126,20 @@ remain available, and the body is still streamed rather than buffered in full.
 This is defensive handling of upstream metadata, not an additional tunnel
 authentication mechanism.
 
+Source builds also apply that filter to upstream informational responses,
+including `103 Early Hints`, before forwarding them. Ordinary `Link` hints and
+other end-to-end fields remain available; credentials, hop-by-hop fields and
+fields named by `Connection` do not bypass filtering through an early response.
+This hardening is not included in v1.0.1.
+
+Source-built H3 clients also consume up to five non-final `1xx` responses before
+checking the final CONNECT or CONNECT-UDP response and its authentication proof.
+This permits ordinary informational responses without treating them as tunnel
+authentication failures. A sixth informational response is rejected; each hint
+does not restart the existing establishment deadline. Informational headers are
+never accepted as a replacement for the final signed proof. This client fix is
+not included in v1.0.1.
+
 In web mode:
 
 - `--listen` is the UDP/H3 bind address and `--tcp-listen` is the TCP/H1/H2
