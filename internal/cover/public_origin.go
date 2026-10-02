@@ -14,7 +14,8 @@ import (
 // and TLS still use upstream; public supplies only the outbound Host and the
 // trusted X-Forwarded-Host/Proto values. Both URLs must be root origins.
 //
-// Origin, Referer, cookies, redirects, and content are never rewritten. The
+// Origin, Referer, cookies, redirects, and content are not rewritten by the
+// handler. Supplied transports retain their own compression policy. The
 // upstream must generate its own public URLs and retain its CSRF/Origin checks;
 // an absent Origin is not evidence that a request is safe. Its trusted-header
 // whitelist must use only the proxy-owned forwarding fields, not arbitrary

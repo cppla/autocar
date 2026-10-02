@@ -40,6 +40,15 @@ HTTP/2 CONNECT presented to the public origin is always treated as cover,
 including when it carries an otherwise valid ticket: the handler removes
 `Proxy-Authorization` before delegation and never dials its authority.
 
+Public physical-connection limits are separate from authenticated tunnel-stream
+limits, and the combined TCP/UDP server shares its global and per-source
+connection allowance. Source builds after v1.0.1 reject an excess H3 connection
+with `H3_EXCESSIVE_LOAD` (`0x107`), rather than reusing the native relay's code,
+which means `H3_INTERNAL_ERROR` in [HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html#section-8.1).
+Rejection happens before HTTP dispatch;
+the existing admitted connection remains usable and closing it releases capacity.
+This is overload handling, not a tunnel authentication response.
+
 ### Website WebSocket support in source builds
 
 Source builds after v1.0.1 also forward valid HTTP/1.1 WebSocket upgrades to
@@ -201,6 +210,17 @@ end-to-end headers, but cannot choose the upstream authority. The proxy rewrites
 the upstream cannot be reached. Consequently, an upstream that requires an
 `Authorization` request header is not suitable without a separate authorized
 front end.
+
+Source builds after v1.0.1 disable automatic compression negotiation and response
+decompression on the proxy's private default upstream transport. The visitor's
+`Accept-Encoding` remains unchanged: explicitly requested gzip still works, and
+the origin's encoded bytes, `Content-Encoding`, length, digest and ETag remain
+together. This avoids rewriting `no-transform` content while retaining metadata
+for the old bytes; see [HTTP message transformations](https://www.rfc-editor.org/rfc/rfc9110.html#section-7.7).
+It does not verify the website's digest or establish browser-like fingerprints.
+Applications supplying a custom RoundTripper retain its own negotiation/decoding
+policy and must configure transparent forwarding themselves. Static cover,
+authenticated tunnel payloads and the published v1.0.1 binary are unchanged.
 
 #### Optional fixed public origin in source builds
 

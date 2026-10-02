@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/apernet/quic-go"
+	"github.com/apernet/quic-go/http3"
 )
 
 // webConnectionAdmission bounds public web-cover connections before they can
@@ -125,7 +126,9 @@ func (l *webAdmissionQUICListener) Accept(ctx context.Context) (*quic.Conn, erro
 		}
 		release, ok := l.admission.acquire(conn.RemoteAddr())
 		if !ok {
-			_ = conn.CloseWithError(quic.ApplicationErrorCode(connectionRejected), "connection unavailable")
+			// This listener speaks HTTP/3, not the native relay protocol. Its
+			// connection limit is an overload condition, not an internal error.
+			_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeExcessiveLoad), "connection unavailable")
 			continue
 		}
 		go func() {
