@@ -152,6 +152,28 @@ The static handler serves `GET` and `HEAD`. Other methods receive the same
 ordinary `405 Method Not Allowed` behavior whether they came from a random web
 client or from an invalid tunnel probe.
 
+Source builds after v1.0.1 confine each static request to `--cover-root` using
+Go's [traversal-resistant file API](https://go.dev/blog/osroot). Relative symbolic
+links that stay inside the root continue to work; links outside the root and
+absolute symbolic links (even those pointing back inside it) are not served.
+Dot-prefixed path components such as `.env` and `.git` return ordinary `404`
+responses and are omitted from directory listings. This policy applies to
+normalized, decoded URL paths; backslash paths are rejected, and Windows
+also rejects colon paths to prevent alternate-data-stream access. The root-level
+`/.well-known/` directory remains public, including ACME challenge files, but
+dot-prefixed entries beneath it are still hidden. Normal index pages,
+directory redirects/listings, `HEAD`, and byte ranges retain standard HTTP
+file-server behavior.
+
+The root handle is opened and closed per request, so deploying a replacement
+site at the configured directory takes effect on subsequent requests without
+leaving a long-lived handler-owned descriptor. This is not a filesystem sandbox:
+mount points, hard links and public aliases to hidden content are not separated
+by this policy. Keep the site tree public-only and the configured directory and
+its parent under trusted control;
+do not mount credentials or device files inside it. On upgrade, replace any
+absolute site links with confined relative links or ordinary copied files.
+
 Source builds after v1.0.1 send `OPTIONS *` through the configured cover handler
 on HTTP/1.1, HTTP/2, and HTTP/3, instead of letting the TCP server return a
 separate automatic response. Static cover therefore returns its ordinary `405`

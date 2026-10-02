@@ -12,8 +12,6 @@ import (
 	"net/http/httputil"
 	"net/textproto"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -28,39 +26,6 @@ var hopByHopHeaders = [...]string{
 	"Trailer",
 	"Transfer-Encoding",
 	"Upgrade",
-}
-
-// NewStaticHandler returns a handler rooted at directory. Only GET and HEAD
-// are accepted; all other methods receive a normal HTTP 405 response.
-func NewStaticHandler(directory string) (http.Handler, error) {
-	if strings.TrimSpace(directory) == "" {
-		return nil, errors.New("static directory is required")
-	}
-	root, err := filepath.Abs(directory)
-	if err != nil {
-		return nil, errors.New("resolve static directory")
-	}
-	info, err := os.Stat(root)
-	if err != nil {
-		return nil, errors.New("open static directory")
-	}
-	if !info.IsDir() {
-		return nil, errors.New("static path is not a directory")
-	}
-	return &staticHandler{files: http.FileServer(http.Dir(root))}, nil
-}
-
-type staticHandler struct {
-	files http.Handler
-}
-
-func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		return
-	}
-	h.files.ServeHTTP(w, r)
 }
 
 // NewReverseProxyHandler returns a reverse proxy that can dial only origin.
