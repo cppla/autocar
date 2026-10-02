@@ -12,6 +12,7 @@ import (
 
 	"github.com/cppla/autocar/internal/accel"
 	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/qlogwriter"
 )
 
 const feedbackChunkSize = 32 << 10
@@ -135,6 +136,11 @@ type feedbackQUICFixture struct {
 
 func newFeedbackQUICFixture(t *testing.T, streamCount int, receiveWindow uint64) *feedbackQUICFixture {
 	t.Helper()
+	return newFeedbackQUICFixtureWithTrace(t, streamCount, receiveWindow, nil)
+}
+
+func newFeedbackQUICFixtureWithTrace(t *testing.T, streamCount int, receiveWindow uint64, trace qlogwriter.Trace) *feedbackQUICFixture {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	f := &feedbackQUICFixture{ctx: ctx, clock: &feedbackRealClock{}}
 	var listener *quic.Listener
@@ -169,6 +175,9 @@ func newFeedbackQUICFixture(t *testing.T, streamCount int, receiveWindow uint64)
 		t.Fatal(err)
 	}
 	quicConfig := hardenedQUICClientConfig(nil)
+	if trace != nil {
+		quicConfig.Tracer = func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return trace }
+	}
 	if receiveWindow != 0 {
 		quicConfig.InitialStreamReceiveWindow = receiveWindow
 		quicConfig.MaxStreamReceiveWindow = receiveWindow
@@ -295,19 +304,30 @@ func readFeedbackPayload(reader io.Reader, size int) error {
 
 type feedbackRawStream struct {
 	quicStream
-	entered   chan struct{}
-	pending   atomic.Bool
-	writeTime atomic.Int64
+	entered      chan struct{}
+	pending      atomic.Bool
+	writeTime    atomic.Int64
+	writeWitness *feedbackWriteWitness
 }
 
 func (s *feedbackRawStream) Write(p []byte) (int, error) {
 	started := time.Now()
 	s.pending.Store(true)
+	first := false
+	if witness := s.writeWitness; witness != nil {
+		witness.once.Do(func() {
+			first = true
+			close(witness.started)
+		})
+	}
 	select {
 	case s.entered <- struct{}{}:
 	default:
 	}
 	n, err := s.quicStream.Write(p)
+	if first {
+		close(s.writeWitness.done)
+	}
 	s.pending.Store(false)
 	s.writeTime.Add(int64(time.Since(started)))
 	return n, err

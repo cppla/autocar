@@ -9,12 +9,16 @@ import (
 // changes from fast to slow and back. The small, fixed receive window makes
 // its backpressure observable instead of buffering the whole slow phase.
 func TestQUICPacingRecoversAfterReceiverBackpressure(t *testing.T) {
-	f := newFeedbackQUICFixture(t, 1, 16<<10)
-	fast := runPacingRecoveryPhase(t, f, "fast before", 1<<20, 0)
-	slow := runPacingRecoveryPhase(t, f, "receiver limited", 16*feedbackChunkSize, 120*time.Millisecond)
-	if slow.write <= slow.wait {
-		t.Fatalf("fixture did not establish transport backpressure: Write=%s, Wait=%s", slow.write, slow.wait)
-	}
+	trace := newFeedbackBlockedTrace()
+	f := newFeedbackQUICFixtureWithTrace(t, 1, 16<<10, trace)
+	trace.selectStream(f.clientStreams[0].StreamID())
+	const warmupBytes = 1 << 20
+	fast := runPacingRecoveryPhase(t, f, "fast before", warmupBytes, 0, nil)
+	// Arm only after the warmup writer has joined. A blocked offset beyond
+	// warmup excludes delayed/retransmitted old frames. Withhold the first
+	// read until the same first raw Write is still pending on real flow control.
+	gate := newFeedbackBackpressureGate(f.rawStreams[0], trace, warmupBytes)
+	slow := runPacingRecoveryPhase(t, f, "receiver limited", 16*feedbackChunkSize, 120*time.Millisecond, gate)
 	// Even both worst-case balanced-profile penalties cannot reduce an
 	// unchanged capacity target below 36%. Require an actual capacity decline,
 	// not merely a transient RTT/loss penalty, before checking rediscovery.
@@ -24,7 +28,7 @@ func TestQUICPacingRecoversAfterReceiverBackpressure(t *testing.T) {
 
 	var recovered [4]pacingRecoveryPhase
 	for index := range recovered {
-		recovered[index] = runPacingRecoveryPhase(t, f, "fast after", 512<<10, 0)
+		recovered[index] = runPacingRecoveryPhase(t, f, "fast after", 512<<10, 0, nil)
 	}
 	f.checkReverse(t)
 	// The first two windows allow discovery. Require sustained useful progress
@@ -53,12 +57,24 @@ type pacingRecoveryPhase struct {
 	wait, write    time.Duration
 }
 
-func runPacingRecoveryPhase(t *testing.T, f *feedbackQUICFixture, name string, size int, readDelay time.Duration) pacingRecoveryPhase {
+func runPacingRecoveryPhase(t *testing.T, f *feedbackQUICFixture, name string, size int, readDelay time.Duration, gate *feedbackBackpressureGate) pacingRecoveryPhase {
 	t.Helper()
 	started := time.Now()
 	waitBefore := f.streamPacers[0].waitTime.Load()
 	writeBefore := f.rawStreams[0].writeTime.Load()
-	writer := f.run(func() error { return writeFeedbackPayload(f.serverStreams[0], size) })
+	finished := make(chan struct{})
+	writer := f.run(func() error {
+		defer close(finished)
+		return writeFeedbackPayload(f.serverStreams[0], size)
+	})
+	if gate != nil {
+		offset, err := gate.await(f.ctx, finished)
+		if err != nil {
+			t.Fatalf("%s: real receiver backpressure not established: %v", name, err)
+		}
+		t.Logf("%s: received STREAM_DATA_BLOCKED stream=%d offset=%d > warmup=%d; first raw Write still pending before first read",
+			name, f.clientStreams[0].StreamID(), offset, gate.warmupOffset)
+	}
 	for read := 0; read < size; read += feedbackChunkSize {
 		if readDelay > 0 {
 			timer := time.NewTimer(readDelay)
