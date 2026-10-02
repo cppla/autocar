@@ -476,8 +476,8 @@ func (c *WebH3Client) releaseSession(session *webH3ClientSession) {
 }
 
 func (c *WebH3Client) connection(ctx context.Context) (*quic.Conn, *http3.ClientConn, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, nil, context.Cause(ctx)
+	if err := contextError(ctx); err != nil {
+		return nil, nil, err
 	}
 	c.mu.Lock()
 	if c.closed {
@@ -504,13 +504,13 @@ func (c *WebH3Client) connection(ctx context.Context) (*quic.Conn, *http3.Client
 	case <-ctx.Done():
 		return nil, nil, context.Cause(ctx)
 	case <-c.ctx.Done():
-		if err := ctx.Err(); err != nil {
-			return nil, nil, context.Cause(ctx)
+		if err := contextError(ctx); err != nil {
+			return nil, nil, err
 		}
 		return nil, nil, net.ErrClosed
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, nil, context.Cause(ctx)
+	if err := contextError(ctx); err != nil {
+		return nil, nil, err
 	}
 	if c.ctx.Err() != nil {
 		return nil, nil, net.ErrClosed

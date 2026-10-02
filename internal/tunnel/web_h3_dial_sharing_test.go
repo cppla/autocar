@@ -809,3 +809,121 @@ func TestWebH3DialFallbackReachesAuthenticatedH2(t *testing.T) {
 	f.healthy(relay, targetResults, 4, 2)
 	t.Log("custom physical budget=1s, primary budget=4s; defaults remain 5s, not a default latency or browser-equivalence claim")
 }
+
+// webH3DialUnpublishedDeadlineContext is a synthetic, fixed-deadline Context
+// model. Err and Done delegate to the independently bounded fixture context,
+// deliberately holding publication of this deadline until fixture cleanup.
+// This models the timer-publication gap; it is not evidence of a naturally
+// observed scheduling race. Deadline never changes, and no sleep is an entry
+// or completion witness.
+type webH3DialUnpublishedDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (ctx webH3DialUnpublishedDeadlineContext) Deadline() (time.Time, bool) {
+	return ctx.deadline, true
+}
+
+func TestWebH3DialElapsedDeadlineBeforePublication(t *testing.T) {
+	t.Run("expired_entry_skips_physical_dial", func(t *testing.T) {
+		f := newWebH3DialSharingFixture(t)
+		u := f.udp("127.0.0.1:0", "")
+		client := f.h3(u.front.LocalAddr().String())
+		ctx := webH3DialUnpublishedDeadlineContext{Context: f.ctx, deadline: time.Now().Add(-time.Second)}
+		if ctx.Err() != nil {
+			t.Fatal("synthetic deadline was already published")
+		}
+		conn, err := client.DialContext(ctx, "tcp", "owned-dummy.example:443")
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if conn != nil || err != context.DeadlineExceeded || webH3DialSharingAttempt(client) != 0 {
+			t.Errorf("expired entry conn=%v error=%v attempt=%x; want exact caller DeadlineExceeded and no dial", conn != nil, err, webH3DialSharingAttempt(client))
+		}
+		f.phaseCount(u, 0)
+	})
+
+	t.Run("caller_context_precedes_closed_client", func(t *testing.T) {
+		f := newWebH3DialSharingFixture(t)
+		u := f.udp("127.0.0.1:0", "")
+		client := f.h3(u.front.LocalAddr().String())
+		if err := client.Close(); err != nil {
+			t.Fatal(err)
+		}
+		expired := time.Now().Add(-time.Second)
+		ctx := webH3DialUnpublishedDeadlineContext{Context: f.ctx, deadline: expired}
+		conn, err := client.DialContext(ctx, "tcp", "owned-dummy.example:443")
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if conn != nil || err != context.DeadlineExceeded {
+			t.Errorf("expired closed-client conn=%v error=%v; want exact caller DeadlineExceeded before ErrClosed", conn != nil, err)
+		}
+		parent, cancel := context.WithCancelCause(f.ctx)
+		cause := errors.New("owned elapsed-deadline custom cause")
+		cancel(cause)
+		caused := webH3DialUnpublishedDeadlineContext{Context: parent, deadline: expired}
+		conn, err = client.DialContext(caused, "tcp", "owned-dummy.example:443")
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if conn != nil || err != cause {
+			t.Errorf("custom-cause closed-client conn=%v error=%v; want original cause identity", conn != nil, err)
+		}
+		f.phaseCount(u, 0)
+	})
+
+	t.Run("completed_attempt_preserves_elapsed_caller_priority", func(t *testing.T) {
+		f := newWebH3DialSharingFixture(t)
+		u := f.udp("127.0.0.1:0", "")
+		client := f.h3(u.front.LocalAddr().String())
+		ctx := webH3DialUnpublishedDeadlineContext{Context: f.ctx, deadline: time.Now().Add(500 * time.Millisecond)}
+		result := make(chan webH3DialSharingResult, 1)
+		joined := make(chan struct{})
+		f.join("unpublished-deadline caller", joined)
+		go func() {
+			defer close(joined)
+			conn, err := client.DialContext(ctx, "tcp", "owned-dummy.example:443")
+			if conn != nil {
+				_ = conn.Close()
+			}
+			result <- webH3DialSharingResult{err: err, success: conn != nil}
+		}()
+		f.wait(u.first, "actual Initial before synthetic deadline")
+		if !time.Now().Before(ctx.deadline) {
+			t.Fatal("first actual Initial not observed before fixed caller deadline; completion-path witness invalid")
+		}
+		client.mu.Lock()
+		attempt := client.dial
+		client.mu.Unlock()
+		if attempt == nil {
+			t.Fatal("actual Initial had no active physical attempt")
+		}
+		f.wait(joined, "caller after physical blackhole completion")
+		r := <-result
+		select {
+		case <-attempt.done:
+		default:
+			t.Fatal("caller returned before immutable physical result was published")
+		}
+		if time.Now().Before(ctx.deadline) || ctx.Err() != nil {
+			t.Fatal("fixed deadline not elapsed with Err still pending")
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("synthetic deadline publication was not held")
+		default:
+		}
+		if r.success || r.err != context.DeadlineExceeded {
+			t.Errorf("completed caller success=%v error=%v; want exact caller DeadlineExceeded, not wrapped physical timeout", r.success, r.err)
+		}
+		if attempt.err == nil || !errors.Is(attempt.err, context.DeadlineExceeded) || attempt.err == r.err {
+			t.Errorf("immutable physical error=%v caller=%v; want distinct physical timeout and caller deadline identities", attempt.err, r.err)
+		}
+		if webH3DialSharingAttempt(client) != 0 {
+			t.Error("completed physical failure retained active attempt")
+		}
+		f.phaseCount(u, 1)
+	})
+}
