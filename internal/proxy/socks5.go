@@ -158,7 +158,16 @@ func (s *SOCKS5Server) serveConnect(client net.Conn, request socksRequest) {
 	if s.cfg.handshakeTimeout > 0 {
 		_ = client.SetWriteDeadline(time.Now().Add(s.cfg.handshakeTimeout))
 	}
-	if err != nil {
+	if err != nil || upstream == nil {
+		// A custom dialer may return a connection along with a setup error.
+		// Close only that failed result, never the shared dialer, and retain
+		// the original error for the SOCKS reply even if Close also fails.
+		if upstream != nil {
+			_ = upstream.Close()
+		}
+		if err == nil {
+			err = errors.New("proxy: TCP dialer returned a nil connection")
+		}
 		_ = writeSOCKSReply(client, socksReplyForError(err), nil)
 		return
 	}

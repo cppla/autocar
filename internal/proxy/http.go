@@ -388,7 +388,16 @@ func (s *HTTPServer) dialContext(ctx context.Context, network, address string) (
 		defer cancel()
 		conn, err = s.cfg.dialer.DialContext(dialCtx, network, address)
 	}
-	if err != nil {
+	if err != nil || conn == nil {
+		// Own a custom dialer's non-nil failed result before discarding it.
+		// A Close error must not replace the original dial error or its
+		// timeout classification.
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if err == nil {
+			err = errors.New("proxy: TCP dialer returned a nil connection")
+		}
 		return nil, err
 	}
 	return &activityConn{Conn: conn, timeout: s.cfg.idleTimeout}, nil
