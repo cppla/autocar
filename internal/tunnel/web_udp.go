@@ -938,7 +938,7 @@ func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) 
 		}
 		return nil, fmt.Errorf("tunnel: send CONNECT-UDP request for %s: %w", canonicalTarget, err)
 	}
-	response, err := stream.ReadResponse()
+	response, err := readWebH3FinalResponse(stream)
 	if err != nil {
 		fail()
 		if reservation.bootstrap {

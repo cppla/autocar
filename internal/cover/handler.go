@@ -8,7 +8,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -76,7 +78,7 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 	}
 
 	proxy := &httputil.ReverseProxy{
-		Transport: transport,
+		Transport: &informationalHeaderTransport{base: transport},
 		Rewrite: func(request *httputil.ProxyRequest) {
 			request.SetURL(target)
 			request.Out.Host = target.Host
@@ -97,6 +99,26 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
 	return proxy, nil
+}
+
+// informationalHeaderTransport filters upstream headers before ReverseProxy's
+// trace copies an informational response to the downstream writer. Its
+// ModifyResponse hook only sees the final response. Install a fresh trace here,
+// after ReverseProxy installs its own, so filtering runs before older hooks
+// without changing their order or return values or wrapping the response writer.
+type informationalHeaderTransport struct {
+	base http.RoundTripper
+}
+
+func (t *informationalHeaderTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	trace := &httptrace.ClientTrace{
+		Got1xxResponse: func(_ int, header textproto.MIMEHeader) error {
+			removeUnsafeHeaders(http.Header(header))
+			return nil
+		},
+	}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+	return t.base.RoundTrip(request)
 }
 
 // responseTrailerBody filters fields that a transport discovers only at EOF

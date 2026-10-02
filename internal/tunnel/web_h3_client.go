@@ -324,7 +324,7 @@ func (c *WebH3Client) DialContext(ctx context.Context, network, address string) 
 		}
 		return nil, fmt.Errorf("tunnel: send web-cover H3 CONNECT: %w", err)
 	}
-	response, err := stream.ReadResponse()
+	response, err := readWebH3FinalResponse(stream)
 	if err != nil {
 		fail()
 		if reservation.bootstrap {
