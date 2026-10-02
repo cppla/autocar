@@ -112,10 +112,11 @@ func listenWebH2WithCore(config WebH2ServerConfig, core *serverCore, auth *webAu
 	}
 
 	httpServer := &http.Server{
-		Handler:           handler,
-		TLSConfig:         tlsConfig,
-		ReadHeaderTimeout: core.handshakeTimeout,
-		IdleTimeout:       90 * time.Second,
+		Handler:                      handler,
+		TLSConfig:                    tlsConfig,
+		ReadHeaderTimeout:            core.handshakeTimeout,
+		IdleTimeout:                  90 * time.Second,
+		DisableGeneralOptionsHandler: true,
 		ConnContext: func(ctx context.Context, connection net.Conn) context.Context {
 			// Request.TLS is normally populated by net/http, but it isn't part of
 			// the HTTP/2 handler contract when Serve is given a TLS listener. Keep
