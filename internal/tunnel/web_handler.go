@@ -65,7 +65,11 @@ func (h *webTunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dialCtx, cancel := context.WithTimeout(r.Context(), h.core.dialTimeout)
 	upstream, err := h.core.dialer.DialContext(dialCtx, "tcp", r.Host)
 	cancel()
-	if err != nil {
+	if err != nil || upstream == nil {
+		// Keep cleanup errors out of the authenticated failure response.
+		if upstream != nil {
+			_ = upstream.Close()
+		}
 		h.writeAuthenticatedError(w, &authentication, http.StatusBadGateway)
 		return
 	}
