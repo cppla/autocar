@@ -80,11 +80,38 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 	proxy := &httputil.ReverseProxy{
 		Transport: &informationalHeaderTransport{base: transport},
 		Rewrite: func(request *httputil.ProxyRequest) {
+			upgrade := websocketRequestEligibility(request.In)
 			request.SetURL(target)
 			request.Out.Host = target.Host
+			// ReverseProxy already removes nominated fields before Rewrite,
+			// then restores its generic Upgrade pair. Retain the original
+			// nomination boundary, and restore only our validated H1 WebSocket.
+			removeConnectionNominatedHeaders(request.Out.Header, request.In.Header)
 			removeUnsafeHeaders(request.Out.Header)
+			if upgrade.eligible {
+				request.Out.Header.Set("Connection", "Upgrade")
+				request.Out.Header.Set("Upgrade", "websocket")
+			}
+			request.Out = withWebsocketRequestEligibility(request.Out, upgrade)
 		},
 		ModifyResponse: func(response *http.Response) error {
+			if response.StatusCode == http.StatusSwitchingProtocols {
+				if response.Body == nil {
+					// ReverseProxy closes Body unconditionally on hook failure.
+					response.Body = http.NoBody
+				}
+				if err := validateWebsocketResponse(response); err != nil {
+					return err
+				}
+				if err := ownWebsocketResponse(response); err != nil {
+					return err
+				}
+				removeUnsafeHeaders(response.Header)
+				removeUnsafeHeaders(response.Trailer)
+				response.Header.Set("Connection", "Upgrade")
+				response.Header.Set("Upgrade", "websocket")
+				return nil // Preserve duplex I/O and optional CloseWrite.
+			}
 			removeUnsafeHeaders(response.Header)
 			removeUnsafeHeaders(response.Trailer)
 			// An upgraded body is duplex, not an HTTP message with trailers.
@@ -93,7 +120,8 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 			}
 			return nil
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+		ErrorHandler: func(w http.ResponseWriter, request *http.Request, _ error) {
+			closeWebsocketResponse(request)
 			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
@@ -111,6 +139,9 @@ type informationalHeaderTransport struct {
 }
 
 func (t *informationalHeaderTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	// Capture the immutable Rewrite result before an optional custom transport
+	// sees the request. Its response.Request is not evidence of eligibility.
+	trusted := websocketResponseRequest(request)
 	trace := &httptrace.ClientTrace{
 		Got1xxResponse: func(_ int, header textproto.MIMEHeader) error {
 			removeUnsafeHeaders(http.Header(header))
@@ -118,7 +149,11 @@ func (t *informationalHeaderTransport) RoundTrip(request *http.Request) (*http.R
 		},
 	}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
-	return t.base.RoundTrip(request)
+	response, err := t.base.RoundTrip(request)
+	if response != nil && response.StatusCode == http.StatusSwitchingProtocols {
+		response.Request = trusted
+	}
+	return response, err
 }
 
 // responseTrailerBody filters fields that a transport discovers only at EOF
@@ -187,15 +222,19 @@ func normalizeOrigin(origin *url.URL) (*url.URL, error) {
 }
 
 func removeUnsafeHeaders(header http.Header) {
-	for _, value := range header.Values("Connection") {
+	removeConnectionNominatedHeaders(header, header)
+	for _, name := range hopByHopHeaders {
+		deleteHeaderFold(header, name)
+	}
+	deleteHeaderFold(header, "Authorization")
+}
+
+func removeConnectionNominatedHeaders(header, connectionSource http.Header) {
+	for _, value := range headerValuesFold(connectionSource, "Connection") {
 		for token := range strings.SplitSeq(value, ",") {
 			if name := strings.TrimSpace(token); name != "" {
-				header.Del(name)
+				deleteHeaderFold(header, name)
 			}
 		}
 	}
-	for _, name := range hopByHopHeaders {
-		header.Del(name)
-	}
-	header.Del("Authorization")
 }

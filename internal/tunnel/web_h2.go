@@ -59,6 +59,7 @@ type WebH2ServerConfig struct {
 type WebH2Server struct {
 	listener net.Listener
 	server   *http.Server
+	tcpOwner *webTCPConnectionOwner
 
 	serveMu sync.Mutex
 	serving bool
@@ -163,9 +164,12 @@ func listenWebH2WithCore(config WebH2ServerConfig, core *serverCore, auth *webAu
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: listen web-cover TCP: %w", err)
 	}
+	owner := newWebTCPConnectionOwner()
+	httpServer.BaseContext = func(net.Listener) context.Context { return owner.ctx }
 	return &WebH2Server{
-		listener: tls.NewListener(&webAdmissionListener{Listener: raw, admission: connectionAdmission}, tlsConfig),
+		listener: tls.NewListener(&webAdmissionListener{Listener: raw, admission: connectionAdmission, owner: owner}, tlsConfig),
 		server:   httpServer,
+		tcpOwner: owner,
 	}, nil
 }
 
@@ -196,9 +200,11 @@ func (s *WebH2Server) Serve(ctx context.Context) error {
 	return fmt.Errorf("tunnel: serve web-cover HTTP/2: %w", err)
 }
 
-// Close stops the listener and aborts active HTTP streams.
+// Close stops the listener and aborts active HTTP streams and hijacked cover
+// connections. It does not close a shared destination dialer or cover transport.
 func (s *WebH2Server) Close() error {
 	s.closeOnce.Do(func() {
+		ownerErr := s.tcpOwner.close()
 		serverErr := s.server.Close()
 		listenerErr := s.listener.Close()
 		if errors.Is(serverErr, http.ErrServerClosed) || errors.Is(serverErr, net.ErrClosed) {
@@ -207,7 +213,7 @@ func (s *WebH2Server) Close() error {
 		if errors.Is(listenerErr, net.ErrClosed) {
 			listenerErr = nil
 		}
-		s.closeErr = errors.Join(serverErr, listenerErr)
+		s.closeErr = errors.Join(ownerErr, serverErr, listenerErr)
 	})
 	return s.closeErr
 }

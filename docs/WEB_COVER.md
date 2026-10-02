@@ -40,6 +40,55 @@ HTTP/2 CONNECT presented to the public origin is always treated as cover,
 including when it carries an otherwise valid ticket: the handler removes
 `Proxy-Authorization` before delegation and never dials its authority.
 
+### Website WebSocket support in source builds
+
+Source builds after v1.0.1 also forward valid HTTP/1.1 WebSocket upgrades to
+the configured `--cover-upstream` origin. This is website traffic, never an
+AutoCAR tunnel or a requester-selected upstream. It works on the public TCP
+listener with TLS 1.2 or 1.3; static cover and H2/H3 extended CONNECT behavior
+are unchanged. An HTTPS website's ordinary H2 connection can remain reusable
+while its WebSocket handshake uses H1.
+
+The initial upgrade allowlist is deliberately narrow: body-free H1.1 GET,
+one WebSocket Upgrade value, one valid Connection token list containing
+Upgrade, version 13, and one canonical base64 key decoding to 16 bytes.
+Ambiguous/duplicate fields, other upgrade protocols, body/transfer coding,
+Connection close, and nominations of required or negotiation handshake fields
+are not upgraded. Parseable, printable malformed handshakes continue as
+scrubbed ordinary requests to the same fixed website. Go's existing HTTP
+parser or reverse proxy can reject invalid raw/header characters before this
+rewrite policy runs; those inputs do not promise an origin request, and the
+proxy's early error remains generic 502. Connection-nominated fields and
+authorization headers are removed; only the validated
+`Connection: Upgrade` / `Upgrade: websocket`
+pair is restored. Origin, cookies and ordinary safe negotiation fields remain
+end-to-end; the website is responsible for its own access and Origin policy.
+An application requiring forwarded Authorization headers remains incompatible
+with the cover's intentional credential-stripping policy.
+
+A final 101 must match the validated request and its key, contain the correct
+accept value, and supply a duplex body. Unexpected, mismatched or non-duplex
+101 responses produce the same generic 502 and close their upstream body.
+This follows the [RFC 6455 opening-handshake mechanism](https://www.rfc-editor.org/rfc/rfc6455.html#section-4),
+with the additional body-free and single-field restrictions described above.
+After the handshake, bytes are relayed without interpreting application frames;
+subprotocol and extension negotiation remain the website/client's policy.
+
+Ordinary-response scrubbing can only use nominations still exposed by the
+upstream transport. Go's native response parser removes the entire Connection
+field when it sees `close`, so additional nominations in that same field are
+not available to this handler. This existing parser boundary is unchanged;
+explicit authorization-header stripping does not depend on those nominations.
+
+Client disconnection releases the upgraded connection's admission slot.
+Server Close or Serve-context cancellation aborts owned physical TCP sockets,
+including hijacked upgrades, and cancels their request contexts. This is an
+abort operation, not a graceful WebSocket close-frame exchange, and does not
+close the shared destination dialer or upstream transport. Ordinary public
+responses retain the bound Alt-Svc policy described above; an actual hijacked
+101 is written by the reverse proxy's raw upgrade path and is not promised
+the same bound-header override.
+
 H2 preserves a client upload half-close while the destination's reply drains.
 When the destination itself reaches EOF, H2 finishes that CONNECT response and
 stops any remaining upload on that stream; the HTTP handler interface cannot

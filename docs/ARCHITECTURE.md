@@ -99,11 +99,21 @@ connection selected after GOAWAY run the full bootstrap again. QUIC migration or
 NAT rebinding that remains the same `*quic.Conn` retains authentication state.
 
 The cover is either a local static directory or a reverse proxy to one fixed,
-operator-authorized HTTP(S) origin. TCP cover responses advertise the bound H3
-service through `Alt-Svc`. Neither the cover nor an unauthenticated probe sees
+operator-authorized HTTP(S) origin. Ordinary combined H1/H2/H3 cover responses
+advertise the bound H3 service through `Alt-Svc`; raw upgraded 101 responses do
+not carry that override guarantee. Neither cover nor an unauthenticated probe sees
 the `autocar/2` ALPN or native binary request header. This reduces active-probe
 exposure but does not prove browser-indistinguishable passive behavior; see
 [WEB_COVER.md](WEB_COVER.md).
+
+Source builds additionally permit validated H1.1 WebSocket upgrades to that
+same fixed website. Request-local handshake state prevents an optional
+transport's response metadata from choosing eligibility; legal duplex bodies
+retain optional half-close capability and close once on errors. A TCP-side
+physical-connection owner outlives net/http's hijack bookkeeping, so server
+shutdown cancels requests and closes upgraded raw sockets without cancelling
+shared destination dialers or cover transports. See the WebSocket section of
+[WEB_COVER.md](WEB_COVER.md#website-websocket-support-in-source-builds).
 
 The public H1/H2 listener accepts TLS 1.2 and TLS 1.3 for ordinary website
 compatibility, while AutoCAR H2 clients and authenticated H2 tunnels require

@@ -68,6 +68,7 @@ func (a *webConnectionAdmission) acquire(remote net.Addr) (func(), bool) {
 type webAdmissionListener struct {
 	net.Listener
 	admission *webConnectionAdmission
+	owner     *webTCPConnectionOwner
 }
 
 func (l *webAdmissionListener) Accept() (net.Conn, error) {
@@ -81,19 +82,32 @@ func (l *webAdmissionListener) Accept() (net.Conn, error) {
 			_ = conn.Close()
 			continue
 		}
-		return &webAdmissionConn{Conn: conn, release: release}, nil
+		owned := &webAdmissionConn{Conn: conn, release: release, owner: l.owner}
+		if l.owner != nil && !l.owner.register(owned) {
+			_ = owned.Close()
+			return nil, net.ErrClosed
+		}
+		return owned, nil
 	}
 }
 
 type webAdmissionConn struct {
 	net.Conn
-	release func()
+	release  func()
+	owner    *webTCPConnectionOwner
+	once     sync.Once
+	closeErr error
 }
 
 func (c *webAdmissionConn) Close() error {
-	err := c.Conn.Close()
-	c.release()
-	return err
+	c.once.Do(func() {
+		c.closeErr = c.Conn.Close()
+		c.release()
+		if c.owner != nil {
+			c.owner.remove(c)
+		}
+	})
+	return c.closeErr
 }
 
 // webAdmissionQUICListener adapts a quic.Listener to http3.QUICListener while
