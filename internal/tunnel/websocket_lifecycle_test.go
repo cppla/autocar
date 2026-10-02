@@ -449,9 +449,6 @@ func TestWebSocketLifecycleCloseDuringAcceptedSocketDelivery(t *testing.T) {
 	if _, err := client.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
 		t.Errorf("Close did not close not-yet-delivered physical socket: %v", err)
 	}
-	if len(f.admission.slots) != 0 {
-		t.Error("not-yet-delivered socket retained its admission slot")
-	}
 	ungate()
 	websocketLifecycleJoin(t, "Close with delayed Accept return", closeDone)
 	select {
@@ -461,6 +458,12 @@ func TestWebSocketLifecycleCloseDuringAcceptedSocketDelivery(t *testing.T) {
 		}
 	default:
 		t.Error("Close result missing")
+	}
+	// Remote EOF can precede the local raw Close return and its admission
+	// release callback. Assert callback completion only after Close joins;
+	// physical peer closure was independently checked before ungating Accept.
+	if len(f.admission.slots) != 0 {
+		t.Error("accepted socket retained its admission slot after Close joined")
 	}
 	websocketLifecycleJoin(t, "Serve with delayed Accept return", f.serveDone)
 }
