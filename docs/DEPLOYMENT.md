@@ -264,6 +264,13 @@ shutdown context error and initiates request cancellation and socket cleanup;
 it does not wait indefinitely for custom handlers that ignore cancellation.
 This change is not included in v1.0.1.
 
+Source builds treat an entirely already-closed listener error as benign during
+shutdown, including net/http's duplicate close of a stopped HTTP listener.
+Mixed error chains retain unrelated close failures and context errors. A real
+listener-close failure no longer skips tracked-connection cleanup: shutdown
+still waits for the caller's deadline and closes remaining tracked connections
+on expiry, reporting both failures. This is not included in v1.0.1.
+
 Source builds also cancel pending SOCKS5 TCP CONNECT setup when its tracked
 client connection is forcibly closed, without waiting for the full dial
 timeout. Successful setup still cancels the temporary dialing context without
