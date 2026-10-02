@@ -140,6 +140,13 @@ sudo -u autocar /usr/local/bin/autocar server \
   --token-file /etc/autocar/relay-token
 ```
 
+Use a dedicated public-only site tree. Source builds after v1.0.1 reject static
+links that escape `--cover-root`, absolute symbolic links, and dot-prefixed
+paths; root-level `/.well-known/` remains available. Replace absolute asset
+links before upgrading. These checks do not isolate bind mounts, hard links,
+or public aliases to private content, so never include credentials in the
+site tree. See [static-directory boundaries](WEB_COVER.md#static-directory).
+
 For a fixed authorized origin, replace `--cover-root` with, for example,
 `--cover-upstream https://origin.example.net`. The two flags are mutually
 exclusive and exactly one is required. The reverse proxy fixes the upstream
