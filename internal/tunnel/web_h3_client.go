@@ -54,15 +54,27 @@ type WebH3Client struct {
 	udpMaxTargets    int
 	udpReceiveQueue  int
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	closed   bool
-	selected bool
-	conn     *quic.Conn
-	client   *http3.ClientConn
-	conns    map[*quic.Conn]*webH3ClientSession
-	dial     chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	closed    bool
+	selected  bool
+	conn      *quic.Conn
+	client    *http3.ClientConn
+	conns     map[*quic.Conn]*webH3ClientSession
+	dial      *webH3DialAttempt
+	workers   sync.WaitGroup
+	closeDone chan struct{}
+	closeErr  error
+}
+
+// webH3DialAttempt publishes one immutable result to every caller that joined
+// it. A caller's context only controls its wait, not the shared physical dial.
+type webH3DialAttempt struct {
+	done   chan struct{}
+	conn   *quic.Conn
+	client *http3.ClientConn
+	err    error
 }
 
 // webH3ClientSession owns one UDP socket because the Chrome profile uses a
@@ -191,6 +203,7 @@ func NewWebH3Client(config WebH3ClientConfig) (*WebH3Client, error) {
 		ctx:             ctx,
 		cancel:          cancel,
 		conns:           make(map[*quic.Conn]*webH3ClientSession),
+		closeDone:       make(chan struct{}),
 	}, nil
 }
 
@@ -463,68 +476,80 @@ func (c *WebH3Client) releaseSession(session *webH3ClientSession) {
 }
 
 func (c *WebH3Client) connection(ctx context.Context) (*quic.Conn, *http3.ClientConn, error) {
-	for {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, context.Cause(ctx)
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, nil, net.ErrClosed
+	}
+	if c.conn != nil && c.client != nil && c.conn.Context().Err() == nil {
+		conn, client := c.conn, c.client
+		c.mu.Unlock()
+		return conn, client, nil
+	}
+	attempt := c.dial
+	if attempt == nil {
+		attempt = &webH3DialAttempt{done: make(chan struct{})}
+		c.dial = attempt
+		// All additions precede Close's closed gate, so its Wait also joins
+		// attempts that have not started running yet.
+		c.workers.Add(1)
+		go c.runConnectionDial(attempt)
+	}
+	c.mu.Unlock()
+	select {
+	case <-attempt.done:
+	case <-ctx.Done():
+		return nil, nil, context.Cause(ctx)
+	case <-c.ctx.Done():
 		if err := ctx.Err(); err != nil {
 			return nil, nil, context.Cause(ctx)
 		}
-		c.mu.Lock()
-		if c.closed {
-			c.mu.Unlock()
-			return nil, nil, net.ErrClosed
-		}
-		if c.conn != nil && c.client != nil && c.conn.Context().Err() == nil {
-			conn, client := c.conn, c.client
-			c.mu.Unlock()
-			return conn, client, nil
-		}
-		if waiting := c.dial; waiting != nil {
-			c.mu.Unlock()
-			select {
-			case <-waiting:
-				continue
-			case <-ctx.Done():
-				return nil, nil, ctx.Err()
-			case <-c.ctx.Done():
-				return nil, nil, net.ErrClosed
-			}
-		}
-		waiting := make(chan struct{})
-		c.dial = waiting
-		c.mu.Unlock()
-
-		dialCtx, cancel := context.WithTimeout(ctx, c.dialTimeout)
-		stop := context.AfterFunc(c.ctx, cancel)
-		session, err := c.dialSession(dialCtx)
-		stop()
-		cancel()
-		var conn *quic.Conn
-		var client *http3.ClientConn
-		if session != nil {
-			conn = session.conn
-			client = session.client
-		}
-
-		c.mu.Lock()
-		if c.closed && session != nil {
-			_ = conn.CloseWithError(0, "")
-			_ = session.closeResources()
-			conn = nil
-			client = nil
-			err = net.ErrClosed
-		} else if err == nil {
-			c.conn = conn
-			c.client = client
-			c.conns[conn] = session
-			go c.watchConnection(session)
-		}
-		c.dial = nil
-		close(waiting)
-		c.mu.Unlock()
-		if err != nil {
-			return nil, nil, fmt.Errorf("tunnel: dial web-cover H3: %w", err)
-		}
-		return conn, client, nil
+		return nil, nil, net.ErrClosed
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, context.Cause(ctx)
+	}
+	if c.ctx.Err() != nil {
+		return nil, nil, net.ErrClosed
+	}
+	return attempt.conn, attempt.client, attempt.err
+}
+
+func (c *WebH3Client) runConnectionDial(attempt *webH3DialAttempt) {
+	defer c.workers.Done()
+	dialCtx, cancel := context.WithTimeout(c.ctx, c.dialTimeout)
+	session, err := c.dialSession(dialCtx)
+	cancel()
+	if err != nil {
+		err = fmt.Errorf("tunnel: dial web-cover H3: %w", err)
+	}
+	var conn *quic.Conn
+	var client *http3.ClientConn
+	c.mu.Lock()
+	if c.closed {
+		err = net.ErrClosed
+	} else if err == nil {
+		conn, client = session.conn, session.client
+		c.conn, c.client = conn, client
+		c.conns[conn] = session
+		c.workers.Add(1)
+		go c.watchConnection(session)
+	}
+	c.mu.Unlock()
+	// A late successful dial, or any failed result with owned resources,
+	// must finish cleanup before publishing completion or releasing Close.
+	if session != nil && conn == nil {
+		_ = session.conn.CloseWithError(0, "")
+		_ = session.closeResources()
+	}
+	c.mu.Lock()
+	attempt.conn, attempt.client, attempt.err = conn, client, err
+	c.dial = nil
+	close(attempt.done)
+	c.mu.Unlock()
 }
 
 func (c *WebH3Client) dialSession(ctx context.Context) (*webH3ClientSession, error) {
@@ -660,6 +685,7 @@ func interleaveWebH3Addresses(addresses []net.IPAddr) []net.IPAddr {
 }
 
 func (c *WebH3Client) watchConnection(session *webH3ClientSession) {
+	defer c.workers.Done()
 	<-session.conn.Context().Done()
 	c.mu.Lock()
 	if session.authState == webH3ClientAuthBootstrapping {
@@ -741,11 +767,12 @@ func (c *WebH3Client) retire(conn *quic.Conn) {
 func (c *WebH3Client) Close() error {
 	c.mu.Lock()
 	if c.closed {
+		done := c.closeDone
 		c.mu.Unlock()
-		return nil
+		<-done
+		return c.closeErr
 	}
 	c.closed = true
-	c.cancel()
 	sessions := make([]*webH3ClientSession, 0, len(c.conns))
 	for _, session := range c.conns {
 		session.auth.close()
@@ -755,12 +782,16 @@ func (c *WebH3Client) Close() error {
 	c.client = nil
 	c.conns = make(map[*quic.Conn]*webH3ClientSession)
 	c.mu.Unlock()
+	c.cancel()
 	var connErr error
 	for _, session := range sessions {
 		connErr = errors.Join(connErr, session.conn.CloseWithError(0, ""))
 		connErr = errors.Join(connErr, session.closeResources())
 	}
-	return errors.Join(connErr, c.transport.Close())
+	c.workers.Wait()
+	c.closeErr = errors.Join(connErr, c.transport.Close())
+	close(c.closeDone)
+	return c.closeErr
 }
 
 func (c *WebH3Client) SelectedTransport() string {

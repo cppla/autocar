@@ -359,6 +359,20 @@ When the relay name resolves to both address families, H3 interleaves IPv6 and
 IPv4 candidates and starts them with a short stagger; each candidate retains
 its own UDP socket so a blackholed first address cannot consume the entire H3
 budget before a working family is tried.
+
+Source builds after v1.0.1 share the result of a cold H3 physical connection
+attempt with all callers already waiting on it. A failed handshake does not
+make those callers start replacement handshakes one after another. A later
+invocation may retry, subject to the existing `web-auto` cooldown policy.
+The shared attempt belongs to the client and retains its configured physical
+dial timeout; canceling one caller stops only that caller's wait, not the
+attempt needed by other callers. If all callers abandon it, the attempt can
+continue until its existing timeout or client shutdown. Client Close cancels
+and joins owned dialing and session-cleanup workers before returning. This
+does not change authentication, wire profiles, timeout defaults or sibling
+stream ownership, and is not a general connection-speed or browser-equivalence
+claim. The published v1.0.1 binary does not contain this change.
+
 After a failed H3 attempt, new TCP streams avoid repeating the UDP timeout.
 `--fallback-cooldown` is a base duration; each failure independently selects a
 retry point within +/-20% so clients do not probe in a fixed synchronized
