@@ -152,6 +152,12 @@ The static handler serves `GET` and `HEAD`. Other methods receive the same
 ordinary `405 Method Not Allowed` behavior whether they came from a random web
 client or from an invalid tunnel probe.
 
+Source builds after v1.0.1 send `OPTIONS *` through the configured cover handler
+on HTTP/1.1, HTTP/2, and HTTP/3, instead of letting the TCP server return a
+separate automatic response. Static cover therefore returns its ordinary `405`
+with `Allow: GET, HEAD`; the combined listener applies its normal bound-port
+`Alt-Svc` policy to this response too.
+
 ### Fixed upstream origin
 
 ```bash
@@ -174,11 +180,34 @@ the upstream cannot be reached. Consequently, an upstream that requires an
 `Authorization` request header is not suitable without a separate authorized
 front end.
 
+For an actual `OPTIONS *` request, source builds after v1.0.1 preserve the
+asterisk request-target at the fixed upstream authority. The configured base
+path and query are not added: this request concerns the origin as a whole, not
+a resource below that base path. Resource requests such as `OPTIONS /*`, an
+encoded asterisk in a path, or an asterisk in a query keep the usual configured
+path/query joining. Visitor-controlled authority still cannot select another
+upstream, and `Origin`/`Referer` are not rewritten to bypass website policy.
+
 Response credential filtering also covers trailers, including fields that an
 upstream adds only when its body ends. Ordinary end-to-end response trailers
 remain available, and the body is still streamed rather than buffered in full.
 This is defensive handling of upstream metadata, not an additional tunnel
 authentication mechanism.
+
+Source builds after v1.0.1 retain the original response's `Connection`
+nominations when filtering trailer declarations and fields discovered later at
+EOF or Close, including replacement trailer maps. A connection-specific field
+cannot reappear just because its declaration was removed before the body ended.
+This depends on the upstream transport exposing those nominations; the native
+parser's `Connection: close` limitation described above is unchanged.
+
+The same source builds remove the relay-owned `Proxy-Authentication-Info`
+namespace from cover request headers and upstream final, informational,
+trailer, and validated WebSocket responses. This prevents an upstream's metadata
+from being presented as relay authentication metadata; it is not a new proof mechanism.
+Ordinary website `Authentication-Info` and `WWW-Authenticate` fields are retained
+unless nominated as connection-specific. Authenticated tunnel proofs are not
+subject to this cover-only filter.
 
 Source builds also apply that filter to upstream informational responses,
 including `103 Early Hints`, before forwarding them. Ordinary `Link` hints and
