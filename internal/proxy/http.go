@@ -103,10 +103,13 @@ func (s *HTTPServer) Serve(listener net.Listener) error {
 // forcibly closed when ctx expires.
 func (s *HTTPServer) Shutdown(ctx context.Context) error {
 	closeErr := s.lifecycle.stopAccepting()
-	if errors.Is(closeErr, net.ErrClosed) {
+	if isListenerClosedError(closeErr) {
 		closeErr = nil
 	}
 	httpErr := s.server.Shutdown(ctx)
+	if isListenerClosedError(httpErr) {
+		httpErr = nil
+	}
 	trackErr := s.lifecycle.shutdown(ctx)
 	s.transport.CloseIdleConnections()
 	return errors.Join(closeErr, httpErr, trackErr)

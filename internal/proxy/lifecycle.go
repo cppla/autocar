@@ -311,12 +311,40 @@ func (s *serverLifecycle) stopAccepting() error {
 
 func (s *serverLifecycle) shutdown(ctx context.Context) error {
 	closeErr := s.stopAccepting()
-	if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
-		return closeErr
+	if isListenerClosedError(closeErr) {
+		closeErr = nil
 	}
 	if err := s.tracker.wait(ctx); err != nil {
 		s.tracker.closeAll()
+		if closeErr != nil {
+			return errors.Join(closeErr, err)
+		}
 		return err
 	}
-	return nil
+	return closeErr
+}
+
+// isListenerClosedError accepts only an entirely benign closed-listener tree.
+// An errors.Is match alone can hide a different error in another joined branch.
+// Keep mixed/unknown trees intact, including their original error identities.
+func isListenerClosedError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !isListenerClosedError(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return isListenerClosedError(wrapped.Unwrap())
+	}
+	return errors.Is(err, net.ErrClosed)
 }
