@@ -341,6 +341,13 @@ The cache is private to one configured H2 client. A nil caller cache or
 `SessionTicketsDisabled` keeps full handshakes. This does not enable 0-RTT:
 every new physical connection completes TLS and starts fresh proxy authentication,
 even when TLS resumes; connection-scoped proxy tickets are never inherited.
+The pinned uTLS implementation cannot rebuild a populated PSK after a TLS 1.3
+HelloRetryRequest. For this narrowly recognized library limitation, the H2 client
+closes the failed socket and retries once on a fresh connection without a ticket,
+within the same remaining initialization timeout. Certificate/hostname checks,
+TLS 1.3 and h2 are still mandatory; unrelated TLS failures are not retried.
+The library may invalidate the failed cached ticket. This compatibility fallback
+is a full handshake, not successful HRR resumption or a browser-equivalence claim.
 
 Resumption retains the previously verified TLS session rather than repeating a
 full certificate exchange or calling `VerifyPeerCertificate` again. Callers

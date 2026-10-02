@@ -497,6 +497,30 @@ func (c *WebH2Client) openSession(ctx context.Context) (*webH2ClientSession, err
 	// contexts through initialization, not just through the TLS handshake.
 	initializationCtx, initializationCancel := context.WithTimeout(dialCtx, c.handshakeTimeout)
 	defer initializationCancel()
+	session, err := c.initializeSession(initializationCtx, raw, c.utlsSessionCache)
+	if !errors.Is(err, errWebH2PSKHelloRetryRequest) {
+		return session, err
+	}
+	// Pinned uTLS cannot rebuild a populated PSK after HRR. The failed
+	// attempt has already closed its raw socket and joined its watcher.
+	// Retry once on a fresh socket without tickets, with the SAME remaining
+	// initialization budget. No HTTP or proxy authentication was sent yet.
+	if cause := context.Cause(initializationCtx); cause != nil {
+		return nil, fmt.Errorf("tunnel: web-cover HTTP/2 TLS handshake: %w", cause)
+	}
+	raw, err = c.dialer.DialContext(initializationCtx, "tcp", c.address)
+	if err != nil {
+		if cause := context.Cause(initializationCtx); cause != nil {
+			err = cause
+		}
+		return nil, fmt.Errorf("tunnel: redial web-cover HTTP/2 server after TLS retry: %w", err)
+	}
+	return c.initializeSession(initializationCtx, raw, nil)
+}
+
+// initializeSession owns one physical attempt. Its immutable raw parameter
+// prevents a retired watcher's closure from affecting a replacement socket.
+func (c *WebH2Client) initializeSession(initializationCtx context.Context, raw net.Conn, sessionCache utls.ClientSessionCache) (*webH2ClientSession, error) {
 	rawClosed := make(chan struct{})
 	stopRawClose := context.AfterFunc(initializationCtx, func() {
 		_ = raw.Close()
@@ -508,7 +532,7 @@ func (c *WebH2Client) openSession(ctx context.Context) (*webH2ClientSession, err
 			<-rawClosed
 		}
 	}()
-	tlsConn, err := newWebH2TLSClientConn(raw, c.tlsConfig, c.fingerprint, c.utlsSessionCache)
+	tlsConn, err := newWebH2TLSClientConn(raw, c.tlsConfig, c.fingerprint, sessionCache)
 	if err != nil {
 		_ = raw.Close()
 		return nil, err
