@@ -155,6 +155,19 @@ headers, and preserves the request path and query. Treat that origin as an
 Internet-facing application; do not point it at metadata or control-plane
 services.
 
+For an owned website that must see its public virtual host, source builds
+after v1.0.1 additionally accept `--cover-public-origin https://www.example.com`
+(JSON: `"cover-public-origin":"https://www.example.com"`). This optional mode
+retains fixed upstream dialing/TLS, uses the public HTTP Host, generates only
+trusted public Host/HTTPS forwarding metadata, and rejects mismatched cover
+Host or present Origin. Both URLs must be root origins; the public URL must
+be HTTPS. Configure the backend's public virtual host, canonical URLs and
+CSRF/session policy first: cookies, redirects and Origin are not rewritten.
+This is not available with static cover or in the v1.0.1 binary. Offline
+`--check` validates the configuration without contacting the upstream.
+Remove the key/flag to roll back; existing default behavior is unchanged.
+See [public-origin requirements and boundaries](WEB_COVER.md#optional-fixed-public-origin-in-source-builds).
+
 Source builds after v1.0.1 can forward narrowly validated H1.1 WebSocket GET
 upgrades to this same fixed origin; no new flag or arbitrary Upgrade proxy is
 introduced. Authorization and nominated hop fields are still stripped.

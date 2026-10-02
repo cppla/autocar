@@ -36,6 +36,10 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 	if err != nil {
 		return nil, err
 	}
+	return newReverseProxyHandler(target, transport, ""), nil
+}
+
+func newReverseProxyHandler(target *url.URL, transport http.RoundTripper, publicAuthority string) *httputil.ReverseProxy {
 	if transport == nil {
 		defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
 		defaultTransport.Proxy = nil
@@ -62,6 +66,19 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 			// nomination boundary, and restore only our validated H1 WebSocket.
 			removeConnectionNominatedHeaders(request.Out.Header, request.In.Header)
 			removeUnsafeHeaders(request.Out.Header)
+			if publicAuthority != "" {
+				// The URL still chooses the fixed upstream dial and TLS target.
+				// Only this opt-in mode supplies a configured public vhost and
+				// trusted forwarding metadata, after all request nominations.
+				removePublicOriginForwardingHeaders(request.Out.Header)
+				// Replayed bodies can already have populated Trailer values.
+				// ReverseProxy owns this cloned map; do not trust those fields
+				// or mutate the original request's body or trailer map.
+				removePublicOriginForwardingHeaders(request.Out.Trailer)
+				request.Out.Host = publicAuthority
+				request.Out.Header.Set("X-Forwarded-Host", publicAuthority)
+				request.Out.Header.Set("X-Forwarded-Proto", "https")
+			}
 			if upgrade.eligible {
 				request.Out.Header.Set("Connection", "Upgrade")
 				request.Out.Header.Set("Upgrade", "websocket")
@@ -99,7 +116,7 @@ func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.
 		},
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
-	return proxy, nil
+	return proxy
 }
 
 // informationalHeaderTransport filters upstream headers before ReverseProxy's
