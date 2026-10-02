@@ -29,7 +29,12 @@ One domain and one numeric port provide two ordinary web transports:
 
 HTTP/1.1 is a cover-only protocol; it is never upgraded into an AutoCAR
 tunnel. HTTP/1.1 and HTTP/2 cover responses advertise the bound HTTP/3 service
-with `Alt-Svc`. The H2 and H3 clients reuse warm connections and multiplex
+with `Alt-Svc`. Source builds after v1.0.1 apply the same bound-port policy to
+HTTP/3 cover responses from the combined listener, including informational and
+final responses. The bound value overrides an upstream website's stale or
+unrelated alternative service. Authenticated tunnel responses are not wrapped;
+standalone `ListenWebH3` continues to leave advertisement to its configured cover.
+The H2 and H3 clients reuse warm connections and multiplex
 independent CONNECT streams. AutoCAR's H2 client requires TLS 1.3. A TLS 1.2
 HTTP/2 CONNECT presented to the public origin is always treated as cover,
 including when it carries an otherwise valid ticket: the handler removes

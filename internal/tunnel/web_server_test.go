@@ -106,7 +106,7 @@ func TestWebServerSamePortCoverAndConcurrentTunnels(t *testing.T) {
 	h3TLS.NextProtos = []string{http3.NextProtoH3}
 	h3Transport := &http3.Transport{TLSClientConfig: h3TLS}
 	t.Cleanup(func() { _ = h3Transport.Close() })
-	assertDualWebCover(t, &http.Client{Transport: h3Transport}, "https://"+server.UDPAddr().String()+"/h3", 3, "")
+	assertDualWebCover(t, &http.Client{Transport: h3Transport}, "https://"+server.UDPAddr().String()+"/h3", 3, wantAltSvc)
 
 	wantProtocols := map[int]int{1: 1, 2: 1, 3: 1}
 	for range 3 {

@@ -110,15 +110,15 @@ func ListenWeb(config WebServerConfig) (*WebServer, error) {
 	}
 
 	// The value is populated before ListenWeb returns and before the HTTP
-	// server can serve a request. A response-writer wrapper commits it at the
+	// servers can serve a request. A response-writer wrapper commits it at the
 	// last moment, so a cover origin cannot accidentally advertise a stale or
 	// unrelated alternative service.
-	tcpCover := &webAltSvcCover{next: config.Cover}
+	publicCover := &webAltSvcCover{next: config.Cover}
 	h2, err := listenWebH2WithCore(WebH2ServerConfig{
 		Address:                 config.TCPAddress,
 		Token:                   config.Token,
 		TLSConfig:               config.TLSConfig,
-		Cover:                   tcpCover,
+		Cover:                   publicCover,
 		Dialer:                  config.Dialer,
 		HandshakeTimeout:        config.HandshakeTimeout,
 		DialTimeout:             config.DialTimeout,
@@ -146,7 +146,7 @@ func ListenWeb(config WebServerConfig) (*WebServer, error) {
 		TLSConfig:               config.TLSConfig,
 		QUICConfig:              config.QUICConfig,
 		Dialer:                  config.Dialer,
-		Cover:                   config.Cover,
+		Cover:                   publicCover,
 		HandshakeTimeout:        config.HandshakeTimeout,
 		DialTimeout:             config.DialTimeout,
 		DestinationWriteTimeout: config.DestinationWriteTimeout,
@@ -171,7 +171,7 @@ func ListenWeb(config WebServerConfig) (*WebServer, error) {
 		return nil, err
 	}
 
-	tcpCover.value = webH3AltSvcValue(h3.Addr())
+	publicCover.value = webH3AltSvcValue(h3.Addr())
 	return &WebServer{h2: h2, h3: h3}, nil
 }
 
