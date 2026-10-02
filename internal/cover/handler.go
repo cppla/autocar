@@ -31,6 +31,8 @@ var hopByHopHeaders = [...]string{
 // NewReverseProxyHandler returns a reverse proxy that can dial only origin.
 // The requester controls the path, query, and ordinary end-to-end headers, but
 // never the upstream scheme, authority, or Host header.
+// A nil transport does not add compression negotiation or decode responses.
+// Supplied transports retain their own compression policy.
 func NewReverseProxyHandler(origin *url.URL, transport http.RoundTripper) (http.Handler, error) {
 	target, err := normalizeOrigin(origin)
 	if err != nil {
@@ -43,6 +45,9 @@ func newReverseProxyHandler(target *url.URL, transport http.RoundTripper, public
 	if transport == nil {
 		defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
 		defaultTransport.Proxy = nil
+		// Forward the visitor's encoding preferences and the origin's encoded
+		// bytes together with their metadata, including no-transform/digests.
+		defaultTransport.DisableCompression = true
 		transport = defaultTransport
 	}
 
