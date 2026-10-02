@@ -854,57 +854,189 @@ func TestHardenedQUICConfigDisablesReplayableFeaturesAndEnablesDatagrams(t *test
 }
 
 func TestQUICConnectionLimitAndPreAuthenticationTimeout(t *testing.T) {
-	serverTLS, clientTLS := testTLSConfigs(t)
-	server, err := ListenQUIC(QUICServerConfig{
-		Address:          "127.0.0.1:0",
-		Token:            testToken,
-		TLSConfig:        serverTLS,
-		HandshakeTimeout: 500 * time.Millisecond,
-		MaxConnections:   1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- server.Serve(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		_ = server.Close()
-		if err := <-serveDone; err != nil {
-			t.Errorf("Serve: %v", err)
+	newServer := func(t *testing.T, handshakeTimeout time.Duration) (*QUICServer, *tls.Config, func()) {
+		t.Helper()
+		serverTLS, clientTLS := testTLSConfigs(t)
+		server, err := ListenQUIC(QUICServerConfig{
+			Address: "127.0.0.1:0", Token: testToken, TLSConfig: serverTLS,
+			HandshakeTimeout: handshakeTimeout, MaxConnections: 1,
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
-
-	rawClientTLS, err := clientTLSConfig(clientTLS, server.Addr().String())
-	if err != nil {
-		t.Fatal(err)
+		ctx, cancel := context.WithCancel(context.Background())
+		serveDone := make(chan struct{})
+		serveResult := make(chan error, 1)
+		started := false
+		t.Cleanup(func() {
+			cancel()
+			closeDone := make(chan struct{})
+			closeResult := make(chan error, 1)
+			go func() {
+				defer close(closeDone)
+				closeResult <- server.Close()
+			}()
+			select {
+			case <-closeDone:
+				if err := <-closeResult; err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Error("server Close did not join")
+			}
+			if started {
+				select {
+				case <-serveDone:
+					if err := <-serveResult; err != nil {
+						t.Errorf("Serve: %v", err)
+					}
+				case <-time.After(2 * time.Second):
+					t.Error("server Serve did not join")
+				}
+			}
+		})
+		rawTLS, err := clientTLSConfig(clientTLS, server.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := func() {
+			if started {
+				t.Fatal("fixture Serve started twice")
+			}
+			started = true
+			go func() {
+				defer close(serveDone)
+				serveResult <- server.Serve(ctx)
+			}()
+		}
+		return server, rawTLS, start
 	}
-	first, err := quic.DialAddr(context.Background(), server.Addr().String(), rawClientTLS.Clone(), hardenedQUICClientConfig(nil))
-	if err != nil {
-		t.Fatalf("first QUIC connection: %v", err)
+	dial := func(t *testing.T, server *QUICServer, config *tls.Config) (*quic.Conn, error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		conn, err := quic.DialAddr(ctx, server.Addr().String(), config.Clone(), hardenedQUICClientConfig(nil))
+		if conn != nil {
+			t.Cleanup(func() {
+				_ = conn.CloseWithError(0, "test complete")
+				select {
+				case <-conn.Context().Done():
+				case <-time.After(2 * time.Second):
+					t.Error("owned client connection did not close")
+				}
+			})
+		}
+		return conn, err
 	}
-	defer first.CloseWithError(0, "test complete")
+	assertRemoteError := func(t *testing.T, err error, code quic.ApplicationErrorCode, message string) {
+		t.Helper()
+		var applicationErr *quic.ApplicationError
+		if !errors.As(err, &applicationErr) || !applicationErr.Remote || applicationErr.ErrorCode != code || applicationErr.ErrorMessage != message {
+			t.Fatalf("remote QUIC rejection = %v, want code %#x and message %q", err, code, message)
+		}
+	}
 
-	second, secondErr := quic.DialAddr(context.Background(), server.Addr().String(), rawClientTLS.Clone(), hardenedQUICClientConfig(nil))
-	if secondErr == nil {
-		defer second.CloseWithError(0, "test complete")
+	t.Run("global_limit", func(t *testing.T) {
+		// This fixture tests admission, not its separate 500ms auth timer.
+		// Use the normal default so the acceptance barrier and rejection window
+		// cannot accidentally compete with a short pre-authentication expiry.
+		server, rawTLS, start := newServer(t, 0)
+		first, err := dial(t, server, rawTLS)
+		if err != nil {
+			t.Fatalf("first QUIC connection: %v", err)
+		}
+		// quic-go runs the TLS handshake independently of application Serve.
+		// Actually demonstrate that a completed client handshake is not a
+		// server-admission witness before establishing the required barrier.
+		server.connMu.Lock()
+		unregistered := len(server.conns) == 0
+		server.connMu.Unlock()
+		if !unregistered || len(server.connSem) != 0 {
+			t.Fatal("fixture admitted a connection before starting Serve")
+		}
+		start()
+		local, ok := first.LocalAddr().(*net.UDPAddr)
+		if !ok {
+			t.Fatalf("first local address type = %T", first.LocalAddr())
+		}
+		barrierTimeout := time.NewTimer(time.Second)
+		defer barrierTimeout.Stop()
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for {
+			server.connMu.Lock()
+			matched := false
+			if len(server.conns) == 1 {
+				for conn := range server.conns {
+					remote, ok := conn.RemoteAddr().(*net.UDPAddr)
+					// DialAddr binds a wildcard UDP socket; on this exclusively
+					// loopback fixture, its source port identifies the exact peer.
+					matched = ok && remote.IP.IsLoopback() && remote.Port == local.Port
+				}
+			}
+			admitted := matched && len(server.connSem) == 1
+			server.connMu.Unlock()
+			if admitted {
+				break
+			}
+			select {
+			case <-first.Context().Done():
+				t.Fatalf("first connection closed before admission: %v", context.Cause(first.Context()))
+			case <-barrierTimeout.C:
+				t.Fatal("first connection did not own the server's single admission slot")
+			case <-tick.C:
+			}
+		}
+		second, rejection := dial(t, server, rawTLS)
+		if rejection == nil {
+			select {
+			case <-second.Context().Done():
+				rejection = context.Cause(second.Context())
+			case <-time.After(250 * time.Millisecond):
+				t.Fatal("connection above MaxConnections was not rejected")
+			}
+		}
+		// The same source also has a limit; its identically coded rejection
+		// must not substitute for proof that the global admission branch ran.
+		assertRemoteError(t, rejection, connectionRejected, "connection limit reached")
 		select {
-		case <-second.Context().Done():
-		case <-time.After(250 * time.Millisecond):
-			t.Fatal("connection above MaxConnections was not rejected")
+		case <-first.Context().Done():
+			t.Fatalf("global admission rejected the already-owned first connection: %v", context.Cause(first.Context()))
+		default:
 		}
-	}
-	select {
-	case <-first.Context().Done():
-		t.Fatal("first unauthenticated connection closed before its authentication deadline")
-	default:
-	}
-	select {
-	case <-first.Context().Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("unauthenticated QUIC connection survived its authentication deadline")
-	}
+	})
+
+	t.Run("pre_authentication_timeout", func(t *testing.T) {
+		const preAuthBudget = 500 * time.Millisecond
+		server, rawTLS, start := newServer(t, preAuthBudget)
+		// Complete TLS before the application can start its auth timer. This
+		// independently preserves the healthy handshake / no-premature-close
+		// control without guessing when a concurrently started worker ran.
+		conn, err := dial(t, server, rawTLS)
+		if err != nil {
+			t.Fatalf("unauthenticated QUIC handshake: %v", err)
+		}
+		select {
+		case <-conn.Context().Done():
+			t.Fatalf("unauthenticated connection closed before Serve: %v", context.Cause(conn.Context()))
+		default:
+		}
+		began := time.Now()
+		start()
+		select {
+		case <-conn.Context().Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("unauthenticated QUIC connection survived its authentication deadline")
+		}
+		elapsed := time.Since(began)
+		assertRemoteError(t, context.Cause(conn.Context()), authenticationTimeout, "authentication timeout")
+		// The server-side timer cannot start before this Serve invocation.
+		// Therefore a shorter elapsed interval is an actual premature expiry,
+		// not merely a delayed client observation or admission-barrier race.
+		if elapsed < preAuthBudget {
+			t.Fatalf("authentication timeout arrived after %s, before the %s budget", elapsed, preAuthBudget)
+		}
+	})
 }
 
 func TestAuthenticatedQUICConnectionSurvivesPreAuthenticationTimeout(t *testing.T) {
