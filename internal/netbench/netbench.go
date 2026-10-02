@@ -33,7 +33,8 @@ type Server struct {
 	Timeout        time.Duration
 }
 
-// Serve accepts connections until ctx is canceled or the listener fails.
+// Serve owns the listener and accepted connections until ctx is canceled or
+// the listener fails. It closes and joins active transfers before returning.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	maxConnections := s.MaxConnections
 	if maxConnections <= 0 {
@@ -41,13 +42,25 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 	sem := make(chan struct{}, maxConnections)
 	var wg sync.WaitGroup
-
-	go func() {
-		<-ctx.Done()
+	serveCtx, cancel := context.WithCancel(ctx)
+	listenerClosed := make(chan struct{})
+	stopListener := context.AfterFunc(serveCtx, func() {
 		_ = ln.Close()
-	}()
+		close(listenerClosed)
+	})
 
-	defer wg.Wait()
+	defer func() {
+		// Accept errors also end this ownership scope, even with a live
+		// parent. Cancel workers before joining them, not after their I/O
+		// eventually reaches the independent transfer deadline.
+		cancel()
+		if stopListener() {
+			_ = ln.Close()
+		} else {
+			<-listenerClosed
+		}
+		wg.Wait()
+	}()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -58,7 +71,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		}
 		select {
 		case sem <- struct{}{}:
-		case <-ctx.Done():
+		case <-serveCtx.Done():
 			_ = conn.Close()
 			return nil
 		}
@@ -66,7 +79,8 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			defer conn.Close()
+			finish := ownBenchmarkConnection(serveCtx, conn)
+			defer finish()
 			_ = s.handle(conn)
 		}()
 	}
@@ -127,7 +141,9 @@ func (r Result) Mbps() float64 {
 	return float64(r.Bytes*8) / r.Duration.Seconds() / 1_000_000
 }
 
-// Run performs one upload or download through dialer.
+// Run performs one upload or download through dialer. Cancellation interrupts
+// the owned transfer, including its header and completion acknowledgement;
+// it does not close the dialer or its shared physical tunnel connection.
 func Run(ctx context.Context, dialer transport.Dialer, target string, mode byte, size int64) (Result, error) {
 	if mode != ModeDownload && mode != ModeUpload {
 		return Result{}, errors.New("invalid benchmark mode")
@@ -135,13 +151,32 @@ func Run(ctx context.Context, dialer transport.Dialer, target string, mode byte,
 	if size < 0 {
 		return Result{}, errors.New("size must not be negative")
 	}
-	conn, err := dialer.DialContext(ctx, "tcp", target)
-	if err != nil {
+	if err := benchmarkContextError(ctx); err != nil {
 		return Result{}, err
 	}
-	defer conn.Close()
+	conn, err := dialer.DialContext(ctx, "tcp", target)
+	if err != nil || conn == nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if err == nil {
+			err = errors.New("benchmark dialer returned a nil connection")
+		}
+		return Result{}, err
+	}
+	finish := ownBenchmarkConnection(ctx, conn)
+	defer finish()
+	if err := benchmarkContextError(ctx); err != nil {
+		return Result{}, err
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
+	}
+	ioError := func(err error) (Result, error) {
+		if canceled := benchmarkContextError(ctx); canceled != nil {
+			err = canceled
+		}
+		return Result{}, err
 	}
 
 	header := make([]byte, headerSize)
@@ -150,28 +185,61 @@ func Run(ctx context.Context, dialer transport.Dialer, target string, mode byte,
 	header[5] = mode
 	binary.BigEndian.PutUint64(header[8:], uint64(size))
 	if _, err := conn.Write(header); err != nil {
-		return Result{}, err
+		return ioError(err)
 	}
 
 	start := time.Now()
 	switch mode {
 	case ModeDownload:
 		if _, err := io.CopyN(io.Discard, conn, size); err != nil {
-			return Result{}, err
+			return ioError(err)
 		}
 	case ModeUpload:
 		if err := writeZeros(conn, size); err != nil {
-			return Result{}, err
+			return ioError(err)
 		}
 	}
 	var ack [1]byte
 	if _, err := io.ReadFull(conn, ack[:]); err != nil {
+		return ioError(err)
+	}
+	if err := benchmarkContextError(ctx); err != nil {
 		return Result{}, err
 	}
 	if ack[0] != 0 {
 		return Result{}, errors.New("benchmark server returned an error")
 	}
 	return Result{Mode: mode, Bytes: size, Duration: time.Since(start)}, nil
+}
+
+// Close exactly this owned connection once. A cancellation callback can still
+// be executing when stop returns false; join it before releasing the worker or
+// returning a result. Normal completion stops the callback and closes directly.
+func ownBenchmarkConnection(ctx context.Context, conn net.Conn) func() {
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+		close(closed)
+	})
+	return func() {
+		if stop() {
+			_ = conn.Close()
+		} else {
+			<-closed
+		}
+	}
+}
+
+func benchmarkContextError(ctx context.Context) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	// The socket deadline may fire just before the context timer publishes
+	// Done. Preserve the declared context deadline in that narrow race too.
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func writeZeros(w io.Writer, size int64) error {

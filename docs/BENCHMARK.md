@@ -61,6 +61,17 @@ one-byte completion acknowledgement, not tunnel setup. In particular, a short
 flow ratio is a warm-payload diagnostic rather than a connection-establishment
 benchmark.
 
+In source builds containing the cancellation fix (not the published v1.0.1
+binary), stopping `bench-server` closes its listener and accepted transfers,
+including a connection waiting for a transfer slot, and joins the transfer
+workers. It no longer waits only for a stalled peer's two-minute transfer
+deadline. Stopping `bench-client` interrupts its current owned connection even
+while writing the request, moving payload, or waiting for the acknowledgement.
+The shared tunnel dialer is not closed by an individual canceled transfer.
+An incomplete iteration fails without emitting a successful measurement or
+partial summary. Successful measurements retain the same wire format, timing
+window, payload limits, and statistics.
+
 ## Namespace topology
 
 `scripts/netem-integration.sh` creates two isolated network namespaces joined by
