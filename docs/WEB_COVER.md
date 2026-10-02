@@ -202,6 +202,62 @@ the upstream cannot be reached. Consequently, an upstream that requires an
 `Authorization` request header is not suitable without a separate authorized
 front end.
 
+#### Optional fixed public origin in source builds
+
+Source builds after v1.0.1 can separate the website's public HTTP identity
+from the fixed upstream connection address:
+
+```bash
+./autocar server \
+  --protocol web --listen :443 --tcp-listen :443 \
+  --cover-upstream https://origin.example.net \
+  --cover-public-origin https://www.example.com \
+  --cert /etc/autocar/server.crt --key /etc/autocar/server.key \
+  --token-file /etc/autocar/relay-token
+```
+
+This is opt-in, upstream-only, and not part of the v1.0.1 binary. Without
+`--cover-public-origin`, the existing upstream-Host and base-path/query behavior
+is unchanged. With it, both configured URLs must be root origins (empty path
+or `/`, no query, user information or fragment); the public origin must use
+HTTPS. Use canonical ASCII DNS names (including already encoded punycode),
+IPv4, or bracketed IPv6, with an optional numeric port from 1 to 65535.
+Trailing dots, zone IDs, nonstandard numeric IP aliases and leading-zero ports
+are rejected; no DNS or IDNA conversion is performed during validation.
+DNS case and explicit default ports are equivalent for the public guard.
+
+The upstream URL still controls dialing, TLS certificate verification and
+SNI. Only the outgoing HTTP `Host` changes to the configured public authority.
+Incoming `Forwarded`, all `X-Forwarded-*` headers and `X-Real-IP` are removed
+from headers and declared request trailers;
+the proxy generates only fixed `X-Forwarded-Host` and `X-Forwarded-Proto: https`.
+It does not forward the visitor's IP address. Configure the backend to accept
+this public virtual host, generate public canonical URLs, and trust **only**
+these two relay-generated headers from this relay. Other backend-specific
+trust headers are not a universal allowlist: do not trust arbitrary client
+headers or expose an internal control plane as the website.
+
+Cover requests with a different Host receive ordinary `421 Misdirected
+Request`. If an Origin header is present it must contain exactly one valid
+same-public HTTPS origin; foreign, null, empty or ambiguous values receive
+ordinary `403 Forbidden`. A Connection nomination of Origin or Referer also
+receives `403`, before hop-header stripping can hide it. This opt-in mode is
+for same-origin websites, not cross-origin CORS applications. Authenticated
+tunnel dispatch is unchanged: these guards apply only to the website handler.
+
+Cookie, Set-Cookie, Location, Origin, Referer and HTML are **not rewritten**.
+The website remains responsible for CSRF tokens, session authentication,
+cookie domains/attributes and its own Origin policy, including requests with
+no Origin. Origin guards inspect HTTP headers, not trailer values; the backend
+must not merge security or trust trailers into request headers. A backend that
+compares Origin and Host lexically can still reject
+equivalent noncanonical spellings; the proxy deliberately preserves Origin
+bytes. Third-party redirects are passed through, not followed by the proxy.
+This mode cannot make an arbitrary third-party site compatible or establish
+browser-like traffic fingerprints. `--check` validates it offline; JSON uses
+the same `cover-public-origin` key. Remove the flag/key (or explicitly pass
+`--cover-public-origin=`) to restore the default mode.
+
 For an actual `OPTIONS *` request, source builds after v1.0.1 preserve the
 asterisk request-target at the fixed upstream authority. The configured base
 path and query are not added: this request concerns the origin as a whole, not

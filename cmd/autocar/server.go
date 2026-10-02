@@ -31,6 +31,7 @@ func runServer(parent context.Context, args []string) error {
 	disableFallback := fs.Bool("disable-tcp-fallback", false, "disable the TCP/TLS fallback listener")
 	coverRoot := fs.String("cover-root", "", "web protocol: directory served as the public cover origin")
 	coverUpstream := fs.String("cover-upstream", "", "web protocol: fixed http(s) origin used as the public cover")
+	coverPublicOrigin := fs.String("cover-public-origin", "", "web upstream only: fixed public HTTPS origin for same-origin website sessions (opt-in)")
 	certFile := fs.String("cert", "", "server certificate PEM (required)")
 	keyFile := fs.String("key", "", "server private key PEM (required)")
 	clientCAFile := fs.String("client-ca", "", "optional PEM CA that enables mandatory mTLS")
@@ -63,6 +64,19 @@ func runServer(parent context.Context, args []string) error {
 	serverProtocol := strings.ToLower(strings.TrimSpace(*serverProtocolText))
 	if err := validateServerProtocolOptions(serverProtocol, *clientCAFile, *coverRoot, *coverUpstream, *disableFallback); err != nil {
 		return err
+	}
+	var coverHandler http.Handler
+	if *coverPublicOrigin != "" {
+		if serverProtocol != "web" || strings.TrimSpace(*coverRoot) != "" || strings.TrimSpace(*coverUpstream) == "" {
+			return errors.New("--cover-public-origin requires --protocol=web and --cover-upstream, without --cover-root")
+		}
+		// This constructor validates only local URL configuration; it performs
+		// no DNS, upstream requests or listening, including during --check.
+		var err error
+		coverHandler, err = buildCoverHandlerWithPublicOrigin(*coverRoot, *coverUpstream, *coverPublicOrigin)
+		if err != nil {
+			return err
+		}
 	}
 	if *certFile == "" || *keyFile == "" {
 		return errors.New("--cert and --key are required")
@@ -160,8 +174,7 @@ func runServer(parent context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	var coverHandler http.Handler
-	if serverProtocol == "web" {
+	if serverProtocol == "web" && coverHandler == nil {
 		coverHandler, err = buildCoverHandler(*coverRoot, *coverUpstream)
 		if err != nil {
 			return err
@@ -337,7 +350,14 @@ func validateServerProtocolOptions(protocolMode, clientCAFile, coverRoot, coverU
 }
 
 func buildCoverHandler(root, upstream string) (http.Handler, error) {
+	return buildCoverHandlerWithPublicOrigin(root, upstream, "")
+}
+
+func buildCoverHandlerWithPublicOrigin(root, upstream, publicOrigin string) (http.Handler, error) {
 	if strings.TrimSpace(root) != "" {
+		if publicOrigin != "" {
+			return nil, errors.New("--cover-public-origin requires --cover-upstream, without --cover-root")
+		}
 		handler, err := cover.NewStaticHandler(root)
 		if err != nil {
 			return nil, fmt.Errorf("configure static cover: %w", err)
@@ -348,7 +368,16 @@ func buildCoverHandler(root, upstream string) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse --cover-upstream: %w", err)
 	}
-	handler, err := cover.NewReverseProxyHandler(origin, nil)
+	var handler http.Handler
+	if publicOrigin == "" {
+		handler, err = cover.NewReverseProxyHandler(origin, nil)
+	} else {
+		public, parseErr := url.Parse(strings.TrimSpace(publicOrigin))
+		if parseErr != nil {
+			return nil, errors.New("parse --cover-public-origin: invalid URL")
+		}
+		handler, err = cover.NewReverseProxyHandlerWithPublicOrigin(origin, public, nil)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("configure upstream cover: %w", err)
 	}
