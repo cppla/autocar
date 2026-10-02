@@ -218,7 +218,7 @@ the origin's encoded bytes, `Content-Encoding`, length, digest and ETag remain
 together. This avoids rewriting `no-transform` content while retaining metadata
 for the old bytes; see [HTTP message transformations](https://www.rfc-editor.org/rfc/rfc9110.html#section-7.7).
 It does not verify the website's digest or establish browser-like fingerprints.
-Applications supplying a custom RoundTripper retain its own negotiation/decoding
+Applications supplying a custom RoundTripper retain their own negotiation/decoding
 policy and must configure transparent forwarding themselves. Static cover,
 authenticated tunnel payloads and the published v1.0.1 binary are unchanged.
 
