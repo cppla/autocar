@@ -332,6 +332,27 @@ Chrome. The `native` rollback profile disables this client image.
 The H2 client separately uses the fixed `chrome-133` uTLS ClientHello profile.
 That describes only its TLS ClientHello; H2 settings, header order, flow control,
 connection reuse, payload sizes and timing retain their implementation behavior.
+Source builds after v1.0.1 also support ordinary TLS 1.3 session resumption for
+this profile when the caller enables a TLS session cache. An empty cache keeps
+the fixed cold ClientHello shape; a valid cached ticket adds uTLS's native
+`pre_shared_key` extension and binder as the last extension, as required by
+[RFC 8446 section 4.2.11](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.2.11).
+The cache is private to one configured H2 client. A nil caller cache or
+`SessionTicketsDisabled` keeps full handshakes. This does not enable 0-RTT:
+every new physical connection completes TLS and starts fresh proxy authentication,
+even when TLS resumes; connection-scoped proxy tickets are never inherited.
+
+Resumption retains the previously verified TLS session rather than repeating a
+full certificate exchange or calling `VerifyPeerCertificate` again. Callers
+requiring fresh per-connection certificate policy must disable session tickets;
+the native profile additionally supports `VerifyConnection`. Cached tickets are
+not an unconditional privacy improvement: reusing a ticket can let passive
+observers correlate connections
+([RFC 8446 appendix C.4](https://www.rfc-editor.org/rfc/rfc8446.html#appendix-C.4)).
+The bounded loopback regression verifies actual client/server resumption,
+cold/warm ClientHello policy, and fresh authentication. It is not a browser
+comparison or evidence of lower classifier accuracy.
+
 Authenticated H2 and H3 CONNECT requests explicitly suppress the Go HTTP
 libraries' default `User-Agent` and automatic `Accept-Encoding: gzip` values.
 AutoCAR does not invent browser headers until the complete request-header set

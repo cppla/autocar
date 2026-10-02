@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
+	"sync/atomic"
 
 	utls "github.com/refraction-networking/utls"
 )
@@ -87,7 +89,18 @@ func newWebH2TLSClientConn(raw net.Conn, config *tls.Config, profile Fingerprint
 		if err != nil {
 			return nil, err
 		}
-		return &webH2UTLSConn{UConn: utls.UClient(raw, utlsConfig, utls.HelloChrome_133)}, nil
+		// The fixed cold profile has no pre_shared_key extension. Use a fresh
+		// custom copy when resumption is enabled so uTLS can populate its own
+		// PSK identity and binder, without changing the empty-cache wire shape.
+		resume := utlsConfig.ClientSessionCache != nil && !utlsConfig.SessionTicketsDisabled
+		hello := utls.HelloChrome_133
+		if resume {
+			hello = utls.HelloCustom
+		}
+		return &webH2UTLSConn{
+			UConn:            utls.UClient(raw, utlsConfig, hello),
+			prepareChrome133: resume,
+		}, nil
 	case FingerprintNative:
 		return tls.Client(raw, config.Clone()), nil
 	default:
@@ -135,6 +148,7 @@ func chrome133UTLSConfig(input *tls.Config, sessionCache utls.ClientSessionCache
 		MaxVersion:                  utls.VersionTLS13,
 		SessionTicketsDisabled:      input.SessionTicketsDisabled,
 		ClientSessionCache:          sessionCache,
+		OmitEmptyPsk:                true,
 		DynamicRecordSizingDisabled: input.DynamicRecordSizingDisabled,
 		KeyLogWriter:                input.KeyLogWriter,
 	}, nil
@@ -176,6 +190,10 @@ func cloneCertificateForUTLS(input tls.Certificate) utls.Certificate {
 
 type webH2UTLSConn struct {
 	*utls.UConn
+	prepareChrome133  bool
+	prepareOnce       sync.Once
+	prepareErr        error
+	handshakeComplete atomic.Bool
 }
 
 // HandshakeContext enforces the application's TLS 1.3-only policy after the
@@ -185,12 +203,41 @@ type webH2UTLSConn struct {
 // without ceasing to be that profile. Failing before any HTTP bytes are sent
 // keeps the policy fail-closed even if a future caller forgets a second check.
 func (c *webH2UTLSConn) HandshakeContext(ctx context.Context) error {
+	if c.prepareChrome133 {
+		if !c.handshakeComplete.Load() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		c.prepareOnce.Do(func() {
+			// ApplyPreset generates entropy and key shares: keep it inside the
+			// caller's handshake budget rather than in the connection factory.
+			// Each connection owns the extension pointers mutated by uTLS.
+			spec, err := utls.UTLSIdToSpec(utls.HelloChrome_133)
+			if err == nil {
+				// TLS 1.3 requires this extension to be last. OmitEmptyPsk
+				// suppresses it until a valid cached session is available.
+				spec.Extensions = append(spec.Extensions, &utls.UtlsPreSharedKeyExtension{})
+				err = c.UConn.ApplyPreset(&spec)
+			}
+			c.prepareErr = err
+		})
+		if c.prepareErr != nil {
+			return c.prepareErr
+		}
+		if !c.handshakeComplete.Load() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+	}
 	if err := c.UConn.HandshakeContext(ctx); err != nil {
 		return err
 	}
 	if c.UConn.ConnectionState().Version != utls.VersionTLS13 {
 		return errors.New("tunnel: web-cover HTTP/2 connection did not negotiate TLS 1.3")
 	}
+	c.handshakeComplete.Store(true)
 	return nil
 }
 
