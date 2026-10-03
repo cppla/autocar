@@ -217,6 +217,11 @@ func (s *serverCore) handleStream(
 
 	dialCtx, cancel := context.WithTimeout(ctx, s.dialTimeout)
 	upstream, err := s.dialer.DialContext(dialCtx, req.Network.String(), req.Address)
+	// Reject a successful late result before our own context cleanup. This
+	// bounds establishment without binding a healthy stream to its dial timer.
+	if err == nil {
+		err = contextError(dialCtx)
+	}
 	cancel()
 	if err != nil || upstream == nil {
 		// A custom dialer may return an owned connection even on failure.

@@ -416,6 +416,10 @@ func (c *WebH3Client) reserveAuthenticatedSession(ctx context.Context) (webH3Ses
 			c.mu.Unlock()
 			return webH3SessionReservation{}, net.ErrClosed
 		}
+		if err := contextError(ctx); err != nil {
+			c.mu.Unlock()
+			return webH3SessionReservation{}, err
+		}
 		if session == nil || session.retired || conn.Context().Err() != nil {
 			c.mu.Unlock()
 			continue
@@ -483,6 +487,12 @@ func (c *WebH3Client) connection(ctx context.Context) (*quic.Conn, *http3.Client
 	if c.closed {
 		c.mu.Unlock()
 		return nil, nil, net.ErrClosed
+	}
+	// A caller can be canceled while queued on mu. Recheck before selecting
+	// an unclaimed session or starting client-owned physical initialization.
+	if err := contextError(ctx); err != nil {
+		c.mu.Unlock()
+		return nil, nil, err
 	}
 	if c.conn != nil && c.client != nil && c.conn.Context().Err() == nil {
 		conn, client := c.conn, c.client

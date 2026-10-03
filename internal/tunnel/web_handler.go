@@ -64,6 +64,11 @@ func (h *webTunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	dialCtx, cancel := context.WithTimeout(r.Context(), h.core.dialTimeout)
 	upstream, err := h.core.dialer.DialContext(dialCtx, "tcp", r.Host)
+	// The dialer's successful result is not accepted after the opening budget.
+	// Read its cause before cancel() so healthy results remain detached.
+	if err == nil {
+		err = contextError(dialCtx)
+	}
 	cancel()
 	if err != nil || upstream == nil {
 		// Keep cleanup errors out of the authenticated failure response.

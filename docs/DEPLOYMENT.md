@@ -284,6 +284,13 @@ shutdown semantics or TCP CONNECT handling, and is not included in v1.0.1.
 Cancellation requires context-aware resolvers/dialers; custom implementations
 that ignore cancellation cannot be forcibly interrupted by the proxy.
 
+Source builds reject late destination TCP dial results across native QUIC/TLS
+and web H2/H3: a connection returned after the configured outbound dial deadline
+is closed even if a custom dialer reports success. Rejection retains the
+existing sanitized native dial-failure or authenticated web 502 response and
+does not close the shared dialer. Established healthy streams still outlive
+their temporary dial context. This change is not included in v1.0.1.
+
 Source builds also cancel an HTTP connection's request contexts when that
 tracked connection is closed. This lets forced shutdown cancel a pending
 upstream request even when HTTP/1.1 pipelining has stopped the background

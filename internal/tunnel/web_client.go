@@ -474,6 +474,9 @@ func (c *WebClient) DialPacket(ctx context.Context) (transport.PacketConn, error
 	if ctx == nil {
 		return nil, errors.New("tunnel: nil web-cover packet dial context")
 	}
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 	packetDialer, ok := c.primary.dialer.(transport.PacketDialer)
 	if !ok {
 		return nil, errors.New("tunnel: web-cover primary does not support CONNECT-UDP")
@@ -485,8 +488,17 @@ func (c *WebClient) DialPacket(ctx context.Context) (transport.PacketConn, error
 	stopClient := context.AfterFunc(c.ctx, cancelDial)
 	packet, err := packetDialer.DialPacket(dialContext)
 	stopClient()
+	// Inspect the attempt before our own cleanup cancels it. A successful late
+	// result still belongs to this failed opening, not to an established user.
+	attemptErr := contextError(dialContext)
 	cancelDial()
+	if err == nil {
+		err = attemptErr
+	}
 	if err != nil {
+		if packet != nil {
+			_ = packet.Close()
+		}
 		if callerErr := contextError(ctx); callerErr != nil {
 			return nil, callerErr
 		}
@@ -494,6 +506,10 @@ func (c *WebClient) DialPacket(ctx context.Context) (transport.PacketConn, error
 			return nil, net.ErrClosed
 		}
 		return nil, fmt.Errorf("tunnel: web-cover %s CONNECT-UDP: %w", c.primary.name, err)
+	}
+	if callerErr := contextError(ctx); callerErr != nil {
+		_ = packet.Close()
+		return nil, callerErr
 	}
 	if c.isClosed() {
 		_ = packet.Close()
