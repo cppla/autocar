@@ -136,13 +136,14 @@ func (s *SOCKS5Server) serveConn(client net.Conn) {
 }
 
 func (s *SOCKS5Server) serveConnect(client net.Conn, request socksRequest) {
-	ctx := context.Background()
+	owner := context.Background()
 	if tracked, ok := client.(*trackedConn); ok {
-		// Bind only this caller's setup wait to full socket close. Do not add
-		// a reader that could consume early payload or treat half-close as
-		// abandonment, and do not close the shared upstream dialer.
-		ctx = tracked.connectionContext(ctx)
+		// Bind this caller's setup wait and established relay to full socket
+		// close, not to a half-close or the independent setup deadline. Do not
+		// add a payload-consuming reader or close the shared upstream dialer.
+		owner = tracked.connectionContext(owner)
 	}
+	ctx := owner
 	var cancel context.CancelFunc
 	if s.cfg.dialTimeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, s.cfg.dialTimeout)
@@ -180,7 +181,7 @@ func (s *SOCKS5Server) serveConnect(client net.Conn, request socksRequest) {
 		return
 	}
 	_ = client.SetWriteDeadline(time.Time{})
-	_ = relay(client, upstream, s.cfg.idleTimeout)
+	_ = relayWithOwner(owner, client, upstream, s.cfg.idleTimeout)
 }
 
 func (s *SOCKS5Server) serveUDPAssociate(client net.Conn, request socksRequest) {

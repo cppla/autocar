@@ -183,6 +183,9 @@ func (s *HTTPServer) serveConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer client.Close()
+	// Hijacked response writes and buffered-prefix replay are already tunnel
+	// work: bind their lifetime before either can block, not only the relay.
+	defer watchRelayOwner(r.Context(), client, upstream)()
 
 	if _, err := buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return

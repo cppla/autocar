@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -132,6 +133,31 @@ func relay(left, right net.Conn, idleTimeout time.Duration) error {
 		}
 	}
 	return errors.Join(relayErrors...)
+}
+
+// watchRelayOwner binds full socket closure to the original physical/request
+// lifetime, never its completed setup timeout. Register before replaying any
+// buffered payload. The returned function stops an unused callback or joins all
+// Close work if cancellation already started. Close calls run outside locks.
+func watchRelayOwner(owner context.Context, left, right net.Conn) func() {
+	ownerClosed := make(chan struct{})
+	stopOwner := context.AfterFunc(owner, func() {
+		defer close(ownerClosed)
+		_ = right.Close()
+		_ = left.Close()
+	})
+	return func() {
+		if !stopOwner() {
+			<-ownerClosed
+		}
+	}
+}
+
+// relayWithOwner preserves ordinary half-close and joins both copy pumps as
+// well as an already-started cancellation callback before returning.
+func relayWithOwner(owner context.Context, left, right net.Conn, idleTimeout time.Duration) error {
+	defer watchRelayOwner(owner, left, right)()
+	return relay(left, right, idleTimeout)
 }
 
 // relayActivity makes read inactivity a property of the whole tunnel, not
