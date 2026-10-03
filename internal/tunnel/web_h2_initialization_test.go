@@ -41,9 +41,35 @@ func TestWebH2PostTLSInitializationHonorsCancellation(t *testing.T) {
 						t.Fatal(err)
 					}
 					client.dialer = transport.DialFunc(func(context.Context, string, string) (net.Conn, error) { return wire, nil })
-					t.Cleanup(func() { _ = raw.Close(); _ = peer.Close(); _ = client.Close() })
+					serverCtx, cancelServer := context.WithTimeout(context.Background(), 3*time.Second)
+					_ = peer.SetDeadline(time.Now().Add(3 * time.Second))
 					serverDone := make(chan error, 1)
-					go func() { serverDone <- tls.Server(peer, serverTLS).HandshakeContext(t.Context()) }()
+					serverJoined := make(chan struct{})
+					dialJoined := make(chan struct{})
+					closeDone := make(chan error, 1)
+					closeJoined := make(chan struct{})
+					var closeOnce sync.Once
+					startClose := func() {
+						closeOnce.Do(func() {
+							go func() {
+								defer close(closeJoined)
+								closeDone <- client.Close()
+							}()
+						})
+					}
+					t.Cleanup(func() {
+						cancelServer()
+						_ = raw.Close()
+						_ = peer.Close()
+						startClose()
+						waitWebH2InitializationWorker(t, serverJoined, "TLS peer")
+						waitWebH2InitializationWorker(t, dialJoined, "caller dial")
+						waitWebH2InitializationWorker(t, closeJoined, "client Close")
+					})
+					go func() {
+						defer close(serverJoined)
+						serverDone <- tls.Server(peer, serverTLS).HandshakeContext(serverCtx)
+					}()
 					ctx, cancel := context.WithCancelCause(context.Background())
 					defer cancel(context.Canceled)
 					var dialCtx context.Context = ctx
@@ -54,6 +80,17 @@ func TestWebH2PostTLSInitializationHonorsCancellation(t *testing.T) {
 					}
 					dialDone := make(chan error, 1)
 					go func() {
+						defer close(dialJoined)
+						if mode == "initialization_deadline" {
+							// Avoid the public CONNECT wait timer winning the same
+							// budget first: exercise the physical initializer itself.
+							session, err := client.openSession(dialCtx)
+							if session != nil {
+								_ = closeWebH2Session(session)
+							}
+							dialDone <- err
+							return
+						}
 						conn, err := client.DialContext(dialCtx, "tcp", "target.invalid:443")
 						if conn != nil {
 							_ = conn.Close()
@@ -67,8 +104,13 @@ func TestWebH2PostTLSInitializationHonorsCancellation(t *testing.T) {
 					case <-time.After(time.Second):
 						t.Fatal("dial did not reach the post-TLS initialization write")
 					}
-					if err := <-serverDone; err != nil {
-						t.Fatalf("TLS handshake: %v", err)
+					select {
+					case err := <-serverDone:
+						if err != nil {
+							t.Fatalf("TLS handshake: %v", err)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("TLS peer did not report handshake completion")
 					}
 					client.mu.Lock()
 					registered := len(client.sessions)
@@ -85,10 +127,8 @@ func TestWebH2PostTLSInitializationHonorsCancellation(t *testing.T) {
 						want = context.DeadlineExceeded
 						<-dialCtx.Done()
 					case "client_close":
-						want = context.Canceled
-						if err := client.Close(); err != nil {
-							t.Fatal(err)
-						}
+						want = net.ErrClosed
+						startClose()
 					case "initialization_deadline":
 						want = context.DeadlineExceeded
 					}
@@ -98,14 +138,24 @@ func TestWebH2PostTLSInitializationHonorsCancellation(t *testing.T) {
 							t.Fatalf("initialization error=%v, want cause %v", err, want)
 						}
 					case <-time.After(time.Second):
-						_ = raw.Close()
-						<-dialDone
 						t.Fatal("post-TLS initialization ignored cancellation")
+					}
+					// Caller cancellation ends only its wait. The physical setup
+					// remains client-owned, so explicitly Close and join it before
+					// checking raw-socket and session cleanup in every mode.
+					startClose()
+					select {
+					case err := <-closeDone:
+						if err != nil {
+							t.Fatalf("client Close: %v", err)
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("client Close did not join physical initialization")
 					}
 					select {
 					case <-wire.closed:
 					default:
-						t.Fatal("canceled initializer left its raw connection open")
+						t.Fatal("joined initialization cleanup left its raw connection open")
 					}
 					client.mu.Lock()
 					registered = len(client.sessions)
@@ -172,22 +222,59 @@ func TestWebH2CloseAtInitializationHandoff(t *testing.T) {
 						t.Fatal(err)
 					}
 					client.dialer = transport.DialFunc(func(context.Context, string, string) (net.Conn, error) { return wire, nil })
-					t.Cleanup(func() { _ = raw.Close(); _ = peer.Close(); _ = client.Close() })
 					// Close after the first H2 write fully reaches the peer, but
-					// before its initializer can publish a session. Either the
-					// watcher or the closed-client registration gate must win.
-					wire.onInitialized = func() { _ = client.Close() }
-					serverDone := make(chan struct{})
+					// before Write returns to the initializer. Close must run on
+					// an independent worker: calling it inside Write would join
+					// the initializer from that same initializer and deadlock.
+					handoff := make(chan struct{})
+					releaseHandoff := make(chan struct{})
+					var releaseOnce sync.Once
+					release := func() { releaseOnce.Do(func() { close(releaseHandoff) }) }
+					wire.onInitialized = func() {
+						close(handoff)
+						<-releaseHandoff
+					}
+					serverCtx, cancelServer := context.WithTimeout(context.Background(), 3*time.Second)
+					_ = peer.SetDeadline(time.Now().Add(3 * time.Second))
+					serverDone := make(chan error, 1)
+					serverJoined := make(chan struct{})
+					dialJoined := make(chan struct{})
+					closeDone := make(chan error, 1)
+					closeJoined := make(chan struct{})
+					var closeOnce sync.Once
+					startClose := func() {
+						closeOnce.Do(func() {
+							go func() {
+								defer close(closeJoined)
+								closeDone <- client.Close()
+							}()
+						})
+					}
+					t.Cleanup(func() {
+						// Independent socket closure and gate release also work on
+						// Fatal paths; cleanup never depends on a passing oracle.
+						release()
+						cancelServer()
+						_ = raw.Close()
+						_ = peer.Close()
+						startClose()
+						waitWebH2InitializationWorker(t, serverJoined, "handoff TLS peer")
+						waitWebH2InitializationWorker(t, dialJoined, "handoff caller dial")
+						waitWebH2InitializationWorker(t, closeJoined, "handoff client Close")
+					})
 					go func() {
-						defer close(serverDone)
+						defer close(serverJoined)
 						server := tls.Server(peer, serverTLS)
-						if server.HandshakeContext(t.Context()) == nil {
+						err := server.HandshakeContext(serverCtx)
+						if err == nil {
 							var data [1]byte
-							_, _ = server.Read(data[:])
+							_, err = server.Read(data[:])
 						}
+						serverDone <- err
 					}()
 					dialDone := make(chan error, 1)
 					go func() {
+						defer close(dialJoined)
 						conn, err := client.DialContext(context.Background(), "tcp", "target.invalid:443")
 						if conn != nil {
 							_ = conn.Close()
@@ -195,33 +282,77 @@ func TestWebH2CloseAtInitializationHandoff(t *testing.T) {
 						dialDone <- err
 					}()
 					select {
+					case <-handoff:
 					case err := <-dialDone:
-						if err == nil {
-							t.Fatal("closed client published a cold initialized session")
+						t.Fatalf("dial finished before the post-wire handoff: %v", err)
+					case <-time.After(2 * time.Second):
+						t.Fatal("initializer did not reach the post-wire handoff")
+					}
+					select {
+					case err := <-serverDone:
+						if err != nil {
+							t.Fatalf("TLS peer did not receive the first H2 bytes: %v", err)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("handoff TLS peer did not report")
+					}
+					startClose()
+					select {
+					case <-wire.closed:
+					case <-time.After(time.Second):
+						t.Fatal("Close did not cancel the gated initializer's raw socket")
+					}
+					select {
+					case err := <-closeDone:
+						t.Fatalf("Close returned before initializer handoff was released: %v", err)
+					default:
+					}
+					client.mu.Lock()
+					closed := client.closed
+					client.mu.Unlock()
+					if !closed {
+						t.Fatal("test did not reach Close after the initial H2 write")
+					}
+					release()
+					select {
+					case err := <-closeDone:
+						if err != nil {
+							t.Fatalf("joined client Close: %v", err)
 						}
 					case <-time.After(2 * time.Second):
-						_ = raw.Close()
-						<-dialDone
-						t.Fatal("close during initialization handoff did not finish")
+						t.Fatal("Close did not join the released initializer")
 					}
-					<-serverDone
+					select {
+					case err := <-dialDone:
+						if !errors.Is(err, net.ErrClosed) {
+							t.Fatalf("closed initializer dial error=%v, want net.ErrClosed", err)
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("caller dial did not finish after initialization handoff Close")
+					}
 					select {
 					case <-wire.closed:
 					default:
 						t.Fatal("closed initializer left its raw connection open")
 					}
 					client.mu.Lock()
-					registered, current, closed := len(client.sessions), client.current, client.closed
+					registered, current := len(client.sessions), client.current
 					client.mu.Unlock()
-					if !closed {
-						t.Fatal("test did not reach Close after the initial H2 write")
-					}
 					if registered != 0 || current != nil {
 						t.Fatal("closed client retained a session after initialization handoff")
 					}
 				})
 			}
 		})
+	}
+}
+
+func waitWebH2InitializationWorker(t *testing.T, done <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Errorf("%s worker did not join after independent cleanup", name)
 	}
 }
 
