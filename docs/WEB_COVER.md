@@ -211,6 +211,27 @@ the upstream cannot be reached. Consequently, an upstream that requires an
 `Authorization` request header is not suitable without a separate authorized
 front end.
 
+Source builds after v1.0.1 preserve declared end-to-end request trailers for
+nonempty streamed uploads through the fixed-origin and public-origin proxies.
+For example, a website can receive a late `Content-Digest` after consuming the
+upload. Values become available only after successful body EOF; the proxy does
+not buffer the complete upload, verify its digest, or promote trailers into
+headers. HTTP/2 and HTTP/3 uploads with a positive length use chunked framing
+when forwarded to HTTP/1.1 so that their trailers remain available. The incoming
+body's length checks still apply. Automatic body replay is disabled for these
+trailer-bearing upstream requests.
+
+Both proxy modes remove invalid, hop-by-hop, connection-nominated and credential
+trailer fields, including `Authorization`, `Proxy-Authorization` and
+`Proxy-Authentication-Info`, at declaration and EOF. Public-origin mode also
+removes untrusted forwarding trailers at EOF. Only initially declared safe
+fields are forwarded; late unannounced fields, empty-content trailer exchanges
+and custom transports that deep-clone the outgoing request again are not
+covered by this compatibility guarantee. Custom request bodies must finalize
+trailers before `Read` returns EOF, not mutate them concurrently from `Close`.
+Static cover, authenticated tunnel payloads and the published v1.0.1 binary
+are unchanged. This is upload compatibility, not a traffic-identification claim.
+
 Source builds after v1.0.1 disable automatic compression negotiation and response
 decompression on the proxy's private default upstream transport. The visitor's
 `Accept-Encoding` remains unchanged: explicitly requested gzip still works, and

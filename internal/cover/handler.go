@@ -71,15 +71,12 @@ func newReverseProxyHandler(target *url.URL, transport http.RoundTripper, public
 			// nomination boundary, and restore only our validated H1 WebSocket.
 			removeConnectionNominatedHeaders(request.Out.Header, request.In.Header)
 			removeUnsafeHeaders(request.Out.Header)
+			prepareRequestTrailers(request.In, request.Out, publicAuthority != "")
 			if publicAuthority != "" {
 				// The URL still chooses the fixed upstream dial and TLS target.
 				// Only this opt-in mode supplies a configured public vhost and
 				// trusted forwarding metadata, after all request nominations.
 				removePublicOriginForwardingHeaders(request.Out.Header)
-				// Replayed bodies can already have populated Trailer values.
-				// ReverseProxy owns this cloned map; do not trust those fields
-				// or mutate the original request's body or trailer map.
-				removePublicOriginForwardingHeaders(request.Out.Trailer)
 				request.Out.Host = publicAuthority
 				request.Out.Header.Set("X-Forwarded-Host", publicAuthority)
 				request.Out.Header.Set("X-Forwarded-Proto", "https")
