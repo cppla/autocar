@@ -187,7 +187,9 @@ func (s *TLSServer) serveTLSConnection(ctx context.Context, conn *tls.Conn, sour
 	if err != nil || conn.ConnectionState().NegotiatedProtocol != protocol.ALPN {
 		return
 	}
-	s.core.handleStream(ctx, conn, nil, nil)
+	s.core.handleStream(ctx, conn, nil, func(owner context.Context, stream deadlineConn, _ protocol.Request) streamRequestOptions {
+		return streamRequestOptions{Relay: stream, RelayOwner: owner}
+	})
 }
 
 type sourceConnectionLimiter struct {

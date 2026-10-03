@@ -60,6 +60,15 @@ untracked Go source for the known disallowed proxy application-module import.
    directions. Only then does raw byte relay begin.
 6. EOF is half-closed when possible; hard errors abort both copy directions.
 
+Native QUIC and TLS fallback relays also own destination cleanup when their
+physical connection or server is shut down. Cancellation closes the TCP target
+to interrupt idle reads as well as pending writes, then joins both relay pumps
+and any in-progress close callback before releasing stream admission. The
+owner is the physical QUIC connection or TLS server lifetime, never the dial
+timer or QUIC send-side stream context. An ordinary response FIN therefore
+still permits upload, and client half-close still permits a delayed response.
+This does not impose a new timeout on healthy idle destination reads.
+
 QUIC streams are independent. Canceling a slow open or one flow does not close
 sibling flows. A per-connection pacer sees aggregate QUIC statistics, so
 concurrent streams share one path estimate rather than each overestimating the
