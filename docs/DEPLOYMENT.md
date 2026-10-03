@@ -347,6 +347,15 @@ are sent can instead appear as a connection error. Declared trailers are
 forwarded only after the body completes successfully. This does not add HTTP
 Upgrade support or change CONNECT tunnels, and is not included in v1.0.1.
 
+Source builds preserve declared safe trailers on streamed HTTP forward-proxy
+uploads, including integrity metadata finalized only at body EOF. Uploads are
+not buffered; trailer values are copied before the outbound transport writes
+them. Forbidden trailer fields, proxy credentials and initially
+connection-nominated hop fields are removed. A nomination received only at EOF
+removes its value but cannot retract a declaration already streamed upstream.
+Ordinary origin `Authorization` headers retain their existing behavior. This
+is not included in v1.0.1.
+
 The relay's separate `--destination-write-timeout` defaults to `5m`; `0`
 also selects `5m`, rather than disabling the limit. It bounds the completion
 of each TCP destination write, split into chunks of at most 32 KiB. Each
