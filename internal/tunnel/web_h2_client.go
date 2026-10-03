@@ -30,7 +30,10 @@ type WebH2ClientConfig struct {
 	// reference implemented by uTLS v1.8.2. Native is for tests/debugging.
 	FingerprintProfile FingerprintProfile
 	HandshakeTimeout   time.Duration
-	DialTimeout        time.Duration
+	// DialTimeout bounds each TCP connect, separately from TLS/H2 setup.
+	// A cold physical attempt is client-owned; caller cancellation only stops
+	// that caller's wait. Zero retains the default TCP dial budget.
+	DialTimeout time.Duration
 	// WriteByteTimeout limits stalled writes on the shared HTTP/2 connection.
 	// Zero uses a conservative thirty-second default; negative values are
 	// invalid. This is a TLS write-call budget, not a precise TCP byte-idle
@@ -47,6 +50,7 @@ type WebH2Client struct {
 	address          string
 	tlsConfig        *tls.Config
 	fingerprint      FingerprintProfile
+	dialTimeout      time.Duration
 	handshakeTimeout time.Duration
 	dialer           transport.Dialer
 	auth             *webAuthSigner
@@ -61,9 +65,31 @@ type WebH2Client struct {
 	mu       sync.Mutex
 	closed   bool
 	// selected becomes true only after an authenticated CONNECT succeeds.
-	selected bool
-	current  *webH2ClientSession
-	sessions map[*webH2ClientSession]struct{}
+	selected  bool
+	current   *webH2ClientSession
+	sessions  map[*webH2ClientSession]struct{}
+	dial      *webH2DialAttempt
+	selection *webH2SelectionCohort
+	// Additions are made under mu before the closed gate. Close joins both
+	// unpublished physical setup and cleanup detached from sessions.
+	workers   sync.WaitGroup
+	closeDone chan struct{}
+	closeErr  error
+}
+
+// One immutable physical result is shared by callers already waiting for it.
+// A caller owns its wait and CONNECT, never this client-owned initialization.
+type webH2DialAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+// Register before queuing at dialGate, so a fast completed failure remains
+// visible to already queued callers. The worker detaches this cohort when it
+// publishes its result; later callers can retry without a failure cache.
+// Both the current pointer and its attempt are protected by the client mu.
+type webH2SelectionCohort struct {
+	attempt *webH2DialAttempt
 }
 
 type webH2ClientSession struct {
@@ -78,13 +104,16 @@ type webH2ClientSession struct {
 	opening int
 	// active counts returned net.Conns until full close, including deadline
 	// cancellation. Half-closes keep the opposite direction's ownership.
-	active int
+	active    int
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type webH2ClientAuthState uint8
 
 const (
-	webH2ClientAuthBootstrapping webH2ClientAuthState = iota
+	webH2ClientAuthFresh webH2ClientAuthState = iota
+	webH2ClientAuthBootstrapping
 	webH2ClientAuthReady
 	webH2ClientAuthFailed
 )
@@ -153,6 +182,7 @@ func newWebH2ClientWithSigner(config WebH2ClientConfig, auth *webAuthSigner, cla
 		address:          config.ServerAddress,
 		tlsConfig:        tlsConfig,
 		fingerprint:      fingerprint,
+		dialTimeout:      dialTimeout,
 		handshakeTimeout: handshakeTimeout,
 		dialer:           &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
 		auth:             auth,
@@ -168,6 +198,7 @@ func newWebH2ClientWithSigner(config WebH2ClientConfig, auth *webAuthSigner, cla
 		cancel:           cancel,
 		dialGate:         make(chan struct{}, 1),
 		sessions:         make(map[*webH2ClientSession]struct{}),
+		closeDone:        make(chan struct{}),
 	}, nil
 }
 
@@ -187,7 +218,7 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 	if ctx == nil {
 		return nil, errors.New("tunnel: nil dial context")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
@@ -329,10 +360,11 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 		fail()
 		return nil, context.DeadlineExceeded
 	}
-	if !stopDial() && ctx.Err() != nil {
+	stopDial()
+	if err := contextError(ctx); err != nil {
 		_ = response.Body.Close()
 		fail()
-		return nil, ctx.Err()
+		return nil, err
 	}
 
 	c.mu.Lock()
@@ -383,9 +415,27 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 		return webH2SessionReservation{}, net.ErrClosed
 	}
 	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return webH2SessionReservation{}, net.ErrClosed
+		}
+		if err := contextError(ctx); err != nil {
+			c.mu.Unlock()
+			return webH2SessionReservation{}, err
+		}
+		cohort := c.selection
+		if cohort == nil {
+			cohort = &webH2SelectionCohort{}
+			c.selection = cohort
+		}
+		c.mu.Unlock()
 		select {
 		case c.dialGate <- struct{}{}:
 		case <-ctx.Done():
+			if c.ctx.Err() != nil {
+				return webH2SessionReservation{}, net.ErrClosed
+			}
 			return webH2SessionReservation{}, context.Cause(ctx)
 		case <-c.ctx.Done():
 			return webH2SessionReservation{}, net.ErrClosed
@@ -394,9 +444,9 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 			<-c.dialGate
 			return webH2SessionReservation{}, net.ErrClosed
 		}
-		if err := ctx.Err(); err != nil {
+		if err := contextError(ctx); err != nil {
 			<-c.dialGate
-			return webH2SessionReservation{}, context.Cause(ctx)
+			return webH2SessionReservation{}, err
 		}
 
 		c.mu.Lock()
@@ -405,8 +455,32 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 			<-c.dialGate
 			return webH2SessionReservation{}, net.ErrClosed
 		}
+		if err := contextError(ctx); err != nil {
+			c.mu.Unlock()
+			<-c.dialGate
+			return webH2SessionReservation{}, err
+		}
+		if attempt := cohort.attempt; attempt != nil {
+			c.mu.Unlock()
+			<-c.dialGate
+			if err := c.waitSessionDial(ctx, attempt); err != nil {
+				return webH2SessionReservation{}, err
+			}
+			continue
+		}
 		if session := c.current; session != nil {
 			switch session.authState {
+			case webH2ClientAuthFresh:
+				if session.h2.CanTakeNewRequest() {
+					// Claim bootstrap only when a live caller reserves a stream,
+					// not when a background worker publishes a cold connection.
+					session.authState = webH2ClientAuthBootstrapping
+					session.opening++
+					c.mu.Unlock()
+					<-c.dialGate
+					return webH2SessionReservation{session: session, bootstrap: true}, nil
+				}
+				c.current = nil
 			case webH2ClientAuthReady:
 				if session.h2.CanTakeNewRequest() {
 					session.opening++
@@ -424,6 +498,9 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 				case <-ready:
 					continue
 				case <-ctx.Done():
+					if c.ctx.Err() != nil {
+						return webH2SessionReservation{}, net.ErrClosed
+					}
 					return webH2SessionReservation{}, context.Cause(ctx)
 				case <-c.ctx.Done():
 					return webH2SessionReservation{}, net.ErrClosed
@@ -433,34 +510,74 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 			}
 		}
 		retired := c.cleanupIdleSessionsLocked()
-		c.mu.Unlock()
-		closeWebH2Sessions(retired)
-
-		session, err := c.openSession(ctx)
-		if err != nil {
-			<-c.dialGate
-			return webH2SessionReservation{}, err
+		attempt := c.dial
+		if attempt == nil {
+			attempt = &webH2DialAttempt{done: make(chan struct{})}
+			c.dial = attempt
+			c.workers.Add(1)
+			cohort.attempt = attempt
+			go c.runSessionDial(attempt)
+		} else {
+			cohort.attempt = attempt
 		}
-		if !session.h2.CanTakeNewRequest() {
-			<-c.dialGate
-			_ = closeWebH2Session(session)
-			return webH2SessionReservation{}, errors.New("tunnel: new web-cover HTTP/2 connection rejected its first stream")
-		}
-
-		c.mu.Lock()
-		if c.closed {
-			c.mu.Unlock()
-			<-c.dialGate
-			_ = closeWebH2Session(session)
-			return webH2SessionReservation{}, net.ErrClosed
-		}
-		c.current = session
-		session.opening++
-		c.sessions[session] = struct{}{}
 		c.mu.Unlock()
 		<-c.dialGate
-		return webH2SessionReservation{session: session, bootstrap: true}, nil
+		c.closeRetiredSessions(retired)
+		if err := c.waitSessionDial(ctx, attempt); err != nil {
+			return webH2SessionReservation{}, err
+		}
 	}
+}
+
+func (c *WebH2Client) waitSessionDial(ctx context.Context, attempt *webH2DialAttempt) error {
+	select {
+	case <-attempt.done:
+	case <-c.ctx.Done():
+		return net.ErrClosed
+	case <-ctx.Done():
+		if c.ctx.Err() != nil {
+			return net.ErrClosed
+		}
+		return context.Cause(ctx)
+	}
+	if c.ctx.Err() != nil {
+		return net.ErrClosed
+	}
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	return attempt.err
+}
+
+func (c *WebH2Client) runSessionDial(attempt *webH2DialAttempt) {
+	defer c.workers.Done()
+	session, err := c.openSession(c.ctx)
+	if err == nil && !session.h2.CanTakeNewRequest() {
+		err = errors.New("tunnel: new web-cover HTTP/2 connection rejected its first stream")
+	}
+	c.mu.Lock()
+	accepted := !c.closed && err == nil
+	if c.closed {
+		err = net.ErrClosed
+	}
+	if accepted {
+		c.current = session
+		c.sessions[session] = struct{}{}
+	}
+	c.mu.Unlock()
+	// Join late-result cleanup before either publishing failure or allowing
+	// Close to return. No session can register after the closed gate.
+	if session != nil && !accepted {
+		_ = closeWebH2Session(session)
+	}
+	c.mu.Lock()
+	attempt.err = err
+	c.dial = nil
+	if c.selection != nil && c.selection.attempt == attempt {
+		c.selection = nil
+	}
+	close(attempt.done)
+	c.mu.Unlock()
 }
 
 func (c *WebH2Client) releaseSessionReservation(session *webH2ClientSession) {
@@ -468,7 +585,7 @@ func (c *WebH2Client) releaseSessionReservation(session *webH2ClientSession) {
 	session.opening--
 	retired := c.cleanupIdleSessionsLocked()
 	c.mu.Unlock()
-	closeWebH2Sessions(retired)
+	c.closeRetiredSessions(retired)
 }
 
 func (c *WebH2Client) releaseSessionStream(session *webH2ClientSession) {
@@ -476,7 +593,7 @@ func (c *WebH2Client) releaseSessionStream(session *webH2ClientSession) {
 	session.active--
 	retired := c.cleanupIdleSessionsLocked()
 	c.mu.Unlock()
-	closeWebH2Sessions(retired)
+	c.closeRetiredSessions(retired)
 }
 
 func (c *WebH2Client) openSession(ctx context.Context) (*webH2ClientSession, error) {
@@ -487,14 +604,15 @@ func (c *WebH2Client) openSession(ctx context.Context) (*webH2ClientSession, err
 		dialCancel()
 	}()
 
-	raw, err := c.dialer.DialContext(dialCtx, "tcp", c.address)
+	raw, err := c.dialRaw(dialCtx)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: dial web-cover HTTP/2 server: %w", err)
 	}
 	// NewClientConn synchronously writes the HTTP/2 preface and SETTINGS after
 	// TLS succeeds. Until that finishes, the connection is not in c.sessions,
-	// so Close cannot find it there. Keep raw I/O tied to both establishment
-	// contexts through initialization, not just through the TLS handshake.
+	// so pooled-session closure cannot find it there. The setup worker joins
+	// this watcher too; keep raw I/O tied to both establishment contexts
+	// through initialization, not just through the TLS handshake.
 	initializationCtx, initializationCancel := context.WithTimeout(dialCtx, c.handshakeTimeout)
 	defer initializationCancel()
 	session, err := c.initializeSession(initializationCtx, raw, c.utlsSessionCache)
@@ -508,7 +626,7 @@ func (c *WebH2Client) openSession(ctx context.Context) (*webH2ClientSession, err
 	if cause := context.Cause(initializationCtx); cause != nil {
 		return nil, fmt.Errorf("tunnel: web-cover HTTP/2 TLS handshake: %w", cause)
 	}
-	raw, err = c.dialer.DialContext(initializationCtx, "tcp", c.address)
+	raw, err = c.dialRaw(initializationCtx)
 	if err != nil {
 		if cause := context.Cause(initializationCtx); cause != nil {
 			err = cause
@@ -516,6 +634,31 @@ func (c *WebH2Client) openSession(ctx context.Context) (*webH2ClientSession, err
 		return nil, fmt.Errorf("tunnel: redial web-cover HTTP/2 server after TLS retry: %w", err)
 	}
 	return c.initializeSession(initializationCtx, raw, nil)
+}
+
+// The TCP budget stays separate from the existing TLS/H2 initialization
+// budget. A retry after HRR is additionally bounded by that original budget.
+func (c *WebH2Client) dialRaw(ctx context.Context) (net.Conn, error) {
+	timeout := c.dialTimeout
+	if timeout == 0 {
+		timeout = defaultDialTimeout
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	raw, err := c.dialer.DialContext(dialCtx, "tcp", c.address)
+	if cause := contextError(dialCtx); cause != nil {
+		err = cause
+	}
+	if raw == nil && err == nil {
+		err = errors.New("tunnel: HTTP/2 physical dial returned no connection")
+	}
+	if err != nil {
+		if raw != nil {
+			err = errors.Join(err, raw.Close())
+		}
+		return nil, err
+	}
+	return raw, nil
 }
 
 // initializeSession owns one physical attempt. Its immutable raw parameter
@@ -578,7 +721,7 @@ func (c *WebH2Client) initializeSession(initializationCtx context.Context, raw n
 		raw:       raw,
 		conn:      tlsConn,
 		h2:        clientConn,
-		authState: webH2ClientAuthBootstrapping,
+		authState: webH2ClientAuthFresh,
 		authReady: make(chan struct{}),
 	}, nil
 }
@@ -617,7 +760,14 @@ func (c *WebH2Client) failSessionAuthentication(session *webH2ClientSession) {
 		c.current = nil
 	}
 	delete(c.sessions, session)
+	tracked := !c.closed
+	if tracked {
+		c.workers.Add(1)
+	}
 	c.mu.Unlock()
+	if tracked {
+		defer c.workers.Done()
+	}
 	_ = closeWebH2Session(session)
 }
 
@@ -628,7 +778,7 @@ func (c *WebH2Client) noteSessionFailure(session *webH2ClientSession) {
 	}
 	retired := c.cleanupIdleSessionsLocked()
 	c.mu.Unlock()
-	closeWebH2Sessions(retired)
+	c.closeRetiredSessions(retired)
 }
 
 // Only inspect ownership maintained under c.mu. http2.ClientConn.State takes
@@ -644,40 +794,57 @@ func (c *WebH2Client) cleanupIdleSessionsLocked() []*webH2ClientSession {
 		delete(c.sessions, session)
 		retired = append(retired, session)
 	}
+	c.workers.Add(len(retired))
 	return retired
 }
 
-func closeWebH2Sessions(sessions []*webH2ClientSession) {
+func (c *WebH2Client) closeRetiredSessions(sessions []*webH2ClientSession) {
 	for _, session := range sessions {
 		_ = closeWebH2Session(session)
+		c.workers.Done()
 	}
 }
 
 func closeWebH2Session(session *webH2ClientSession) error {
-	session.auth.close()
-	// Stop wire I/O first. Besides releasing HTTP/2 writers, this avoids a
-	// synchronous TLS close_notify waiting on an unresponsive peer. Retired
-	// sessions reach here only after all opening and returned streams drain.
-	var rawErr error
-	if session.raw != nil {
-		rawErr = session.raw.Close()
-		if errors.Is(rawErr, net.ErrClosed) {
-			rawErr = nil
-		}
+	if session == nil {
+		return nil
 	}
-	return errors.Join(rawErr, session.h2.Close())
+	session.closeOnce.Do(func() {
+		session.auth.close()
+		// Stop wire I/O first. Besides releasing HTTP/2 writers, this avoids a
+		// synchronous TLS close_notify waiting on an unresponsive peer. Retired
+		// sessions reach here only after all opening and returned streams drain.
+		var rawErr error
+		if session.raw != nil {
+			rawErr = session.raw.Close()
+			if errors.Is(rawErr, net.ErrClosed) {
+				rawErr = nil
+			}
+		}
+		var h2Err error
+		if session.h2 != nil {
+			h2Err = session.h2.Close()
+		}
+		session.closeErr = errors.Join(rawErr, h2Err)
+	})
+	return session.closeErr
 }
 
 // Close prevents future dials, cancels active streams, and closes every pooled
-// HTTP/2 connection.
+// HTTP/2 connection. It joins owned setup and detached cleanup; concurrent
+// callers observe the same completed closure and error.
 func (c *WebH2Client) Close() error {
 	c.mu.Lock()
+	if c.closeDone == nil {
+		c.closeDone = make(chan struct{})
+	}
 	if c.closed {
+		done := c.closeDone
 		c.mu.Unlock()
-		return nil
+		<-done
+		return c.closeErr
 	}
 	c.closed = true
-	c.cancel()
 	sessions := make([]*webH2ClientSession, 0, len(c.sessions))
 	for session := range c.sessions {
 		sessions = append(sessions, session)
@@ -685,12 +852,16 @@ func (c *WebH2Client) Close() error {
 	c.current = nil
 	c.sessions = make(map[*webH2ClientSession]struct{})
 	c.mu.Unlock()
+	c.cancel()
 
 	var result error
 	for _, session := range sessions {
 		result = errors.Join(result, closeWebH2Session(session))
 	}
-	return result
+	c.workers.Wait()
+	c.closeErr = result
+	close(c.closeDone)
+	return c.closeErr
 }
 
 var _ transport.Dialer = (*WebH2Client)(nil)

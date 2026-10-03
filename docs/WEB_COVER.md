@@ -380,15 +380,30 @@ IPv4 candidates and starts them with a short stagger; each candidate retains
 its own UDP socket so a blackholed first address cannot consume the entire H3
 budget before a working family is tried.
 
-Source builds after v1.0.1 share the result of a cold H3 physical connection
+Source builds after v1.0.1 share the result of a cold H2 or H3 physical connection
 attempt with all callers already waiting on it. A failed handshake does not
 make those callers start replacement handshakes one after another. A later
 invocation may retry, subject to the existing `web-auto` cooldown policy.
+H2 callers register before queuing for session selection, so they retain
+that same completed failure even if it arrives before their selection turn;
+new callers after publication can retry without an indefinite failure cache.
 The shared attempt belongs to the client and retains its configured physical
 dial timeout; canceling one caller stops only that caller's wait, not the
-attempt needed by other callers. If all callers abandon it, the attempt can
-continue until its existing timeout or client shutdown. Client Close cancels
-and joins owned dialing and session-cleanup workers before returning. This
+attempt needed by other callers. H2 keeps its TCP-connect timeout separate
+from the existing TLS/H2 initialization budget; its bounded TLS retry after
+HelloRetryRequest still uses the original remaining initialization budget.
+If all callers abandon it, initialization can continue until its configured
+timeout or client shutdown. A successful unclaimed H2 connection can remain
+pooled, but does not send CONNECT or generate application authentication until
+a live caller reserves its first stream. That caller alone owns bootstrap;
+subsequent callers retain the existing short connection-bound credentials.
+Client Close cancels and joins owned dialing and detached session-cleanup
+workers before returning. Concurrent H2 Close callers wait for the same
+completed closure and result, including late physical dial results. This
+does not claim synchronous termination of every dependency goroutine; custom
+TLS callbacks must return, and operations ignoring cancellation cannot be
+forcibly interrupted. A failed TCP dial's non-nil connection is closed before
+its failure is published; a nil successful result fails closed. This
 does not change authentication, wire profiles, timeout defaults or sibling
 stream ownership, and is not a general connection-speed or browser-equivalence
 claim. The published v1.0.1 binary does not contain this change.
