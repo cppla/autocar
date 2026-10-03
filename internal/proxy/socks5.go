@@ -424,6 +424,20 @@ func (c *closeOncePacketConn) MaxPayloadSize() int {
 	return 0
 }
 
+func (c *closeOncePacketConn) ConcurrentSendLimit() int {
+	if sender, ok := c.PacketConn.(transport.PacketConcurrentSender); ok {
+		return sender.ConcurrentSendLimit()
+	}
+	return 0
+}
+
+func (c *closeOncePacketConn) SendTargetKey(address string) (string, error) {
+	if sender, ok := c.PacketConn.(transport.PacketConcurrentSender); ok {
+		return sender.SendTargetKey(address)
+	}
+	return address, nil
+}
+
 // accept records the first valid source port when the UDP ASSOCIATE request
 // specified port zero. Every datagram must originate from the control TCP
 // connection's peer IP, preventing the relay from becoming an open UDP proxy.
@@ -482,6 +496,16 @@ func runSOCKSUDPAssociation(
 		}
 	}
 	finish := func() { finished <- struct{}{} }
+	var sendQueue *transport.PacketSendQueue
+	var sendErrors <-chan error
+	var concurrent transport.PacketConcurrentSender
+	if sender, ok := upstream.(transport.PacketConcurrentSender); ok && sender.ConcurrentSendLimit() > 1 {
+		concurrent = sender
+		sendQueue = transport.NewPacketSendQueue(context.Background(), 32, sender.ConcurrentSendLimit(), func(_ context.Context, payload []byte, target string) error {
+			return upstream.Send(payload, target)
+		})
+		sendErrors = sendQueue.Errors()
+	}
 
 	go func() {
 		defer finish()
@@ -497,7 +521,16 @@ func runSOCKSUDPAssociation(
 			if err != nil || len(payload) > maxPayloadSize || !endpoint.accept(source) {
 				continue
 			}
-			if err := upstream.Send(payload, target); err != nil {
+			var sendErr error
+			if sendQueue != nil {
+				target, sendErr = concurrent.SendTargetKey(target)
+				if sendErr == nil {
+					sendErr = sendQueue.Enqueue(payload, target)
+				}
+			} else {
+				sendErr = upstream.Send(payload, target)
+			}
+			if err := sendErr; err != nil {
 				if errors.Is(err, transport.ErrPacketQueueFull) || errors.Is(err, transport.ErrPacketTargetUnavailable) {
 					// Datagram delivery is best effort. Queue pressure or a rejected
 					// target drops this packet, not other targets on the association.
@@ -550,6 +583,8 @@ wait:
 			break wait
 		case <-controlDone:
 			break wait
+		case <-sendErrors:
+			break wait
 		case <-activity:
 			if timer != nil {
 				if !timer.Stop() {
@@ -568,7 +603,13 @@ wait:
 	// Join packet workers before the caller joins its control reader and
 	// releases the tracked connection. Closing endpoints interrupts their I/O.
 	_ = local.Close()
+	if sendQueue != nil {
+		sendQueue.Stop()
+	}
 	_ = upstream.Close()
+	if sendQueue != nil {
+		sendQueue.Wait()
+	}
 	for completed < 2 {
 		<-finished
 		completed++

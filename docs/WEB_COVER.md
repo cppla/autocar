@@ -470,6 +470,19 @@ both pacing fields as `not-applicable`, and `--pacing=fixed-rate` is rejected.
 `h2` does not advertise UDP. The H3-to-H2 fallback carries only new TCP
 streams: UDP never falls back to H2 and fails when H3 is unavailable.
 
+For an established SOCKS association, opening a slow new H3 UDP target does
+not serialize sends to another warm target while scheduler capacity remains.
+Aliases are grouped using the same canonical target identity as CONNECT-UDP.
+This keeps connection authentication and all server destination/admission
+checks intact; it neither retries packets nor caches native DNS resolutions.
+The frontend queue counts active and waiting packets together (32 total), with
+at most eight workers and a 256 KiB payload-plus-address cap. One target can use
+at most half the packet/byte budget. Multiple busy targets may still fill the
+shared queue, in which case packets are dropped. Close interrupts and joins
+pending sends before the SOCKS association is released. Custom packet
+transports retain serial sending unless they explicitly opt in to this
+concurrency/close contract; see [Architecture](ARCHITECTURE.md).
+
 Only a newly authenticated CONNECT-UDP response is fresh evidence that the H3
 path has recovered. Sending on a cached UDP target merely queues a datagram
 locally; it does not clear the TCP fallback cooldown or change the last

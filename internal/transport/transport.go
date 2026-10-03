@@ -46,6 +46,18 @@ type PacketConn interface {
 	Close() error
 }
 
+// PacketConcurrentSender is an optional, explicit Send concurrency contract.
+// A limit greater than one permits independent-target Send calls to overlap;
+// Close must interrupt every such call, as well as Receive. Owners still join
+// their Send workers after Close. Unknown implementations remain serial.
+// SendTargetKey must return the same canonical address used by Send, without
+// DNS, I/O, or relaxing destination policy. Alias spellings then share a FIFO.
+type PacketConcurrentSender interface {
+	PacketConn
+	ConcurrentSendLimit() int
+	SendTargetKey(address string) (string, error)
+}
+
 // PacketPayloadSizer is an optional capability for packet transports with a
 // logical-message limit below the UDP protocol maximum. Frontends use it to
 // reject an oversized payload without tearing down an otherwise healthy

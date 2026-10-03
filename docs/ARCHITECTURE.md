@@ -146,6 +146,19 @@ owns a UDP socket and may return traffic only from destinations previously
 requested by that session. Closing the SOCKS control connection closes the
 AutoCAR control stream and unblocks both receive loops.
 
+Completed native requests use bounded per-requested-target FIFO lanes: a slow
+domain resolution no longer serializes another target's work on the same
+association. Every packet still invokes the policy resolver with its original
+address; this is not a DNS cache or a destination-policy bypass. The configured
+`UDPReceiveQueue` bounds total active plus waiting requests. A lazy pool has at
+most eight workers/target lanes, with a 256 KiB payload-plus-address charge cap;
+one target gets at most half the packet/byte budget (packet half rounded up).
+Metadata is separately bounded by packet and target counts. Idle lanes retire.
+Saturation drops new packets, and several slow targets can still exhaust the
+shared budget; this is not a delivery guarantee or cross-target ordering.
+Closing cancels resolution, discards queued work, closes the socket and joins
+all workers before releasing the association's admission.
+
 UDP has no TLS/TCP fallback. Explicit `tls` mode therefore does not advertise
 SOCKS5 UDP ASSOCIATE. `auto` does advertise it, but an association always makes a
 QUIC attempt and fails if QUIC is unavailable; the TCP fallback circuit applies
@@ -158,6 +171,17 @@ CONNECT-UDP. Explicit `h2` does not. A SOCKS5 UDP association presents one
 logical PacketConn, but the H3 implementation creates one authenticated request
 stream lazily for each normalized target and reuses that stream for later
 datagrams to the same target.
+
+The SOCKS frontend also isolates lazy H3 target opening, but only for transports
+that explicitly implement `transport.PacketConcurrentSender`. Canonical target
+aliases share one FIFO lane; the WebClient and close-once wrappers preserve
+this capability. Legacy/custom PacketConn implementations remain serial unless
+they opt in to both concurrent Send safety and Close interrupting every Send.
+The frontend uses a shared 32-packet active-plus-waiting budget, the same byte
+and half-per-target caps, and at most eight workers (further capped by the
+transport's reported limit). It joins sends after closing the endpoints. A
+locally queued packet still does not prove remote delivery or H3 path health.
+Fresh connection authentication remains serialized; no bootstrap is bypassed.
 
 The HMAC ticket binds the H3 origin, Extended CONNECT protocol, and default
 MASQUE target path. After authentication, the relay parses the target, applies

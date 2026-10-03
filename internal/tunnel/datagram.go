@@ -303,7 +303,6 @@ func (d *serverDatagramDispatcher) handleRequest(ctx context.Context, stream dea
 		conn:       socket,
 		ctx:        sessionCtx,
 		cancel:     cancel,
-		requests:   make(chan autodatagram.Message, d.manager.config.receiveQueue),
 		allowed:    make(map[netip.AddrPort]struct{}),
 	}
 	sessionID, err := d.register(session)
@@ -314,7 +313,6 @@ func (d *serverDatagramDispatcher) handleRequest(ctx context.Context, stream dea
 		_ = protocol.WriteResponse(stream, protocol.Response{Status: protocol.StatusBusy, Message: "UDP dispatcher unavailable"})
 		return streamRequestOptions{Handled: true}
 	}
-	session.start()
 	response.SessionID = sessionID
 	if err := protocol.WriteResponse(stream, response); err != nil {
 		_ = session.Close()
@@ -351,6 +349,9 @@ func (d *serverDatagramDispatcher) register(session *serverUDPSession) (uint32, 
 			continue
 		}
 		session.id = d.nextSession
+		// Initialize workers before publishing the session. Connection shutdown
+		// must never observe a zero WaitGroup before start adds its workers.
+		session.start()
 		d.sessions[session.id] = session
 		return session.id, nil
 	}
@@ -430,7 +431,7 @@ type serverUDPSession struct {
 	conn       *net.UDPConn
 	ctx        context.Context
 	cancel     context.CancelFunc
-	requests   chan autodatagram.Message
+	requests   *transport.PacketSendQueue
 
 	allowedMu sync.RWMutex
 	allowed   map[netip.AddrPort]struct{}
@@ -441,11 +442,13 @@ type serverUDPSession struct {
 }
 
 func (s *serverUDPSession) start() {
-	s.wg.Add(2)
-	go func() {
-		defer s.wg.Done()
-		s.forwardRequests()
-	}()
+	s.requests = transport.NewPacketSendQueue(s.ctx, s.manager.config.receiveQueue, 8, func(ctx context.Context, payload []byte, address string) error {
+		s.forwardRequest(ctx, payload, address)
+		// Resolution/write failure drops only this native packet, exactly as
+		// before; it must not become a terminal multi-target association error.
+		return nil
+	})
+	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		s.forwardResponses()
@@ -453,40 +456,20 @@ func (s *serverUDPSession) start() {
 }
 
 func (s *serverUDPSession) enqueue(message autodatagram.Message) {
-	select {
-	case <-s.ctx.Done():
-		return
-	default:
-	}
-	select {
-	case s.requests <- message:
-	case <-s.ctx.Done():
-	default:
-		// QUIC DATAGRAM is intentionally unreliable. Dropping one overloaded
-		// session must not block the connection-wide receive dispatcher.
-	}
+	// One shared packet/byte budget covers all targets, including active
+	// resolutions. Pressure drops newest work without blocking the dispatcher.
+	_ = s.requests.Enqueue(message.Payload, message.Address)
 }
 
-func (s *serverUDPSession) forwardRequests() {
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case message := <-s.requests:
-			s.forwardRequest(message)
-		}
-	}
-}
-
-func (s *serverUDPSession) forwardRequest(message autodatagram.Message) {
-	ctx, cancel := context.WithTimeout(s.ctx, s.manager.config.resolveTimeout)
-	destinations, err := resolveUDPDestinations(ctx, s.manager.config.resolver, message.Address)
+func (s *serverUDPSession) forwardRequest(parent context.Context, payload []byte, address string) {
+	ctx, cancel := context.WithTimeout(parent, s.manager.config.resolveTimeout)
+	destinations, err := resolveUDPDestinations(ctx, s.manager.config.resolver, address)
 	cancel()
 	if err != nil {
 		return
 	}
 	for _, destination := range destinations {
-		if _, err := s.writeToDestination(message.Payload, destination); err == nil {
+		if _, err := s.writeToDestination(payload, destination); err == nil {
 			return
 		}
 	}
@@ -551,7 +534,9 @@ func (s *serverUDPSession) forwardResponses() {
 func (s *serverUDPSession) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
+		s.requests.Stop()
 		s.closeErr = s.conn.Close()
+		s.requests.Wait()
 		s.wg.Wait()
 		s.dispatcher.unregister(s.id, s)
 		s.manager.release(s.sourceKey)

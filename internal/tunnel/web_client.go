@@ -541,6 +541,20 @@ func (c *webClientPacketConn) MaxPayloadSize() int {
 	return webConnectUDPMaxPayloadSize
 }
 
+func (c *webClientPacketConn) ConcurrentSendLimit() int {
+	if sender, ok := c.inner.(transport.PacketConcurrentSender); ok {
+		return sender.ConcurrentSendLimit()
+	}
+	return 0
+}
+
+func (c *webClientPacketConn) SendTargetKey(address string) (string, error) {
+	if sender, ok := c.inner.(transport.PacketConcurrentSender); ok {
+		return sender.SendTargetKey(address)
+	}
+	return address, nil
+}
+
 // Close prevents new streams, interrupts in-flight dials, and closes both
 // underlying multiplexed transports. It is safe to call concurrently.
 func (c *WebClient) Close() error {
@@ -560,3 +574,4 @@ var _ transport.Dialer = (*WebClient)(nil)
 var _ transport.PacketDialer = (*WebClient)(nil)
 var _ transport.PacketConn = (*webClientPacketConn)(nil)
 var _ transport.PacketPayloadSizer = (*webClientPacketConn)(nil)
+var _ transport.PacketConcurrentSender = (*webClientPacketConn)(nil)
