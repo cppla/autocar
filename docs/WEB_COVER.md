@@ -384,6 +384,9 @@ Source builds after v1.0.1 share the result of a cold H2 or H3 physical connecti
 attempt with all callers already waiting on it. A failed handshake does not
 make those callers start replacement handshakes one after another. A later
 invocation may retry, subject to the existing `web-auto` cooldown policy.
+H2 callers register before queuing for session selection, so they retain
+that same completed failure even if it arrives before their selection turn;
+new callers after publication can retry without an indefinite failure cache.
 The shared attempt belongs to the client and retains its configured physical
 dial timeout; canceling one caller stops only that caller's wait, not the
 attempt needed by other callers. H2 keeps its TCP-connect timeout separate

@@ -65,10 +65,11 @@ type WebH2Client struct {
 	mu       sync.Mutex
 	closed   bool
 	// selected becomes true only after an authenticated CONNECT succeeds.
-	selected bool
-	current  *webH2ClientSession
-	sessions map[*webH2ClientSession]struct{}
-	dial     *webH2DialAttempt
+	selected  bool
+	current   *webH2ClientSession
+	sessions  map[*webH2ClientSession]struct{}
+	dial      *webH2DialAttempt
+	selection *webH2SelectionCohort
 	// Additions are made under mu before the closed gate. Close joins both
 	// unpublished physical setup and cleanup detached from sessions.
 	workers   sync.WaitGroup
@@ -81,6 +82,14 @@ type WebH2Client struct {
 type webH2DialAttempt struct {
 	done chan struct{}
 	err  error
+}
+
+// Register before queuing at dialGate, so a fast completed failure remains
+// visible to already queued callers. The worker detaches this cohort when it
+// publishes its result; later callers can retry without a failure cache.
+// Both the current pointer and its attempt are protected by the client mu.
+type webH2SelectionCohort struct {
+	attempt *webH2DialAttempt
 }
 
 type webH2ClientSession struct {
@@ -406,6 +415,21 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 		return webH2SessionReservation{}, net.ErrClosed
 	}
 	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return webH2SessionReservation{}, net.ErrClosed
+		}
+		if err := contextError(ctx); err != nil {
+			c.mu.Unlock()
+			return webH2SessionReservation{}, err
+		}
+		cohort := c.selection
+		if cohort == nil {
+			cohort = &webH2SelectionCohort{}
+			c.selection = cohort
+		}
+		c.mu.Unlock()
 		select {
 		case c.dialGate <- struct{}{}:
 		case <-ctx.Done():
@@ -435,6 +459,14 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 			c.mu.Unlock()
 			<-c.dialGate
 			return webH2SessionReservation{}, err
+		}
+		if attempt := cohort.attempt; attempt != nil {
+			c.mu.Unlock()
+			<-c.dialGate
+			if err := c.waitSessionDial(ctx, attempt); err != nil {
+				return webH2SessionReservation{}, err
+			}
+			continue
 		}
 		if session := c.current; session != nil {
 			switch session.authState {
@@ -483,31 +515,38 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 			attempt = &webH2DialAttempt{done: make(chan struct{})}
 			c.dial = attempt
 			c.workers.Add(1)
+			cohort.attempt = attempt
 			go c.runSessionDial(attempt)
+		} else {
+			cohort.attempt = attempt
 		}
 		c.mu.Unlock()
 		<-c.dialGate
 		c.closeRetiredSessions(retired)
-		select {
-		case <-attempt.done:
-		case <-c.ctx.Done():
-			return webH2SessionReservation{}, net.ErrClosed
-		case <-ctx.Done():
-			if c.ctx.Err() != nil {
-				return webH2SessionReservation{}, net.ErrClosed
-			}
-			return webH2SessionReservation{}, context.Cause(ctx)
-		}
-		if c.ctx.Err() != nil {
-			return webH2SessionReservation{}, net.ErrClosed
-		}
-		if err := contextError(ctx); err != nil {
+		if err := c.waitSessionDial(ctx, attempt); err != nil {
 			return webH2SessionReservation{}, err
 		}
-		if attempt.err != nil {
-			return webH2SessionReservation{}, attempt.err
-		}
 	}
+}
+
+func (c *WebH2Client) waitSessionDial(ctx context.Context, attempt *webH2DialAttempt) error {
+	select {
+	case <-attempt.done:
+	case <-c.ctx.Done():
+		return net.ErrClosed
+	case <-ctx.Done():
+		if c.ctx.Err() != nil {
+			return net.ErrClosed
+		}
+		return context.Cause(ctx)
+	}
+	if c.ctx.Err() != nil {
+		return net.ErrClosed
+	}
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	return attempt.err
 }
 
 func (c *WebH2Client) runSessionDial(attempt *webH2DialAttempt) {
@@ -534,6 +573,9 @@ func (c *WebH2Client) runSessionDial(attempt *webH2DialAttempt) {
 	c.mu.Lock()
 	attempt.err = err
 	c.dial = nil
+	if c.selection != nil && c.selection.attempt == attempt {
+		c.selection = nil
+	}
 	close(attempt.done)
 	c.mu.Unlock()
 }
