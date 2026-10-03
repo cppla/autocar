@@ -22,7 +22,7 @@ func runBenchServer(ctx context.Context, args []string) error {
 	allowPublic := fs.Bool("allow-public-benchmark", false, "allow an unauthenticated benchmark listener outside loopback")
 	maxBytes := fs.Int64("max-bytes", 64<<20, "maximum bytes per transfer")
 	maxConnections := fs.Int("max-connections", 16, "maximum concurrent transfers")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
 	}
 	if *maxBytes <= 0 || *maxConnections <= 0 {
@@ -100,7 +100,7 @@ func runBenchClient(parent context.Context, args []string) error {
 	warmup := fs.Int("warmup", 1, "unmeasured warmup iterations")
 	timeout := fs.Duration("timeout", 2*time.Minute, "timeout per transfer")
 	jsonOutput := fs.Bool("json", false, "emit machine-readable JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
 	}
 	if *target == "" {

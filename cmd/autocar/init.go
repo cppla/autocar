@@ -31,11 +31,8 @@ func runInitWith(args []string, output io.Writer) error {
 	serverName := fs.String("server-name", "", "certificate DNS name or IP; defaults to the relay host")
 	directory := fs.String("out", "autocar-config", "new private output directory; must not already exist")
 	days := fs.Int("days", 365, "self-signed certificate validity in days (1-1825)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
-	}
-	if fs.NArg() != 0 {
-		return errors.New("init does not accept positional arguments")
 	}
 	if strings.TrimSpace(*directory) == "" {
 		return errors.New("--out must name a new directory")

@@ -14,7 +14,7 @@ func runToken(args []string) error {
 	fs := flag.NewFlagSet("token", flag.ContinueOnError)
 	output := fs.String("out", "", "write to a new 0600 file instead of stdout")
 	bytesCount := fs.Int("bytes", 32, "random byte count (16-128)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
 	}
 	if *bytesCount < 16 || *bytesCount > 128 {
