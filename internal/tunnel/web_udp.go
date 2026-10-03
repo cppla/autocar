@@ -538,12 +538,15 @@ func (p *webUDPPacketConn) session(target string) (*webUDPClientSession, error) 
 		p.mu.Unlock()
 
 		session, err := p.openSession(target)
-		openedSession := session
-		terminate := false
 		p.mu.Lock()
-		delete(p.pending, target)
 		if p.closed && session != nil {
-			terminate = true
+			// Keep the opening enumerable until its late successful stream and
+			// reservation have actually been released. Close snapshots pending
+			// owners and waits for done; publishing early would let it return with
+			// live resources. terminate also takes p.mu, so cleanup must run unlocked.
+			p.mu.Unlock()
+			session.terminate()
+			p.mu.Lock()
 			session = nil
 			err = net.ErrClosed
 		} else if err == nil {
@@ -553,13 +556,11 @@ func (p *webUDPPacketConn) session(target string) (*webUDPClientSession, error) 
 			// goroutine may block briefly in removeSession until this unlocks.
 			session.start()
 		}
+		delete(p.pending, target)
 		pending.session = session
 		pending.err = err
 		close(pending.done)
 		p.mu.Unlock()
-		if terminate {
-			openedSession.terminate()
-		}
 		if err != nil {
 			return nil, err
 		}

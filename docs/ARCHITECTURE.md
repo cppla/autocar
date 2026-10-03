@@ -47,6 +47,17 @@ dependency-boundary check permits only the exact fork version above, rejects
 local replacement or copied/vendored source trees, and scans tracked and
 untracked Go source for the known disallowed proxy application-module import.
 
+## Local TCP frontend lifecycle
+
+HTTP CONNECT and SOCKS5 CONNECT keep the accepted connection's lifetime
+separate from the destination dial timeout. After setup succeeds, ordinary
+upload EOF only half-closes the destination writer and permits a delayed
+response. Explicit socket closure, including forced frontend shutdown, closes
+the owned destination even when the upload pump has already finished. The
+relay joins both pumps and any started cancellation close callback before
+returning; it never closes the shared transport dialer. HTTP CONNECT installs
+this owner before replaying any bytes buffered during request parsing.
+
 ## Native TCP flow
 
 1. The local frontend authenticates the local user when configured and parses
@@ -106,6 +117,11 @@ An ambiguous bootstrap proof makes the client close the complete physical
 connection and wake waiters to select a replacement. Reconnects and the new H2
 connection selected after GOAWAY run the full bootstrap again. QUIC migration or
 NAT rebinding that remains the same `*quic.Conn` retains authentication state.
+
+Stopping an opening cancellation watcher is not the connection handoff. H2
+and H3 recheck the caller's cancellation and deadline under their final
+ownership lock before publishing a TCP stream. Canceling an already handed-off
+caller context does not close the healthy stream or its shared connection.
 
 The cover is either a local static directory or a reverse proxy to one fixed,
 operator-authorized HTTP(S) origin. Ordinary combined H1/H2/H3 cover responses
@@ -180,6 +196,11 @@ CONNECT-UDP. Explicit `h2` does not. A SOCKS5 UDP association presents one
 logical PacketConn, but the H3 implementation creates one authenticated request
 stream lazily for each normalized target and reuses that stream for later
 datagrams to the same target.
+
+A successful target open that races with PacketConn closure remains a pending
+owner until its client stream, physical-session reservation and UDP admission
+slot have been released. Only then is opening completion published to Close
+and other waiters; cleanup runs outside the packet mutex.
 
 The SOCKS frontend also isolates lazy H3 target opening, but only for transports
 that explicitly implement `transport.PacketConcurrentSender`. Canonical target

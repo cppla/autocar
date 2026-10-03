@@ -374,6 +374,14 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 		fail()
 		return nil, net.ErrClosed
 	}
+	// Detaching the opening watcher is not the ownership handoff. A caller
+	// canceled while queued on mu still owns only this request, not its session.
+	if err := contextError(ctx); err != nil {
+		c.mu.Unlock()
+		_ = response.Body.Close()
+		fail()
+		return nil, err
+	}
 	c.selected = true
 	session.active++
 	c.mu.Unlock()
