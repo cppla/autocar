@@ -408,6 +408,21 @@ does not change authentication, wire profiles, timeout defaults or sibling
 stream ownership, and is not a general connection-speed or browser-equivalence
 claim. The published v1.0.1 binary does not contain this change.
 
+Source builds also recheck a queued H3 caller's cancellation before physical
+connection selection and authentication reservation. A canceled caller must
+not initiate a new shared handshake or claim an otherwise Fresh session.
+`web-auto` rejects and closes a logical CONNECT-UDP result returned after its
+caller cancellation or primary opening budget; this never triggers H2 UDP
+fallback or resets the TCP cooldown. Successful established packets remain
+detached from the caller's temporary opening context.
+
+Both web TCP handlers reject and close a destination connection returned after
+the configured destination dial deadline, even if a custom dialer reports
+success. The existing authenticated 502 response and connection-bound session
+are retained, so a later healthy request can reuse that session. This does not
+change authentication, wire profiles, or timeout defaults and is not included
+in the published v1.0.1 binary.
+
 After a failed H3 attempt, new TCP streams avoid repeating the UDP timeout.
 `--fallback-cooldown` is a base duration; each failure independently selects a
 retry point within +/-20% so clients do not probe in a fixed synchronized
