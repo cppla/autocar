@@ -211,7 +211,7 @@ func newWebCoverRequestTrailersFixture(t *testing.T, constructor string, proto i
 		website.ServeHTTP(w, r)
 	})
 	serverTLS, clientTLS := testTLSConfigs(t)
-	f.server, err = ListenWeb(WebServerConfig{TCPAddress: "127.0.0.1:0", UDPAddress: "127.0.0.1:0", Token: webTestToken, TLSConfig: serverTLS, Cover: observingCover,
+	f.server, err = listenWebEphemeralFixture(WebServerConfig{TCPAddress: "127.0.0.1:0", UDPAddress: "127.0.0.1:0", Token: webTestToken, TLSConfig: serverTLS, Cover: observingCover,
 		Dialer: transport.DialFunc(func(context.Context, string, string) (net.Conn, error) {
 			f.tunnelDials.Add(1)
 			return nil, errors.New("request-trailer fixture forbids tunnel dial")

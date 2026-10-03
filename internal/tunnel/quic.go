@@ -363,7 +363,7 @@ func (s *QUICServer) serveConnection(conn *quic.Conn, sourceKey string) {
 				if request.Network == protocol.NetworkUDP {
 					return datagrams.handleRequest(ctx, requestStream, request, response)
 				}
-				return streamRequestOptions{Response: response, Relay: requestStream}
+				return streamRequestOptions{Response: response, Relay: requestStream, RelayOwner: conn.Context()}
 			}
 			s.core.handleStream(stream.Context(), wrapped, markAuthenticated, handler)
 		}()

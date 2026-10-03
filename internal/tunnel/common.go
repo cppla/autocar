@@ -164,6 +164,10 @@ type streamRequestOptions struct {
 	Response protocol.Response
 	Relay    deadlineConn
 	Handled  bool
+	// RelayOwner ends the whole relay, not just dialing or one stream direction.
+	// Its owner must also interrupt ingress I/O when canceled. A QUIC send-side
+	// stream context is unsuitable: normal response FIN cancels that context.
+	RelayOwner context.Context
 }
 
 type streamRequestHandler func(context.Context, deadlineConn, protocol.Request) streamRequestOptions
@@ -235,6 +239,20 @@ func (s *serverCore) handleStream(
 	}
 	upstream = s.boundDestinationWrites(upstream)
 	defer upstream.Close()
+	if options.RelayOwner != nil {
+		closed := make(chan struct{})
+		stop := context.AfterFunc(options.RelayOwner, func() {
+			_ = upstream.Close()
+			close(closed)
+		})
+		defer func() {
+			// Stop does not join a callback that has already started. Keep the
+			// stream lease until its owned destination Close has returned.
+			if !stop() {
+				<-closed
+			}
+		}()
+	}
 	options.Response.Status = protocol.StatusOK
 	if err := protocol.WriteResponse(stream, options.Response); err != nil {
 		return
