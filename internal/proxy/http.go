@@ -264,6 +264,7 @@ func (s *HTTPServer) serveForward(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := r.Clone(r.Context())
+	prepareHTTPForwardRequestTrailers(r, out)
 	out.RequestURI = ""
 	// For absolute-form requests the URI authority is authoritative. A proxy
 	// must not let a conflicting inbound Host field select a different virtual
