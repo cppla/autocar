@@ -155,6 +155,12 @@ func (s *SOCKS5Server) serveConnect(client net.Conn, request socksRequest) {
 	if err == nil {
 		upstream, err = s.cfg.dialer.DialContext(ctx, "tcp", request.address)
 	}
+	if err == nil {
+		// A custom dialer can return a socket after setup was canceled or
+		// expired. Check before our own cancel, which must not invalidate a
+		// timely successful result or become the established relay's owner.
+		err = ctx.Err()
+	}
 	cancel()
 	if s.cfg.handshakeTimeout > 0 {
 		_ = client.SetWriteDeadline(time.Now().Add(s.cfg.handshakeTimeout))

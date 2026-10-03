@@ -58,6 +58,13 @@ relay joins both pumps and any started cancellation close callback before
 returning; it never closes the shared transport dialer. HTTP CONNECT installs
 this owner before replaying any bytes buffered during request parsing.
 
+Both TCP frontends reject a custom dialer's successful socket if the setup
+context is already canceled or expired when dialing returns. They close that
+owned result and retain the setup error classification (HTTP 504 for a timeout
+and the SOCKS timeout reply). This check precedes local timer cleanup; a timely
+success remains usable after setup ends, including reusable HTTP origin sockets.
+An error returned by the dialer itself is not replaced by a timer or Close error.
+
 ## Native TCP flow
 
 1. The local frontend authenticates the local user when configured and parses
@@ -84,6 +91,13 @@ QUIC streams are independent. Canceling a slow open or one flow does not close
 sibling flows. A per-connection pacer sees aggregate QUIC statistics, so
 concurrent streams share one path estimate rather than each overestimating the
 same bottleneck.
+
+Native QUIC client closure shuts the physical-dial registration gate before
+canceling pending attempts. It waits for each registered attempt to return and
+close any late owned connection; concurrent `Close` callers share that completion
+barrier. Canceling one caller still ends only its wait, not the shared physical
+attempt. An operation that ignores cancellation can delay closure, and best-effort
+observability callbacks remain outside this join guarantee.
 
 ## Web-cover TCP flow
 
