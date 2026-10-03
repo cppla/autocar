@@ -383,16 +383,18 @@ func validateAbsoluteTarget(target *url.URL) error {
 }
 
 func (s *HTTPServer) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	var (
-		conn net.Conn
-		err  error
-	)
-	if s.cfg.dialTimeout <= 0 {
-		conn, err = s.cfg.dialer.DialContext(ctx, network, address)
-	} else {
-		dialCtx, cancel := context.WithTimeout(ctx, s.cfg.dialTimeout)
+	dialCtx := ctx
+	if s.cfg.dialTimeout > 0 {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, s.cfg.dialTimeout)
 		defer cancel()
-		conn, err = s.cfg.dialer.DialContext(dialCtx, network, address)
+	}
+	conn, err := s.cfg.dialer.DialContext(dialCtx, network, address)
+	if err == nil {
+		// Reject an owned late result, but keep the dialer's own error when it
+		// failed. Check before the deferred timer cleanup so a timely result
+		// remains reusable after this setup context is detached.
+		err = dialCtx.Err()
 	}
 	if err != nil || conn == nil {
 		// Own a custom dialer's non-nil failed result before discarding it.

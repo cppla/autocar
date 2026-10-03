@@ -377,7 +377,7 @@ func newWebPublicOriginFixture(t *testing.T, proto int, mode bool) *webPublicOri
 	})
 	serverTLS, clientTLS := testTLSConfigs(t)
 	f.frontTLS = clientTLS.Clone()
-	server, err := ListenWeb(WebServerConfig{TCPAddress: "127.0.0.1:0", UDPAddress: "127.0.0.1:0", Token: webTestToken, TLSConfig: serverTLS, Cover: website,
+	server, err := listenWebEphemeralFixture(WebServerConfig{TCPAddress: "127.0.0.1:0", UDPAddress: "127.0.0.1:0", Token: webTestToken, TLSConfig: serverTLS, Cover: website,
 		Dialer: transport.DialFunc(func(context.Context, string, string) (net.Conn, error) {
 			f.targetDials.Add(1)
 			return nil, errors.New("public vhost fixture forbids tunnel dial")

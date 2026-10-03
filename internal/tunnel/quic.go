@@ -464,6 +464,11 @@ type Client struct {
 	pacer   *connectionPacer
 	dialing *quicDialAttempt
 	closed  bool
+	// Registration and the closed gate share mu, so Close can safely join
+	// every physical dial, including an unregistered late successful result.
+	dialWorkers sync.WaitGroup
+	closeDone   chan struct{}
+	closeErr    error
 	// primaryFailedAt and primaryProbeID implement a small circuit breaker.
 	// They are guarded by mu together with the QUIC connection state.
 	primaryFailedAt         time.Time
@@ -577,6 +582,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 		txProfile:        txProfile,
 		ctx:              ctx,
 		cancel:           cancel,
+		closeDone:        make(chan struct{}),
 		udpConfig:        udpConfig,
 		udpDispatchers:   make(map[*quic.Conn]*clientDatagramDispatcher),
 		localMode:        basePacer.label(),
@@ -1035,6 +1041,7 @@ func (c *Client) connection(ctx context.Context) (*quic.Conn, error) {
 				healthGeneration: c.primaryHealthGeneration,
 			}
 			c.dialing = attempt
+			c.dialWorkers.Add(1)
 			go c.runQUICDial(attempt, dialCtx)
 		}
 		c.mu.Unlock()
@@ -1057,25 +1064,33 @@ func (c *Client) connection(ctx context.Context) (*quic.Conn, error) {
 }
 
 func (c *Client) runQUICDial(attempt *quicDialAttempt, dialCtx context.Context) {
+	defer c.dialWorkers.Done()
 	defer attempt.cancel()
 	conn, err := c.dialQUIC(dialCtx, c.address, c.tlsConfig.Clone(), c.quicConfig.Clone())
 	var pacer *connectionPacer
+	cleanupReason := "client closed"
 	if err == nil {
 		pacer, err = newConnectionPacer(c.pacing, c.maxTx)
 		if err != nil {
-			_ = conn.CloseWithError(applicationShutdown, "pacing unavailable")
+			cleanupReason = "pacing unavailable"
 		}
 	}
 
 	c.mu.Lock()
-	if c.dialing == attempt {
-		c.dialing = nil
-	}
-	if err == nil && !c.closed {
+	accepted := err == nil && !c.closed
+	if accepted {
 		c.conn = conn
 		c.pacer = pacer
-	} else if conn != nil {
-		_ = conn.CloseWithError(applicationShutdown, "client closed")
+	}
+	c.mu.Unlock()
+	// Closing a rejected physical result can block. Keep it owned by the
+	// dial worker, outside mu, and publish completion only after cleanup.
+	if !accepted && conn != nil {
+		_ = conn.CloseWithError(applicationShutdown, cleanupReason)
+	}
+	c.mu.Lock()
+	if c.dialing == attempt {
+		c.dialing = nil
 	}
 	if err != nil {
 		attempt.err = fmt.Errorf("tunnel: dial QUIC: %w", err)
@@ -1109,26 +1124,33 @@ func (c *Client) invalidate(conn *quic.Conn) {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	if c.closed {
+		done := c.closeDone
 		c.mu.Unlock()
-		return nil
+		<-done
+		return c.closeErr
 	}
 	c.closed = true
-	c.cancel()
-	if c.dialing != nil {
-		c.dialing.cancel()
-	}
+	attempt := c.dialing
 	conn := c.conn
 	c.conn = nil
 	c.pacer = nil
 	c.mu.Unlock()
+	c.cancel()
+	if attempt != nil {
+		attempt.cancel()
+	}
 	if conn != nil {
 		_ = conn.CloseWithError(applicationShutdown, "client closed")
 	}
 	c.closeDatagramDispatchers()
+	c.dialWorkers.Wait()
+	var err error
 	if c.fallback != nil {
-		return c.fallback.Close()
+		err = c.fallback.Close()
 	}
-	return nil
+	c.closeErr = err
+	close(c.closeDone)
+	return err
 }
 
 func (c *Client) connectionPacer(conn *quic.Conn) *connectionPacer {
