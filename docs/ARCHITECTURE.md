@@ -158,6 +158,15 @@ connection and wake waiters to select a replacement. Reconnects and the new H2
 connection selected after GOAWAY run the full bootstrap again. QUIC migration or
 NAT rebinding that remains the same `*quic.Conn` retains authentication state.
 
+The H2 client queues at a healthy peer's stream-concurrency limit instead of
+opening another physical connection just because the existing one is full.
+On Go 1.27, the pinned HTTP/2 wrapper exposes immediately available capacity,
+so its live, non-closing state is a conservative queue hint, not proof of usability.
+If the underlying transport rejects a ready session before any request header
+is encoded, a live caller may reselect once within the same establishment budget.
+Encoded requests are never replayed, and accepted sibling streams may drain on
+the old connection. Transport state inspection never holds the client owner lock.
+
 Stopping an opening cancellation watcher is not the connection handoff. H2
 and H3 recheck the caller's cancellation and deadline under their final
 ownership lock before publishing a TCP stream. Canceling an already handed-off

@@ -8,8 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cppla/autocar/internal/protocol"
@@ -244,8 +246,9 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 	// the returned net.Conn. The client's lifetime remains the stream parent.
 	streamCtx, streamCancelCause := context.WithCancelCause(c.ctx)
 	streamCancel := func() { streamCancelCause(context.Canceled) }
+	openDeadline := time.Now().Add(c.handshakeTimeout)
 	openTimeoutDone := make(chan struct{})
-	openTimeout := time.AfterFunc(c.handshakeTimeout, func() {
+	openTimeout := time.AfterFunc(time.Until(openDeadline), func() {
 		streamCancelCause(context.DeadlineExceeded)
 		close(openTimeoutDone)
 	})
@@ -266,17 +269,42 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 		stopOpenTimeout()
 		streamCancel()
 	}
+	for attempt := 0; ; attempt++ {
+		conn, err, unsent := c.dialStreamOnce(ctx, streamCtx, openDeadline, authority, binding, cancelStream, stopDial, stopOpenTimeout)
+		if err == nil {
+			return conn, nil
+		}
+		if attempt != 0 || !unsent {
+			cancelStream()
+			return nil, err
+		}
+		// A busy Go1.27 connection can also be draining: its public state
+		// does not expose every native retirement reason. Retry once only
+		// after RoundTrip rejected an entirely unencoded request. Keep the
+		// SAME caller link and establishment budget across both attempts.
+	}
+}
+
+// Each attempt owns its pipe, stream cancellation and authentication exchange.
+// Returning before reselection releases its opening reservation and short-ticket
+// window slot; a draining physical connection can keep its existing siblings.
+func (c *WebH2Client) dialStreamOnce(
+	ctx, streamCtx context.Context, openDeadline time.Time,
+	authority string, binding webAuthBinding,
+	cancelStream func(), stopDial func() bool, stopOpenTimeout func() bool,
+) (net.Conn, error, bool) {
+	requestCtx, requestCancel := context.WithCancel(streamCtx)
 	requestReader, requestWriter := io.Pipe()
 	fail := func() {
-		cancelStream()
+		requestCancel()
 		_ = requestWriter.Close()
 		_ = requestReader.Close()
 	}
 
-	reservation, err := c.reserveSession(streamCtx)
+	reservation, err := c.reserveSession(requestCtx)
 	if err != nil {
 		fail()
-		return nil, err
+		return nil, err, false
 	}
 	session := reservation.session
 	defer c.releaseSessionReservation(session)
@@ -288,7 +316,7 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 	if reservation.bootstrap {
 		bearer, authClaims, err = c.auth.authorization(binding, c.claims)
 	} else {
-		bearer, exchange, err = reservation.auth.authorization(streamCtx, binding)
+		bearer, exchange, err = reservation.auth.authorization(requestCtx, binding)
 		defer reservation.auth.complete(exchange)
 	}
 	if err != nil {
@@ -296,8 +324,15 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 		if reservation.bootstrap || errors.Is(err, errWebSessionSequenceExhausted) {
 			c.failSessionAuthentication(session)
 		}
-		return nil, err
+		return nil, err, false
 	}
+	var headersStarted atomic.Bool
+	requestCtx = httptrace.WithClientTrace(requestCtx, &httptrace.ClientTrace{
+		// WroteHeaders is too late: a partial wire write can already have
+		// reached the peer. In the pinned HTTP/2 implementation this hook
+		// runs while encoding the first field, BEFORE writing any HEADERS.
+		WroteHeaderField: func(string, []string) { headersStarted.Store(true) },
+	})
 	request := (&http.Request{
 		Method:        http.MethodConnect,
 		URL:           &url.URL{Scheme: "https", Host: authority},
@@ -305,22 +340,30 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 		Header:        webConnectRequestHeaders(bearer),
 		Body:          requestReader,
 		ContentLength: -1,
-	}).WithContext(streamCtx)
+	}).WithContext(requestCtx)
 	request.Header.Set("Content-Type", "application/octet-stream")
 
 	response, err := session.h2.RoundTrip(request)
 	if err != nil {
-		cause := context.Cause(streamCtx)
+		cause := contextError(requestCtx)
+		// Direct ClientConn.RoundTrip joins its request writer on a
+		// non-context error. With a live request context, no writer can
+		// start encoding after this check. Request.Cancel is deliberately
+		// nil. Never retry bootstrap, cancellation, or any encoded request.
+		unsent := !reservation.bootstrap && cause == nil && contextError(ctx) == nil && time.Now().Before(openDeadline) &&
+			!headersStarted.Load() && !session.h2.CanTakeNewRequest()
 		fail()
 		if reservation.bootstrap {
 			c.failSessionAuthentication(session)
+		} else if unsent {
+			c.retireSessionSelection(session)
 		} else {
 			c.noteSessionFailure(session)
 		}
 		if cause != nil && !errors.Is(cause, context.Canceled) {
-			return nil, cause
+			return nil, cause, false
 		}
-		return nil, fmt.Errorf("tunnel: web-cover HTTP/2 CONNECT: %w", err)
+		return nil, fmt.Errorf("tunnel: web-cover HTTP/2 CONNECT: %w", err), unsent
 	}
 	if reservation.bootstrap {
 		sessionAuth, ok := acceptWebSessionBootstrap(
@@ -334,7 +377,7 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 			_ = response.Body.Close()
 			fail()
 			c.failSessionAuthentication(session)
-			return nil, errors.New("tunnel: web-cover HTTP/2 server authentication failed")
+			return nil, errors.New("tunnel: web-cover HTTP/2 server authentication failed"), false
 		}
 	} else if !reservation.auth.verifyResponseProof(
 		response.Header.Values(webAuthResponseHeader),
@@ -345,12 +388,12 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 		_ = response.Body.Close()
 		fail()
 		c.failSessionAuthentication(session)
-		return nil, errors.New("tunnel: web-cover HTTP/2 server authentication failed")
+		return nil, errors.New("tunnel: web-cover HTTP/2 server authentication failed"), false
 	}
 	if response.StatusCode != http.StatusOK {
 		_ = response.Body.Close()
 		fail()
-		return nil, &WebConnectError{Transport: webAuthTransportH2, StatusCode: response.StatusCode}
+		return nil, &WebConnectError{Transport: webAuthTransportH2, StatusCode: response.StatusCode}, false
 	}
 	// Stop the establishment-only cancellation link before handing ownership
 	// to the caller. If cancellation won the race with the response, fail the
@@ -358,13 +401,13 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 	if !stopOpenTimeout() {
 		_ = response.Body.Close()
 		fail()
-		return nil, context.DeadlineExceeded
+		return nil, context.DeadlineExceeded, false
 	}
 	stopDial()
 	if err := contextError(ctx); err != nil {
 		_ = response.Body.Close()
 		fail()
-		return nil, err
+		return nil, err, false
 	}
 
 	c.mu.Lock()
@@ -372,7 +415,7 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 		c.mu.Unlock()
 		_ = response.Body.Close()
 		fail()
-		return nil, net.ErrClosed
+		return nil, net.ErrClosed, false
 	}
 	// Detaching the opening watcher is not the ownership handoff. A caller
 	// canceled while queued on mu still owns only this request, not its session.
@@ -380,7 +423,7 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 		c.mu.Unlock()
 		_ = response.Body.Close()
 		fail()
-		return nil, err
+		return nil, err, false
 	}
 	c.selected = true
 	session.active++
@@ -388,12 +431,12 @@ func (c *WebH2Client) DialContext(ctx context.Context, network, address string) 
 	conn := newWebH2Conn(
 		response.Body,
 		requestWriter,
-		cancelStream,
+		func() { requestCancel(); cancelStream() },
 		session.conn.LocalAddr(),
 		session.conn.RemoteAddr(),
 	)
 	conn.onClose = func() { c.releaseSessionStream(session) }
-	return conn, nil
+	return conn, nil, false
 }
 
 func normalizeWebH2Authority(address string) (string, error) {
@@ -477,9 +520,27 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 			continue
 		}
 		if session := c.current; session != nil {
+			state := session.authState
+			canTake := false
+			if state == webH2ClientAuthFresh || state == webH2ClientAuthReady {
+				// Even legacy State can wait behind a wire write. Keep every
+				// transport inspection outside mu so Close can release I/O.
+				c.mu.Unlock()
+				if state == webH2ClientAuthReady {
+					canTake = webH2CanTakeRequest(session.h2)
+				} else {
+					canTake = session.h2.CanTakeNewRequest()
+				}
+				c.mu.Lock()
+				if c.closed || contextError(ctx) != nil || c.current != session || session.authState != state {
+					c.mu.Unlock()
+					<-c.dialGate
+					continue
+				}
+			}
 			switch session.authState {
 			case webH2ClientAuthFresh:
-				if session.h2.CanTakeNewRequest() {
+				if canTake {
 					// Claim bootstrap only when a live caller reserves a stream,
 					// not when a background worker publishes a cold connection.
 					session.authState = webH2ClientAuthBootstrapping
@@ -490,7 +551,7 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 				}
 				c.current = nil
 			case webH2ClientAuthReady:
-				if session.h2.CanTakeNewRequest() {
+				if canTake {
 					session.opening++
 					auth := session.auth
 					c.mu.Unlock()
@@ -780,8 +841,21 @@ func (c *WebH2Client) failSessionAuthentication(session *webH2ClientSession) {
 }
 
 func (c *WebH2Client) noteSessionFailure(session *webH2ClientSession) {
+	canTake := webH2CanTakeRequest(session.h2)
 	c.mu.Lock()
-	if c.current == session && !session.h2.CanTakeNewRequest() {
+	if c.current == session && !canTake {
+		c.current = nil
+	}
+	retired := c.cleanupIdleSessionsLocked()
+	c.mu.Unlock()
+	c.closeRetiredSessions(retired)
+}
+
+// A request rejected before encoding may select a new physical connection,
+// but must not abort streams already accepted on the draining connection.
+func (c *WebH2Client) retireSessionSelection(session *webH2ClientSession) {
+	c.mu.Lock()
+	if c.current == session {
 		c.current = nil
 	}
 	retired := c.cleanupIdleSessionsLocked()
