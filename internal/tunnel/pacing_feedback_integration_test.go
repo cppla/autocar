@@ -43,7 +43,11 @@ func TestQUICPacingSustainedDownloadDoesNotSelfLimitToFloor(t *testing.T) {
 func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 	// Each stream's fixed 16 KiB receive window is smaller than one 32 KiB
 	// write, and cannot auto-grow to absorb the entire slow-reader payload.
-	f := newFeedbackQUICFixture(t, 2, 16<<10)
+	trace := newFeedbackSharedTrace()
+	f := newFeedbackQUICFixtureWithTrace(t, 2, 16<<10, trace)
+	for index := range f.clientStreams {
+		trace.streams[index].selectStream(f.clientStreams[index].StreamID())
+	}
 	warmup := f.run(func() error { return writeFeedbackPayload(f.serverStreams[0], 1<<20) })
 	if err := readFeedbackPayload(f.clientStreams[0], 1<<20); err != nil {
 		t.Fatal(err)
@@ -54,16 +58,24 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 	}
 
 	const rounds = 16
+	// The learning checkpoint is declared before either slow writer starts.
+	// It is not a minimum selected from a target series, and ten reader rounds
+	// do not by themselves claim eight eligible controller history samples.
+	const checkpoint = 10
 	const slowBytes = rounds * feedbackChunkSize
-	primaryEntered := make(chan struct{}, 1)
-	f.rawStreams[0].entered = primaryEntered
+	receiptQueue := make(chan feedbackSharedReceipt, 2)
+	primaryWitness := newFeedbackSharedWitness(f.rawStreams[0], trace.streams[0], 1<<20, checkpoint, receiptQueue)
+	f.rawStreams[0].sharedWitness = primaryWitness
+	f.streamPacers[0].sharedWitness = primaryWitness
 	primaryTransportBefore := f.rawStreams[0].writeTime.Load()
 	primaryPacingBefore := f.streamPacers[0].waitTime.Load()
-	primary := f.run(func() error { return writeFeedbackPayload(f.serverStreams[0], slowBytes) })
-	select {
-	case <-primaryEntered:
-	case <-f.ctx.Done():
-		t.Fatal(f.ctx.Err())
+	primaryFinished := make(chan struct{})
+	primary := f.run(func() error {
+		defer close(primaryFinished)
+		return writeFeedbackPayload(f.serverStreams[0], slowBytes)
+	})
+	if _, err := primaryWitness.awaitRaw(f.ctx, primaryFinished, 1, 1<<20); err != nil {
+		t.Fatalf("primary fresh backpressure before sibling: %v", err)
 	}
 	// Start a fast sibling while the primary cannot drain its finite receive
 	// buffer. The real clock observes actual token sleeps, not merely calls to
@@ -80,7 +92,22 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 	before := f.pacer.controller.TargetBytesPerSecond()
 	// Both streams now have slow readers. Unlike one blocked stream with an
 	// unrestricted sibling, this reduces delivery for the shared connection.
-	siblingSlow := f.run(func() error { return writeFeedbackPayload(f.serverStreams[1], slowBytes) })
+	// Arm this immutable phase only after the preceding fast writer joined.
+	siblingWitness := newFeedbackSharedWitness(f.rawStreams[1], trace.streams[1], 128<<10, checkpoint, receiptQueue)
+	f.rawStreams[1].sharedWitness = siblingWitness
+	f.streamPacers[1].sharedWitness = siblingWitness
+	siblingFinished := make(chan struct{})
+	siblingSlow := f.run(func() error {
+		defer close(siblingFinished)
+		return writeFeedbackPayload(f.serverStreams[1], slowBytes)
+	})
+	if _, err := siblingWitness.awaitRaw(f.ctx, siblingFinished, 1, 128<<10); err != nil {
+		t.Fatalf("sibling fresh backpressure before shared reads: %v", err)
+	}
+	if _, err := primaryWitness.awaitRaw(f.ctx, primaryFinished, 1, 1<<20); err != nil {
+		t.Fatalf("primary first Write did not remain blocked: %v", err)
+	}
+	var after int64
 	for round := 0; round < rounds; round++ {
 		timer := time.NewTimer(120 * time.Millisecond)
 		select {
@@ -94,10 +121,31 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		if round+1 == checkpoint {
+			receipts, err := awaitFeedbackSharedReceipts(f.ctx,
+				[2]*feedbackSharedWitness{primaryWitness, siblingWitness},
+				[2]<-chan struct{}{primaryFinished, siblingFinished})
+			if err != nil {
+				t.Fatalf("fixed round-%d feedback checkpoint: %v", checkpoint, err)
+			}
+			// This is the last of the two prescribed receipts to arrive, not
+			// the lower target. Each is a live target read after production
+			// Observe and Wait returned, not an atomic Observe result.
+			after = receipts[1].target
+			for index, witness := range []*feedbackSharedWitness{primaryWitness, siblingWitness} {
+				finished := [2]<-chan struct{}{primaryFinished, siblingFinished}[index]
+				offset, err := witness.awaitRaw(f.ctx, finished, checkpoint+1,
+					witness.warmupOffset+checkpoint*feedbackChunkSize)
+				if err != nil {
+					t.Fatalf("stream %d checkpoint Write: %v", index, err)
+				}
+				t.Logf("checkpoint stream=%d raw_completed=%d new_blocked_offset=%d receipt_target=%d",
+					f.clientStreams[index].StreamID(), checkpoint, offset, feedbackSharedReceiptFor(receipts, witness).target)
+			}
+		}
 	}
 	f.await(t, primary)
 	f.await(t, siblingSlow)
-	after := f.pacer.controller.TargetBytesPerSecond()
 	transport := time.Duration(f.rawStreams[0].writeTime.Load() - primaryTransportBefore)
 	pacing := time.Duration(f.streamPacers[0].waitTime.Load() - primaryPacingBefore)
 	if transport <= pacing {
@@ -108,7 +156,7 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 	// cannot reduce the target below 36% of its previous value. Crossing that
 	// bound proves capacity evidence changed, not merely a congestion penalty.
 	if after >= before*36/100 {
-		t.Fatalf("shared capacity did not adapt to transport backpressure: target %d -> %d, want below %d", before, after, before*36/100)
+		t.Fatalf("shared capacity checkpoint did not adapt to transport backpressure: target %d -> %d, want below %d", before, after, before*36/100)
 	}
 	// Removing the imposed reader delays must leave the same streams usable.
 	for index := range f.serverStreams {
@@ -119,7 +167,7 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 		f.await(t, writer)
 	}
 	f.checkReverse(t)
-	t.Logf("shared target %d -> %d; primary QUIC Write=%s, pacing Wait=%s; overlapping token sleeps=%d",
+	t.Logf("shared round-%d checkpoint target %d -> %d; primary QUIC Write=%s, pacing Wait=%s; overlapping token sleeps=%d", checkpoint,
 		before, after, transport, pacing, f.clock.sleepsWithPrimaryWrite.Load())
 }
 
@@ -304,15 +352,20 @@ func readFeedbackPayload(reader io.Reader, size int) error {
 
 type feedbackRawStream struct {
 	quicStream
-	entered      chan struct{}
-	pending      atomic.Bool
-	writeTime    atomic.Int64
-	writeWitness *feedbackWriteWitness
+	entered       chan struct{}
+	pending       atomic.Bool
+	writeTime     atomic.Int64
+	writeWitness  *feedbackWriteWitness
+	sharedWitness *feedbackSharedWitness
 }
 
 func (s *feedbackRawStream) Write(p []byte) (int, error) {
 	started := time.Now()
 	s.pending.Store(true)
+	var sharedCall *feedbackSharedRawCall
+	if witness := s.sharedWitness; witness != nil {
+		sharedCall = witness.rawStarted()
+	}
 	first := false
 	if witness := s.writeWitness; witness != nil {
 		witness.once.Do(func() {
@@ -325,6 +378,9 @@ func (s *feedbackRawStream) Write(p []byte) (int, error) {
 	default:
 	}
 	n, err := s.quicStream.Write(p)
+	if sharedCall != nil {
+		s.sharedWitness.rawFinished(sharedCall, n, err)
+	}
 	if first {
 		close(s.writeWitness.done)
 	}
@@ -335,13 +391,29 @@ func (s *feedbackRawStream) Write(p []byte) (int, error) {
 
 type feedbackObservedPacer struct {
 	*connectionPacer
-	waitTime atomic.Int64
+	waitTime      atomic.Int64
+	sharedWitness *feedbackSharedWitness
 }
 
 func (p *feedbackObservedPacer) wait(ctx context.Context, size int, conn *quic.Conn) error {
 	started := time.Now()
+	var token feedbackSharedWaitToken
+	if witness := p.sharedWitness; witness != nil {
+		token = witness.waitStarted()
+	}
 	err := p.connectionPacer.wait(ctx, size, conn)
 	p.waitTime.Add(int64(time.Since(started)))
+	if witness := p.sharedWitness; witness != nil {
+		// Only the prescribed successful return needs a target read. The
+		// shared controller may have consumed another stream's observation.
+		if token.ordinal == witness.checkpoint+1 {
+			target := int64(0)
+			if err == nil {
+				target = p.controller.TargetBytesPerSecond()
+			}
+			witness.waitReturned(token, err, target)
+		}
+	}
 	return err
 }
 
