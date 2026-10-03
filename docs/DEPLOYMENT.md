@@ -9,6 +9,12 @@ relay and an `auto` client; installing v1.0.1 does not enable web-cover.
 
 ## 1. Build and create credentials
 
+Current source builds reject unexpected positional operands in option-based
+commands, including operands after `--`; use named options for every setting.
+Credential commands (`token`, `cert`, `init`) reject these inputs before creating
+files, and benchmark commands reject them before startup. Normal flag syntax and
+`-h`/`--help` remain supported. This does not add `--config` to these commands.
+
 ### Generate a new paired bundle
 
 With a build containing `init` and `--check` (not the published v1.0.1 binary),
@@ -429,8 +435,8 @@ separately from QUIC circuit health.
 ### Reusable configuration files (after v1.0.1)
 
 Builds containing the configuration-file change support `--config` for `client`,
-`server`, and `doctor`; the published v1.0.1 binary does not. Existing CLI-only
-commands are unchanged. Copy [examples/client.json](../examples/client.json)
+`server`, and `doctor`; the published v1.0.1 binary does not. CLI-only commands do
+not gain `--config` support. Copy [examples/client.json](../examples/client.json)
 and [examples/server.json](../examples/server.json) into your credential
 directory and adjust addresses and filenames. These files contain references,
 not secrets; keep the existing token and private-key permission requirements.

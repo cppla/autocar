@@ -17,7 +17,7 @@ func runCert(args []string) error {
 	keyFile := fs.String("key", "server.key", "0600 private-key output path")
 	days := fs.Int("days", 365, "certificate validity in days (1-1825)")
 	organization := fs.String("organization", "AutoCAR", "certificate organization")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*hosts) == "" {

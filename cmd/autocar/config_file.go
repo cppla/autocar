@@ -22,11 +22,8 @@ const maxCommandConfigSize = 64 << 10
 // performs its normal semantic and credential validation after parsing.
 func parseFlagsWithConfig(fs *flag.FlagSet, args []string) error {
 	configPath := fs.String("config", "", "JSON options file; CLI overrides it, file paths are relative to its directory")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
-	}
-	if fs.NArg() != 0 {
-		return errors.New("positional arguments are not supported; use named options")
 	}
 	if *configPath == "" {
 		return nil
