@@ -1051,6 +1051,9 @@ func randomNonZeroUint32() (uint32, error) {
 }
 
 func resolveUDPDestinations(ctx context.Context, resolver UDPResolver, address string) ([]netip.AddrPort, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 	_, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: invalid UDP destination: %w", err)
@@ -1061,6 +1064,11 @@ func resolveUDPDestinations(ctx context.Context, resolver UDPResolver, address s
 	}
 	resolved, err := resolver.ResolveUDPContext(ctx, address)
 	if err != nil {
+		return nil, err
+	}
+	// A custom resolver can return a successful result after its budget. Do
+	// not turn that late result into an outbound UDP write or a live target.
+	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
 	wantPort := uint16(portNumber)
