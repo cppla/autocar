@@ -571,7 +571,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 		token:            config.Token,
 		tlsConfig:        tlsConfig,
 		quicConfig:       hardenedQUICClientConfig(config.QUICConfig),
-		dialQUIC:         quic.DialAddr,
+		dialQUIC:         dialNativeQUICAddr,
 		handshakeTimeout: handshakeTimeout,
 		dialTimeout:      dialTimeout,
 		primaryTimeout:   primaryTimeout,
@@ -612,6 +612,36 @@ func NewClient(config ClientConfig) (*Client, error) {
 
 // NewQUICClient is an explicit alias for NewClient.
 func NewQUICClient(config ClientConfig) (*Client, error) { return NewClient(config) }
+
+// Resolve before DialAddr allocates its owned UDP socket. The pinned library's
+// address-resolution error path otherwise leaves that socket to GC. NewClient
+// already fixes the verifying TLS ServerName, so using a numeric endpoint here
+// changes neither certificate identity nor the single-use transport ownership.
+func dialNativeQUICAddr(ctx context.Context, address string, tlsConfig *tls.Config, config *quic.Config) (*quic.Conn, error) {
+	numericAddress, err := resolveNativeQUICAddress(address)
+	if err != nil {
+		return nil, err
+	}
+	if tlsConfig == nil {
+		return nil, errors.New("quic: tls.Config not set")
+	}
+	return quic.DialAddr(ctx, numericAddress, tlsConfig, config)
+}
+
+func resolveNativeQUICAddress(address string) (string, error) {
+	resolved, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return "", err
+	}
+	// UDPAddr.String folds mapped IPv6 into IPv4, which cannot carry a zone
+	// through a second resolution. AddrPort preserves both the family and zone.
+	if endpoint := resolved.AddrPort(); endpoint.IsValid() {
+		return endpoint.String(), nil
+	}
+	// Preserve the existing unspecified-host form when an explicit TLS
+	// ServerName allowed it through client configuration validation.
+	return resolved.String(), nil
+}
 
 func hardenedQUICClientConfig(input *quic.Config) *quic.Config {
 	var cfg *quic.Config

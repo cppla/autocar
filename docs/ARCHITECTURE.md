@@ -99,6 +99,23 @@ barrier. Canceling one caller still ends only its wait, not the shared physical
 attempt. An operation that ignores cancellation can delay closure, and best-effort
 observability callbacks remain outside this join guarantee.
 
+The native client resolves the relay endpoint before asking the QUIC library to
+allocate its owned UDP transport. Address failures therefore do not retain UDP
+sockets until garbage collection. The numeric endpoint preserves mapped IPv6
+addresses and zones; the already configured TLS ServerName still owns certificate
+verification. Successful connections retain the library's single-use transport
+and socket cleanup behavior.
+
+The native TLS client closes its setup registration gate before cancellation and
+waits for in-progress TCP/TLS/protocol setup to dispose of unreturned connections.
+Concurrent client `Close` calls share the completion barrier. An application
+closing an already returned stream remains registered until its socket close
+finishes, so client closure also joins that close. This does not bind successfully
+returned streams to their caller's setup context or change TCP half-close behavior.
+An operation or TLS callback that ignores cancellation can delay closure.
+TLS callbacks must not synchronously close the same client from inside a setup
+that client closure needs to join.
+
 ## Web-cover TCP flow
 
 The web-cover server binds TCP and UDP on the same numeric port. Its TCP side

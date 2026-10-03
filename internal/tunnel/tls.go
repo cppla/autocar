@@ -305,6 +305,9 @@ type TLSClient struct {
 	closed   bool
 	selected bool
 	conns    map[*trackedTLSConn]struct{}
+	// Setup registration and Close's gate share mu, so no Add can race Wait.
+	setups    sync.WaitGroup
+	closeDone chan struct{}
 }
 
 // SelectedTransport identifies the concrete path for benchmark telemetry.
@@ -350,6 +353,7 @@ func NewTLSClient(config TLSClientConfig) (*TLSClient, error) {
 		ctx:              ctx,
 		cancel:           cancel,
 		conns:            make(map[*trackedTLSConn]struct{}),
+		closeDone:        make(chan struct{}),
 	}, nil
 }
 
@@ -366,15 +370,25 @@ func (c *TLSClient) DialContext(ctx context.Context, network, address string) (n
 		return nil, err
 	}
 	c.mu.Lock()
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
+	if c.closed {
+		c.mu.Unlock()
 		return nil, net.ErrClosed
 	}
+	c.setups.Add(1)
+	c.mu.Unlock()
+	defer c.setups.Done()
 
 	dialCtx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(c.ctx, cancel)
-	defer stop()
+	cancelDone := make(chan struct{})
+	stop := context.AfterFunc(c.ctx, func() {
+		cancel()
+		close(cancelDone)
+	})
+	defer func() {
+		if !stop() {
+			<-cancelDone
+		}
+	}()
 	defer cancel()
 	raw, err := c.dialer.DialContext(dialCtx, "tcp", c.address)
 	if err != nil {
@@ -410,23 +424,31 @@ func (c *TLSClient) DialContext(ctx context.Context, network, address string) (n
 	return tracked, nil
 }
 
-// Close prevents future dials and closes every active fallback stream.
+// Close prevents future dials, closes active streams and joins in-flight setup.
+// Concurrent calls wait for the same cleanup to finish. TLS callbacks must
+// return themselves and must not synchronously Close their own setup client.
 func (c *TLSClient) Close() error {
 	c.mu.Lock()
 	if c.closed {
+		done := c.closeDone
 		c.mu.Unlock()
+		<-done
 		return nil
 	}
 	c.closed = true
-	c.cancel()
 	connections := make([]*trackedTLSConn, 0, len(c.conns))
 	for conn := range c.conns {
 		connections = append(connections, conn)
 	}
 	c.mu.Unlock()
+	c.cancel()
 	for _, conn := range connections {
 		_ = conn.Close()
 	}
+	// An unregistered late result is still owned by its setup until cleanup
+	// returns. Never hold mu while joining setup or actually closing a socket.
+	c.setups.Wait()
+	close(c.closeDone)
 	return nil
 }
 
@@ -445,7 +467,9 @@ type trackedTLSConn struct {
 func (c *trackedTLSConn) Close() error {
 	var err error
 	c.once.Do(func() {
-		c.owner.remove(c)
+		// Retain registry ownership until the actual Close returns, allowing a
+		// simultaneous client Close to find this stream and join once.Do.
+		defer c.owner.remove(c)
 		err = c.Conn.Close()
 	})
 	return err
