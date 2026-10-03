@@ -106,6 +106,15 @@ addresses and zones; the already configured TLS ServerName still owns certificat
 verification. Successful connections retain the library's single-use transport
 and socket cleanup behavior.
 
+Relay name and service-port resolution use the shared physical attempt's client
+context and dial budget, so stalled DNS does not keep AutoCAR's dial worker alive
+after cancellation or its configured deadline. An individual caller still cancels
+only its own wait, not the shared attempt. IPv4 preference, bracketed IPv6
+preference, zones, empty-host handling and service-port parsing retain the standard
+UDP resolver behavior. Context cancellation can end the lookup wait before the
+standard library's shared DNS work or OS resolver finishes; client closure does
+not promise to join those internal resolver workers.
+
 The native TLS client closes its setup registration gate before cancellation and
 waits for in-progress TCP/TLS/protocol setup to dispose of unreturned connections.
 Concurrent client `Close` calls share the completion barrier. An application

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -618,7 +619,7 @@ func NewQUICClient(config ClientConfig) (*Client, error) { return NewClient(conf
 // already fixes the verifying TLS ServerName, so using a numeric endpoint here
 // changes neither certificate identity nor the single-use transport ownership.
 func dialNativeQUICAddr(ctx context.Context, address string, tlsConfig *tls.Config, config *quic.Config) (*quic.Conn, error) {
-	numericAddress, err := resolveNativeQUICAddress(address)
+	numericAddress, err := resolveNativeQUICAddress(ctx, address)
 	if err != nil {
 		return nil, err
 	}
@@ -628,10 +629,45 @@ func dialNativeQUICAddr(ctx context.Context, address string, tlsConfig *tls.Conf
 	return quic.DialAddr(ctx, numericAddress, tlsConfig, config)
 }
 
-func resolveNativeQUICAddress(address string) (string, error) {
-	resolved, err := net.ResolveUDPAddr("udp", address)
+func resolveNativeQUICAddress(ctx context.Context, address string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("tunnel: nil relay resolution context")
+	}
+	if err := contextError(ctx); err != nil {
+		return "", err
+	}
+	var host, service string
+	if address != "" {
+		var err error
+		host, service, err = net.SplitHostPort(address)
+		if err != nil {
+			return "", err
+		}
+	}
+	port, err := net.DefaultResolver.LookupPort(ctx, "udp", service)
 	if err != nil {
 		return "", err
+	}
+	if err := contextError(ctx); err != nil {
+		return "", err
+	}
+	resolved := &net.UDPAddr{Port: port}
+	if host != "" {
+		// ResolveUDPAddr uses Background internally. Give DNS the same
+		// client-owned budget as the physical QUIC attempt instead; an
+		// individual caller still cancels only its wait on that shared attempt.
+		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return "", err
+		}
+		if err := contextError(ctx); err != nil {
+			return "", err
+		}
+		if len(addresses) == 0 {
+			return "", &net.AddrError{Err: "no suitable address found", Addr: host}
+		}
+		selected := selectNativeQUICAddress(address, addresses)
+		resolved.IP, resolved.Zone = selected.IP, selected.Zone
 	}
 	// UDPAddr.String folds mapped IPv6 into IPv4, which cannot carry a zone
 	// through a second resolution. AddrPort preserves both the family and zone.
@@ -641,6 +677,22 @@ func resolveNativeQUICAddress(address string) (string, error) {
 	// Preserve the existing unspecified-host form when an explicit TLS
 	// ServerName allowed it through client configuration validation.
 	return resolved.String(), nil
+}
+
+// Match net.ResolveUDPAddr's single-address selection, including its legacy
+// bracketed-host IPv6 preference and unspecified-IPv6 compatibility fallback.
+// addresses is nonempty; never mutate the resolver's returned backing array.
+func selectNativeQUICAddress(address string, addresses []net.IPAddr) net.IPAddr {
+	if len(addresses) == 1 && addresses[0].IP.Equal(net.IPv6unspecified) {
+		addresses = []net.IPAddr{addresses[0], {IP: net.IPv4zero}}
+	}
+	wantIPv6 := strings.Contains(address, "[")
+	for _, candidate := range addresses {
+		if (candidate.IP.To4() == nil) == wantIPv6 {
+			return candidate
+		}
+	}
+	return addresses[0]
 }
 
 func hardenedQUICClientConfig(input *quic.Config) *quic.Config {
