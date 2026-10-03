@@ -61,10 +61,16 @@ func TestQUICDatagramClosedPortPreservesAssociation(t *testing.T) {
 	resolver := UDPResolverFunc(func(ctx context.Context, address string) ([]netip.AddrPort, error) {
 		endpoints, err := numeric.ResolveUDPContext(ctx, address)
 		if err == nil && address == closedAddress.Load().(string) {
-			closedRequests.Add(1)
+			count := closedRequests.Add(1)
 			select {
 			case resolvedClosed <- struct{}{}:
 			default:
+			}
+			if count%9 == 0 {
+				// Same-target callbacks are FIFO. Entry into this ninth call
+				// witnesses the previous eight real write attempts returning.
+				// Reject this barrier call, so it cannot write after rebind.
+				return nil, errors.New("fixture completed closed-target write barrier")
 			}
 		}
 		return endpoints, err
@@ -178,16 +184,16 @@ func TestQUICDatagramClosedPortPreservesAssociation(t *testing.T) {
 			t.Fatal(err)
 		}
 		guard = nil
-		for index := 0; index < 8; index++ {
+		for index := 0; index < 9; index++ {
 			if err := packet.Send([]byte{byte(round), byte(index)}, closedEndpoint.String()); err != nil {
 				t.Fatal(err)
 			}
 		}
-		for closedRequests.Load() == before {
+		for closedRequests.Load() < before+9 {
 			select {
 			case <-resolvedClosed:
 			case <-ctx.Done():
-				t.Fatal("no closed-port request reached the relay")
+				t.Fatal("closed-target write-completion barrier did not reach the relay")
 			}
 		}
 		// Give naturally generated local errors an opportunity to arrive.
@@ -199,9 +205,9 @@ func TestQUICDatagramClosedPortPreservesAssociation(t *testing.T) {
 			timer.Stop()
 			t.Fatal(ctx.Err())
 		}
-		// Keep the destination closed until the healthy reply arrives. The
-		// relay processes requests serially, so this also places its observed
-		// closed-destination write attempt before reopening the guard socket.
+		// Keep the destination closed until both the same-target write barrier
+		// and the healthy reply. A different target's echo does not order this
+		// target's writes: independent target lanes are intentionally parallel.
 		checkEcho([]byte{byte(round), 'o', 'k'})
 		guard, err = net.ListenUDP("udp4", closedEndpoint)
 		if isWebTestAddressInUse(err) {

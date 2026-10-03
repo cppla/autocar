@@ -683,6 +683,13 @@ func (p *webUDPPacketConn) Close() error {
 
 func (p *webUDPPacketConn) MaxPayloadSize() int { return webConnectUDPMaxPayloadSize }
 
+func (p *webUDPPacketConn) ConcurrentSendLimit() int { return min(8, p.maxTargets) }
+
+func (p *webUDPPacketConn) SendTargetKey(address string) (string, error) {
+	_, canonical, err := connectUDPPath(address)
+	return canonical, err
+}
+
 type webUDPClientSession struct {
 	packet     *webUDPPacketConn
 	target     string
@@ -1075,3 +1082,4 @@ func (c *WebH3Client) DialPacket(ctx context.Context) (transport.PacketConn, err
 var _ transport.PacketDialer = (*WebH3Client)(nil)
 var _ transport.PacketConn = (*webUDPPacketConn)(nil)
 var _ transport.PacketPayloadSizer = (*webUDPPacketConn)(nil)
+var _ transport.PacketConcurrentSender = (*webUDPPacketConn)(nil)
