@@ -378,9 +378,10 @@ func (c *WebH3Client) DialContext(ctx context.Context, network, address string) 
 		fail()
 		return nil, &WebConnectError{Transport: webAuthTransportH3, StatusCode: response.StatusCode}
 	}
-	if !stopDial() && ctx.Err() != nil {
+	stopDial()
+	if err := contextError(ctx); err != nil {
 		cancelStream()
-		return nil, ctx.Err()
+		return nil, err
 	}
 	if err := stream.SetDeadline(time.Time{}); err != nil {
 		cancelStream()
@@ -391,6 +392,13 @@ func (c *WebH3Client) DialContext(ctx context.Context, network, address string) 
 		c.mu.Unlock()
 		cancelStream()
 		return nil, net.ErrClosed
+	}
+	// Stopping the opening watcher does not transfer ownership. Cancellation
+	// while waiting for this lock must still reclaim only this request stream.
+	if err := contextError(ctx); err != nil {
+		c.mu.Unlock()
+		cancelStream()
+		return nil, err
 	}
 	c.selected = true
 	c.mu.Unlock()

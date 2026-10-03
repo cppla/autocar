@@ -416,6 +416,14 @@ caller cancellation or primary opening budget; this never triggers H2 UDP
 fallback or resets the TCP cooldown. Successful established packets remain
 detached from the caller's temporary opening context.
 
+Source builds also preserve the opening context's cancellation cause for H3
+CONNECT-UDP I/O failures and recheck cancellation after verifying a successful
+TCP or UDP response, including at the final stream handoff lock. A rejected
+handoff cancels only that request stream and releases its reservation; proven
+connection authentication and sibling streams remain usable. Cancellation
+after successful ownership transfer does not close the established stream.
+These changes are not included in the published v1.0.1 binary.
+
 Both web TCP handlers reject and close a destination connection returned after
 the configured destination dial deadline, even if a custom dialer reports
 success. The existing authenticated 502 response and connection-bound session

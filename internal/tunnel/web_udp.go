@@ -888,9 +888,10 @@ func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) 
 		if reservation.bootstrap {
 			c.failSessionAuthentication(session)
 		}
-		if ctx.Err() == nil {
-			c.retire(conn)
+		if cause := contextError(ctx); cause != nil {
+			return nil, cause
 		}
+		c.retire(conn)
 		return nil, fmt.Errorf("tunnel: open CONNECT-UDP request stream: %w", err)
 	}
 	cancelStream := func() {
@@ -936,6 +937,9 @@ func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) 
 		if reservation.bootstrap {
 			c.failSessionAuthentication(session)
 		}
+		if cause := contextError(ctx); cause != nil {
+			return nil, cause
+		}
 		return nil, fmt.Errorf("tunnel: send CONNECT-UDP request for %s: %w", canonicalTarget, err)
 	}
 	response, err := readWebH3FinalResponse(stream)
@@ -943,6 +947,9 @@ func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) 
 		fail()
 		if reservation.bootstrap {
 			c.failSessionAuthentication(session)
+		}
+		if cause := contextError(ctx); cause != nil {
+			return nil, cause
 		}
 		if conn.Context().Err() != nil {
 			c.retire(conn)
@@ -980,9 +987,10 @@ func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) 
 		fail()
 		return nil, errors.New("tunnel: CONNECT-UDP response did not negotiate the Capsule Protocol")
 	}
-	if !stopOpen() && ctx.Err() != nil {
+	stopOpen()
+	if err := contextError(ctx); err != nil {
 		cancelStream()
-		return nil, ctx.Err()
+		return nil, err
 	}
 	if err := stream.SetDeadline(time.Time{}); err != nil {
 		cancelStream()
@@ -993,6 +1001,13 @@ func (c *WebH3Client) openConnectUDPSession(ctx context.Context, target string) 
 		c.mu.Unlock()
 		cancelStream()
 		return nil, net.ErrClosed
+	}
+	// A verified response establishes authentication, but stream ownership is
+	// not handed off until cancellation is checked under the selection lock.
+	if err := contextError(ctx); err != nil {
+		c.mu.Unlock()
+		cancelStream()
+		return nil, err
 	}
 	c.selected = true
 	c.mu.Unlock()
