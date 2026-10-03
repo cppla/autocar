@@ -12,6 +12,7 @@ import (
 
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
+	"github.com/cppla/autocar/internal/cover"
 )
 
 // webTunnelHandler serves a real cover origin and only upgrades an
@@ -107,9 +108,7 @@ func (h *webTunnelHandler) serveCover(w http.ResponseWriter, r *http.Request) {
 	// Clone before removing the credential so other middleware cannot observe a
 	// mutation of the caller's request. A cover reverse proxy must never forward
 	// a tunnel credential to its upstream.
-	clone := r.Clone(r.Context())
-	clone.Header = r.Header.Clone()
-	clone.Header.Del("Proxy-Authorization")
+	clone := cover.CloneRequestForCover(r)
 	h.cover.ServeHTTP(w, clone)
 }
 
