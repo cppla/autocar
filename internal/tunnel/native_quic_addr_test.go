@@ -31,7 +31,7 @@ func TestResolveNativeQUICAddress(t *testing.T) {
 		{name: "empty_host_zero_port", address: ":0", want: ":0", empty: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveNativeQUICAddress(tc.address)
+			got, err := resolveNativeQUICAddress(context.Background(), tc.address)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -61,7 +61,7 @@ func TestResolveNativeQUICAddress(t *testing.T) {
 		{"missing_ipv6_bracket", "[::1:443"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveNativeQUICAddress(tc.address)
+			got, err := resolveNativeQUICAddress(context.Background(), tc.address)
 			if err == nil || got != "" {
 				t.Errorf("malformed address resolved: got=%q err=%v", got, err)
 			}
