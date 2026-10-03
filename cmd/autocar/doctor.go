@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -16,7 +17,9 @@ import (
 	"time"
 
 	"github.com/cppla/autocar/internal/protocol"
+	"github.com/cppla/autocar/internal/transport"
 	"github.com/cppla/autocar/internal/tunnel"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 const (
@@ -35,6 +38,7 @@ type doctorResult struct {
 	RelayNegotiatedBytesPerSecond  uint64              `json:"relay_negotiated_bytes_per_second"`
 	ElapsedMilliseconds            float64             `json:"elapsed_ms"`
 	LastTransportEvent             *tunnel.ClientEvent `json:"last_transport_event,omitempty"`
+	DNS                            *doctorDNSResult    `json:"dns,omitempty"`
 }
 
 type doctorFailure struct {
@@ -64,7 +68,9 @@ func runDoctorWith(parent context.Context, args []string, stdout, stderr io.Writ
 	fs.SetOutput(io.Discard)
 	var tf tunnelFlags
 	addTunnelFlags(fs, &tf)
-	target := fs.String("target", "", "TCP target host:port to open through the authenticated relay (required)")
+	target := fs.String("target", "", "target host:port (TCP), or numeric IP:port (UDP DNS), through the authenticated relay (required)")
+	probe := fs.String("probe", "tcp-open", "probe: tcp-open or udp-dns (explicit target and DNS name required)")
+	dnsName := fs.String("dns-name", "", "explicit ASCII DNS name for udp-dns; no default resolver or query")
 	jsonOutput := fs.Bool("json", false, "emit machine-readable JSON")
 	parseErr := parseFlagsWithConfig(fs, args)
 	effectiveJSON = effectiveJSON || *jsonOutput
@@ -81,6 +87,32 @@ func runDoctorWith(parent context.Context, args []string, stdout, stderr io.Writ
 		return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "invalid_arguments", errors.New("doctor does not accept positional arguments"), 0)
 	}
 	normalizedTarget := strings.TrimSpace(*target)
+	normalizedProbe := strings.ToLower(strings.TrimSpace(*probe))
+	var udpTarget netip.AddrPort
+	var queryName dnsmessage.Name
+	switch normalizedProbe {
+	case "tcp-open":
+		if *dnsName != "" {
+			return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "invalid_arguments", errors.New("DNS name requires udp-dns"), 0)
+		}
+	case "udp-dns":
+		var err error
+		udpTarget, err = doctorDNSTarget(normalizedTarget)
+		if err != nil {
+			return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "invalid_target", err, 0)
+		}
+		normalizedTarget = udpTarget.String()
+		queryName, err = doctorDNSName(*dnsName)
+		if err != nil || tf.openTimeout <= 0 {
+			return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "invalid_arguments", errors.New("invalid DNS name or probe timeout"), 0)
+		}
+		mode := strings.ToLower(strings.TrimSpace(tf.mode))
+		if mode == "tls" || mode == "h2" {
+			return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "udp_unsupported", nil, 0)
+		}
+	default:
+		return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "invalid_arguments", errors.New("unknown probe"), 0)
+	}
 	if err := validateDoctorTarget(normalizedTarget); err != nil {
 		return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "invalid_target", err, 0)
 	}
@@ -93,19 +125,38 @@ func runDoctorWith(parent context.Context, args []string, stdout, stderr io.Writ
 		return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "configuration_failed", fmt.Errorf("configure authenticated tunnel: %w", err), 0)
 	}
 	defer dialer.Close()
+	var packetDialer transport.PacketDialer
+	if normalizedProbe == "udp-dns" {
+		var ok bool
+		packetDialer, ok = dialer.(transport.PacketDialer)
+		if !ok {
+			return doctorFail(stdout, effectiveJSON, doctorExitUsageFailure, "udp_unsupported", nil, 0)
+		}
+	}
 
 	probeCtx, cancel := context.WithTimeout(parent, tf.openTimeout)
+	defer cancel()
 	started := time.Now()
-	conn, err := dialer.DialContext(probeCtx, "tcp", normalizedTarget)
-	elapsed := time.Since(started)
-	cancel()
-	if err != nil {
-		return doctorFail(stdout, effectiveJSON, doctorExitProbeFailure, "probe_failed", fmt.Errorf("authenticated tunnel TCP open failed: %w", err), elapsed)
+	var dnsResult *doctorDNSResult
+	var elapsed time.Duration
+	if normalizedProbe == "udp-dns" {
+		dnsResult, err = probeDoctorDNS(probeCtx, packetDialer, udpTarget, queryName)
+		elapsed = time.Since(started)
+		if err != nil {
+			return doctorFail(stdout, effectiveJSON, doctorExitProbeFailure, "udp_probe_failed", err, elapsed)
+		}
+	} else {
+		conn, openErr := dialer.DialContext(probeCtx, "tcp", normalizedTarget)
+		elapsed = time.Since(started)
+		cancel()
+		if openErr != nil {
+			return doctorFail(stdout, effectiveJSON, doctorExitProbeFailure, "probe_failed", fmt.Errorf("authenticated tunnel TCP open failed: %w", openErr), elapsed)
+		}
+		if conn == nil {
+			return doctorFail(stdout, effectiveJSON, doctorExitProbeFailure, "probe_failed", errors.New("authenticated tunnel returned no TCP connection"), elapsed)
+		}
+		_ = conn.Close()
 	}
-	if conn == nil {
-		return doctorFail(stdout, effectiveJSON, doctorExitProbeFailure, "probe_failed", errors.New("authenticated tunnel returned no TCP connection"), elapsed)
-	}
-	_ = conn.Close()
 
 	reporter, ok := dialer.(doctorSnapshotReporter)
 	if !ok {
@@ -126,6 +177,10 @@ func runDoctorWith(parent context.Context, args []string, stdout, stderr io.Writ
 		RelayNegotiatedBytesPerSecond:  snapshot.RelayNegotiatedBytesPerSecond,
 		ElapsedMilliseconds:            durationMilliseconds(elapsed),
 		LastTransportEvent:             snapshot.LastEvent,
+		DNS:                            dnsResult,
+	}
+	if dnsResult != nil {
+		result.Probe = "authenticated_udp_dns"
 	}
 	// Failure handling remains fail-closed when an affirmative JSON flag was
 	// swallowed by another argument or lies beyond flag's stopping point. Once
@@ -218,7 +273,9 @@ func doctorFailureGuidance(code string, err error) (string, string) {
 		}
 		return "arguments", "Run autocar doctor --help; check option names, values, and any configuration file. Positional arguments are not supported."
 	case "invalid_target":
-		return "target", "Set --target to a reachable TCP host:port; use [IPv6-address]:port for IPv6 and a numeric port from 1 to 65535."
+		return "target", "Set --target to a reachable host:port; udp-dns requires a numeric unicast IP. Use [IPv6-address]:port for IPv6 and a numeric port from 1 to 65535."
+	case "udp_unsupported":
+		return "udp_unsupported", "Use quic, auto, h3, or web-auto for udp-dns; TLS and H2 have no UDP probe and will not fall back to TCP."
 	case "metadata_unavailable", "internal_error":
 		return "internal", "Check autocar version on both ends and use a matching supported release. If this persists, report the doctor code and version without credentials."
 	case "configuration_failed":
@@ -293,6 +350,10 @@ func doctorFailureMessage(code string) string {
 		return "local tunnel configuration failed"
 	case "probe_failed":
 		return "authenticated tunnel TCP open failed"
+	case "udp_probe_failed":
+		return "authenticated tunnel UDP DNS exchange failed"
+	case "udp_unsupported":
+		return "selected tunnel does not support the UDP DNS probe"
 	case "metadata_unavailable":
 		return "authenticated tunnel opened but transport metadata is unavailable"
 	case "internal_error":
@@ -312,8 +373,12 @@ func writeDoctorJSON(output io.Writer, value any) error {
 }
 
 func writeDoctorHuman(output io.Writer, result doctorResult) error {
+	heading := "Authenticated relay TCP probe: OK\n"
+	if result.DNS != nil {
+		heading = "Authenticated relay UDP DNS exchange: OK\n"
+	}
 	if _, err := fmt.Fprintf(output,
-		"Authenticated relay TCP probe: OK\n"+
+		heading+
 			"  requested transport: %s\n"+
 			"  selected transport:  %s\n"+
 			"  client pacing:        %s (%d bytes/s)\n"+
@@ -328,6 +393,11 @@ func writeDoctorHuman(output io.Writer, result doctorResult) error {
 		result.ElapsedMilliseconds,
 	); err != nil {
 		return errors.New("write doctor output failed")
+	}
+	if result.DNS != nil {
+		if _, err := fmt.Fprintf(output, "  DNS response:         %s (questions=%d answers=%d authorities=%d additionals=%d)\n", result.DNS.RCode, result.DNS.Questions, result.DNS.Answers, result.DNS.Authorities, result.DNS.Additionals); err != nil {
+			return errors.New("write doctor output failed")
+		}
 	}
 	if result.LastTransportEvent != nil {
 		if _, err := fmt.Fprintf(output, "  transport event:      %s (%s)\n", result.LastTransportEvent.Kind, result.LastTransportEvent.Reason); err != nil {

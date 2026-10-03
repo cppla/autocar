@@ -211,6 +211,28 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 `0` 表示探测成功，`1` 表示网络/认证/目标探测失败，`2` 表示参数或本地配置错误。
 成功只证明该 TCP 路径此刻可用，不代表目标应用协议正确、不可识别或链路更快。
 
+包含最新源码改动的构建还支持显式 UDP DNS 往返探测（已发布的 v1.0.1
+不含此功能）。默认仍为 `--probe tcp-open`；UDP 探测不默认查询第三方解析器：
+
+```bash
+./autocar doctor --config /path/to/client.json --transport h3 \
+  --probe udp-dns --target 192.0.2.53:53 --dns-name probe.example.test --json
+```
+
+上例地址是文档占位符，请替换为你有权限使用、从中继可达的 DNS 服务的
+**数字 IP:端口**，并明确选择查询名；IPv6 使用 `[地址]:端口`，不接受 zone。
+发送一次经典 DNS A/IN 查询，不使用 EDNS，不重试，也不回退到 TCP。
+支持 `quic`、`auto`、`h3`、`web-auto` 的 UDP 路径；`tls`/`h2` 在本地拒绝。
+`--open-timeout` 覆盖建连、发送和等待有效回包，超时/取消会关闭并回收本次探测。
+至多丢弃 8 个不匹配或不支持的回包，仅接受不超过 512 字节、未截断、问题与
+来源匹配且返回 `NOERROR` 的完整响应。输出只增加 DNS 返回码及各段记录数，
+不包含查询名、目标、解析地址、事务 ID 或原始报文；经过中继的 DNS 查询本身
+仍会被所选解析器看到。`NOERROR` 无答案也算往返成功，不证明递归解析、
+答案可信、DNSSEC、任意 DNS 报文兼容、吞吐或抗识别能力。失败码为
+`udp_probe_failed`（退出 1）或 `udp_unsupported`（退出 2），其他参数和配置
+错误沿用现有失败码。`probe`、`dns-name` 也可保存在 doctor 专用 JSON 配置中，
+不要将这两个命令专属字段放入与 `client` 共用的配置。
+
 生产环境若直接绑定 `443`，应给服务进程最小的 `CAP_NET_BIND_SERVICE` 能力，
 或在主机/容器外层做端口映射；不要仅为绑定低端口而以 root 运行整个中继。
 
