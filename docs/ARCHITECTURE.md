@@ -202,6 +202,13 @@ owner until its client stream, physical-session reservation and UDP admission
 slot have been released. Only then is opening completion published to Close
 and other waiters; cleanup runs outside the packet mutex.
 
+Session worker ownership is tracked separately from the target index. A target
+can release admission and be removed before its canceled workers finish;
+PacketConn Close still joins those workers, including concurrent Close callers.
+The client also owns each packet's cancellation watcher, so client Close joins
+logical packet shutdown. Worker registration uses the same closed-state mutex
+as publication, and all completion waits run outside those mutexes.
+
 The SOCKS frontend also isolates lazy H3 target opening, but only for transports
 that explicitly implement `transport.PacketConcurrentSender`. Canonical target
 aliases share one FIFO lane; the WebClient and close-once wrappers preserve

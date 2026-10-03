@@ -438,6 +438,9 @@ type webUDPPacketConn struct {
 	closed   bool
 	sessions map[string]*webUDPClientSession
 	pending  map[string]*webUDPPendingSession
+	// Session workers remain owned after terminate removes their target index.
+	// Add is protected by mu and its closed gate; shutdown waits outside mu.
+	workers sync.WaitGroup
 	// Reports only a newly verified CONNECT-UDP response, never local enqueue.
 	// Protected by mu; invoked after releasing mu to avoid a Close lock cycle.
 	onAuthenticated func(bool)
@@ -456,7 +459,12 @@ func newWebUDPPacketConn(client *WebH3Client) *webUDPPacketConn {
 		sessions:   make(map[string]*webUDPClientSession),
 		pending:    make(map[string]*webUDPPendingSession),
 	}
+	// DialPacket holds client.mu and has checked client.closed. Register before
+	// publication so client Close also joins this packet's shutdown. This watcher
+	// must not belong to packet.workers, which its own shutdown waits for.
+	client.workers.Add(1)
 	go func() {
+		defer client.workers.Done()
 		<-ctx.Done()
 		packet.shutdown()
 	}()
@@ -674,6 +682,9 @@ func (p *webUDPPacketConn) shutdown() {
 		for _, done := range pending {
 			<-done
 		}
+		// Removed sessions are no longer in the snapshot but may still be
+		// finishing their sender, drain, receive or shutdown-watch workers.
+		p.workers.Wait()
 	})
 }
 
@@ -707,11 +718,20 @@ type webUDPClientSession struct {
 }
 
 func (s *webUDPClientSession) start() {
+	// Called under packet.mu before its closed gate can transition. No worker
+	// may be registered after shutdown begins waiting for packet ownership.
 	s.wg.Add(4)
-	go s.receiveDatagrams()
-	go s.drainCapsules()
-	go s.sendDatagrams()
-	go s.watchDatagramSender()
+	s.packet.workers.Add(4)
+	go s.runWorker(s.receiveDatagrams)
+	go s.runWorker(s.drainCapsules)
+	go s.runWorker(s.sendDatagrams)
+	go s.runWorker(s.watchDatagramSender)
+}
+
+func (s *webUDPClientSession) runWorker(worker func()) {
+	defer s.packet.workers.Done()
+	defer s.wg.Done()
+	worker()
 }
 
 func (s *webUDPClientSession) send(payload []byte) error {
@@ -732,7 +752,6 @@ func (s *webUDPClientSession) send(payload []byte) error {
 }
 
 func (s *webUDPClientSession) sendDatagrams() {
-	defer s.wg.Done()
 	defer close(s.senderDone)
 	defer s.terminate()
 	for {
@@ -753,7 +772,6 @@ func (s *webUDPClientSession) sendDatagrams() {
 }
 
 func (s *webUDPClientSession) watchDatagramSender() {
-	defer s.wg.Done()
 	<-s.ctx.Done()
 	select {
 	case <-s.senderDone:
@@ -767,7 +785,6 @@ func (s *webUDPClientSession) watchDatagramSender() {
 }
 
 func (s *webUDPClientSession) receiveDatagrams() {
-	defer s.wg.Done()
 	defer s.terminate()
 	for {
 		frame, err := s.stream.ReceiveDatagram(s.ctx)
@@ -783,7 +800,6 @@ func (s *webUDPClientSession) receiveDatagrams() {
 }
 
 func (s *webUDPClientSession) drainCapsules() {
-	defer s.wg.Done()
 	defer s.terminate()
 	_, _ = io.Copy(io.Discard, s.stream)
 }
