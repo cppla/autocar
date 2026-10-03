@@ -35,6 +35,7 @@ func (c *webH3SelectionPreflightContext) Deadline() (time.Time, bool) {
 }
 
 type webH3SelectionObservation struct {
+	request    int32
 	connection *webServerConnectionAuth
 	full       bool
 	short      bool
@@ -55,14 +56,21 @@ type webH3SelectionFixture struct {
 	dials       atomic.Int32
 	covers      atomic.Int32
 	unexpected  atomic.Int32
+	requests    atomic.Int32
+	reversed    bool
 }
 
 func newWebH3SelectionFixture(t *testing.T) *webH3SelectionFixture {
+	return newWebH3SelectionFixtureWithObservationOrder(t, false)
+}
+
+func newWebH3SelectionFixtureWithObservationOrder(t *testing.T, reversed bool) *webH3SelectionFixture {
 	t.Helper()
 	f := newWebH2DialSharingFixture(t)
 	x := &webH3SelectionFixture{
 		f: f, target: f.target(), entropy: &webH2AuthEntropyCounter{},
 		observed: make(chan webH3SelectionObservation, 2), verified: make(chan struct{}, 4),
+		reversed: reversed,
 	}
 	serverTLS, clientTLS := testTLSConfigs(t)
 	server, err := ListenWebH3(WebH3ServerConfig{
@@ -84,15 +92,29 @@ func newWebH3SelectionFixture(t *testing.T) *webH3SelectionFixture {
 		t.Fatal(err)
 	}
 	original := server.server.Handler
+	secondObserved := make(chan struct{})
+	releaseObservation := sync.OnceFunc(func() { close(secondObserved) })
 	server.server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		joined := make(chan struct{})
 		f.register(joined)
 		defer close(joined)
+		request := x.requests.Add(1)
 		connection, _ := r.Context().Value(webServerConnectionAuthContextKey{}).(*webServerConnectionAuth)
 		bearer := r.Header.Get("Proxy-Authorization")
 		_, short := parseWebSessionBearer(bearer)
 		original.ServeHTTP(w, r)
+		// Delay only the test observer, after the actual handler has returned.
+		// The two public CONNECT flows and authentication remain unmodified.
+		if reversed && request == 1 {
+			select {
+			case <-secondObserved:
+			case <-f.ctx.Done():
+				x.unexpected.Add(1)
+				return
+			}
+		}
 		observation := webH3SelectionObservation{
+			request:    request,
 			connection: connection, full: len(bearer) >= 385 && len(bearer) <= 2047,
 			short: short, proof: w.Header().Get(webAuthResponseHeader) != "",
 			proto: r.ProtoMajor, tlsVersion: webRequestTLSVersion(r), joined: joined,
@@ -101,6 +123,9 @@ func newWebH3SelectionFixture(t *testing.T) *webH3SelectionFixture {
 		case x.observed <- observation:
 		default:
 			x.unexpected.Add(1)
+		}
+		if reversed && request == 2 {
+			releaseObservation()
 		}
 	})
 	serveJoined := make(chan struct{})
@@ -147,6 +172,9 @@ func newWebH3SelectionFixture(t *testing.T) *webH3SelectionFixture {
 			t.Errorf("owned selection H3 client Close: %v", err)
 		}
 	})
+	// Release the observer first on early Fatal too; cleanup must not wait for
+	// a second public flow that the test never reached.
+	f.close = append(f.close, releaseObservation)
 	return x
 }
 
@@ -215,16 +243,37 @@ func (x *webH3SelectionFixture) healthy(expected *quic.Conn) {
 		physical = current
 	}
 	var observations [2]webH3SelectionObservation
-	for i := range observations {
+	var arrival [2]int32
+	var seen [2]bool
+	for i := range arrival {
+		var observation webH3SelectionObservation
 		select {
-		case observations[i] = <-x.observed:
+		case observation = <-x.observed:
 		case <-x.f.ctx.Done():
 			x.f.t.Fatal("later authenticated handler observation exceeded fixture budget")
 		}
-		x.f.wait(observations[i].joined, "later actual authenticated H3 handler joined")
-		if !observations[i].proof || observations[i].proto != 3 || observations[i].tlsVersion != tls.VersionTLS13 || observations[i].connection == nil {
-			x.f.t.Errorf("healthy handler %d proof/proto/TLS/connection=%t/%d/%x/%t", i, observations[i].proof, observations[i].proto, observations[i].tlsVersion, observations[i].connection != nil)
+		arrival[i] = observation.request
+		// Response FIN can precede the outer handler's observation. Match by
+		// request entry, not completion order or credential attributes.
+		if observation.request < 1 || observation.request > 2 {
+			x.f.t.Fatalf("unexpected healthy handler request ordinal %d", observation.request)
 		}
+		index := int(observation.request) - 1
+		if seen[index] {
+			x.f.t.Fatalf("duplicate healthy handler request ordinal %d", observation.request)
+		}
+		seen[index] = true
+		observations[index] = observation
+		x.f.wait(observation.joined, "later actual authenticated H3 handler joined")
+		if !observation.proof || observation.proto != 3 || observation.tlsVersion != tls.VersionTLS13 || observation.connection == nil {
+			x.f.t.Errorf("healthy handler %d proof/proto/TLS/connection=%t/%d/%x/%t", index, observation.proof, observation.proto, observation.tlsVersion, observation.connection != nil)
+		}
+	}
+	if !seen[0] || !seen[1] || x.requests.Load() != 2 {
+		x.f.t.Errorf("healthy handler request identity incomplete: seen=%v requests=%d", seen, x.requests.Load())
+	}
+	if x.reversed && arrival != [2]int32{2, 1} {
+		x.f.t.Errorf("forced post-handler observation order=%v, want [2 1]", arrival)
 	}
 	if observations[0].connection != observations[1].connection || !observations[0].full || observations[0].short || !observations[1].short || x.entropy.nonceReads.Load()-noncesBefore != 1 || x.dials.Load() != 2 || x.covers.Load() != 0 || x.unexpected.Load() != 0 {
 		x.f.t.Errorf("healthy full/short authentication control failed: full/short=%t/%t newnonce=%d destination/cover/unexpected=%d/%d/%d", observations[0].full, observations[1].short, x.entropy.nonceReads.Load()-noncesBefore, x.dials.Load(), x.covers.Load(), x.unexpected.Load())
@@ -235,7 +284,7 @@ func (x *webH3SelectionFixture) healthy(expected *quic.Conn) {
 	if expected != nil && x.verifyCalls.Load() != verifiesBefore {
 		x.f.t.Error("reusing the initialized Fresh connection performed another actual TLS handshake")
 	}
-	x.f.t.Log("later public H3 two complete TCP echoes, same physical connection and full/short authentication controls evaluated")
+	x.f.t.Logf("later public H3 two complete TCP echoes, same physical connection and full/short authentication controls evaluated; observation arrival=%v", arrival)
 }
 
 func TestWebH3ConnectionCanceledWhileWaitingForSelection(t *testing.T) {
@@ -308,4 +357,9 @@ func TestWebH3FreshSessionCancellationDoesNotClaimAuthentication(t *testing.T) {
 	// narrower return-to-reserve mutex window remains a source-order defense,
 	// not a separately injected scheduling claim in this test.
 	x.healthy(physical)
+}
+
+func TestWebH3SelectionObservationsCanCompleteOutOfOrder(t *testing.T) {
+	x := newWebH3SelectionFixtureWithObservationOrder(t, true)
+	x.healthy(nil)
 }
