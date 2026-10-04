@@ -226,7 +226,7 @@ func TestDoctorHumanOutputIsDirectionallyExplicit(t *testing.T) {
 		RelayNegotiatedBytesPerSecond:  0,
 	}}
 	var stdout bytes.Buffer
-	err := runDoctorWith(context.Background(), []string{"--target", "example.com:443"}, &stdout, &bytes.Buffer{}, func(tunnelFlags) (closeDialer, error) {
+	err := runDoctorWith(context.Background(), []string{"--transport", "auto", "--target", "example.com:443"}, &stdout, &bytes.Buffer{}, func(tunnelFlags) (closeDialer, error) {
 		return dialer, nil
 	})
 	if err != nil {

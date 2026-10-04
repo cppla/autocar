@@ -123,9 +123,12 @@ class Lab:
             time.sleep(0.1)
         raise RuntimeError("fixture startup deadline exceeded")
 
-    def benchmark(self, binary, stage, mode, *, wrong_token=False):
+    def benchmark(self, binary, stage, mode, *, wrong_token=False, default_transport=False):
+        if default_transport and mode != "web-auto":
+            raise ValueError("the default transport receipt must expect web-auto")
+        transport_args = [] if default_transport else ["--transport=" + mode]
         for direction in (["download"] if wrong_token else ["download", "upload"]):
-            result = self.run(binary, ["bench-client", "--transport=" + mode, "--server=relay:8443",
+            result = self.run(binary, ["bench-client"] + transport_args + ["--server=relay:8443",
                              "--server-name=relay", "--ca=/fixture/server.crt",
                              "--token-file=/fixture/" + ("wrong-token" if wrong_token else "token"),
                              "--target=target:9000", "--bytes=65536", "--iterations=3", "--warmup=0",
@@ -214,7 +217,10 @@ def main():
                       "--key=/fixture/server.key", "--token-file=/fixture/token", "--allow-private",
                       "--deny-ports=none", "--max-streams=16", "--max-connections=8", "--max-client-connections=8"]
             for stage, server_binary in (("baseline", previous), ("upgrade", current), ("rollback", previous)):
-                relay = lab.run(server_binary, common, alias="relay", background=True)
+                # v1.0.0 predates --protocol; only the upgraded binary needs
+                # the explicit native compatibility opt-in.
+                server_args = common + (["--protocol=native"] if stage == "upgrade" else [])
+                relay = lab.run(server_binary, server_args, alias="relay", background=True)
                 lab.ready(relay, ["transport=quic", "transport=tls"])
                 for client_name, client_binary in (("v1.0.0-client", previous), ("new-client", current)):
                     for mode in ("quic", "tls"):
@@ -222,10 +228,12 @@ def main():
                 for mode in ("quic", "tls"):
                     lab.benchmark(current, stage + "/invalid-token", mode, wrong_token=True)
                 lab.stop(relay)
-            relay = lab.run(current, common + ["--protocol=web", "--cover-root=/fixture/site"], alias="relay", background=True)
+            # Keep the established receipt identities while exercising the
+            # current server and paired client defaults without CLI overrides.
+            relay = lab.run(current, common + ["--cover-root=/fixture/site"], alias="relay", background=True)
             lab.ready(relay, ["transport=h3", "transport=h2"])
             for mode in ("h2", "h3", "web-auto"):
-                lab.benchmark(current, "experimental-web", mode)
+                lab.benchmark(current, "experimental-web", mode, default_transport=mode == "web-auto")
             for mode in ("h2", "h3"):
                 lab.benchmark(current, "experimental-web/invalid-token", mode, wrong_token=True)
             lab.stop(relay)
@@ -235,7 +243,7 @@ def main():
                       "current_binary_sha256": hashlib.sha256(current.read_bytes()).hexdigest(),
                       "previous_binary_sha256": hashlib.sha256(previous.read_bytes()).hexdigest(),
                       "checks": lab.checks, "check_count": len(lab.checks),
-                      "scope": "native upgrade and rollback, authenticated TCP upload/download, experimental web TCP; no comparative claim"}
+                      "scope": "native upgrade and rollback, authenticated TCP upload/download, default web TCP; no comparative claim"}
         # Print PASS only after all resources have been successfully cleaned up.
         print(json.dumps(result, indent=2))
 

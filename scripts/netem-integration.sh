@@ -300,6 +300,7 @@ wait_for_log "${BENCH_PID}" "${ARTIFACT_DIR}/bench-server.log" "benchmark server
 start_background "${ARTIFACT_DIR}/relay.log" \
   ip netns exec "${SERVER_NS}" env QUIC_GO_DISABLE_GSO=true \
   "${AUTOCAR_BIN}" server \
+  --protocol=native \
   --listen="${SERVER_IP}:${RELAY_PORT}" \
   --tcp-listen="${SERVER_IP}:${RELAY_PORT}" \
   --cert="${WORK_DIR}/server.crt" \
@@ -320,6 +321,7 @@ wait_for_log "${RELAY_PID}" "${ARTIFACT_DIR}/relay.log" "transport=tls"
 start_background "${ARTIFACT_DIR}/relay-adaptive.log" \
   ip netns exec "${SERVER_NS}" env QUIC_GO_DISABLE_GSO=true \
   "${AUTOCAR_BIN}" server \
+  --protocol=native \
   --listen="${SERVER_IP}:${ADAPTIVE_RELAY_PORT}" \
   --tcp-listen="${SERVER_IP}:${ADAPTIVE_RELAY_PORT}" \
   --cert="${WORK_DIR}/server.crt" \
@@ -333,6 +335,7 @@ wait_for_log "${ADAPTIVE_RELAY_PID}" "${ARTIFACT_DIR}/relay-adaptive.log" "trans
 start_background "${ARTIFACT_DIR}/relay-reno.log" \
   ip netns exec "${SERVER_NS}" env QUIC_GO_DISABLE_GSO=true \
   "${AUTOCAR_BIN}" server \
+  --protocol=native \
   --listen="${SERVER_IP}:${RENO_RELAY_PORT}" \
   --tcp-listen="${SERVER_IP}:${RENO_RELAY_PORT}" \
   --cert="${WORK_DIR}/server.crt" \

@@ -67,7 +67,7 @@ func printUsage() {
 Usage:
   autocar server [options]       run the remote native or web-cover relay
   autocar client [options]       run local SOCKS5 and HTTP(S) proxies
-  autocar init [options]         generate a new private native deployment bundle
+  autocar init [options]         generate a private web-cover bundle (or explicit native)
   autocar cert [options]         generate a self-signed TLS certificate
   autocar token [options]        generate a strong shared token
   autocar bench-server [options] run a benchmark source/sink target

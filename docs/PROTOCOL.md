@@ -10,6 +10,9 @@ AutoCAR has two intentionally separate wire families:
 Neither family provides third-party proxy protocol or AutoCAR v1 compatibility.
 A relay selects one family with `server --protocol=native|web`; clients must select a matching
 native (`auto|quic|tls`) or web (`web-auto|h3|h2`) transport.
+Current source CLI defaults select `web` and `web-auto`; a web relay still
+requires exactly one explicit cover source. Explicit native settings retain
+their existing wire format, and neither family silently downgrades to the other.
 
 ## Native protocol v2
 

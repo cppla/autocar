@@ -10,6 +10,8 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,17 +26,31 @@ import (
 
 func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
 	for _, test := range []struct {
-		server string
-		name   string
+		server    string
+		name      string
+		protocol  string
+		transport string
 	}{
-		{"relay.example.com:8443", ""},
-		{"127.0.0.1:443", "relay.example.com"},
-		{"[::1]:8443", ""},
+		{"relay.example.com:8443", "", "", "web-auto"},
+		{"127.0.0.1:443", "relay.example.com", "", "web-auto"},
+		{"[::1]:8443", "", "", "web-auto"},
+		{"relay.example.com:8443", "", "native", "auto"},
+		{"127.0.0.1:443", "relay.example.com", "native", "auto"},
+		{"[::1]:8443", "", "native", "auto"},
+		{"relay.example.com:8443", "", "web", "web-auto"},
+		{"relay.example.com:8443", "", " Native ", "auto"},
 	} {
-		t.Run(test.server+test.name, func(t *testing.T) {
+		t.Run(test.server+test.name+"/"+test.protocol, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "new bundle")
 			var stdout bytes.Buffer
 			args := []string{"--server", test.server, "--out", dir, "--days=2"}
+			if test.protocol != "" {
+				args = append(args, "--protocol", test.protocol)
+			}
+			wantProtocol := "web"
+			if test.transport == "auto" {
+				wantProtocol = "native"
+			}
 			if test.name != "" {
 				args = append(args, "--server-name", test.name)
 			}
@@ -44,8 +60,16 @@ func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
 			if !strings.Contains(stdout.String(), "No service or network connection was started") {
 				t.Fatal("initialization output did not state its offline scope")
 			}
+			if !strings.Contains(stdout.String(), "Created "+wantProtocol+" configuration bundle") {
+				t.Fatal("initialization output did not identify the generated protocol")
+			}
 			files := snapshotInitBundle(t, dir)
 			wantFiles := []string{".gitignore", "server/.gitignore", "client/.gitignore", "README.txt", "server/server.json", "server/server.crt", "server/server.key", "server/relay-token", "client/client.json", "client/server.crt", "client/relay-token"}
+			wantDirectories := []string{".", "server", "client"}
+			if wantProtocol == "web" {
+				wantFiles = append(wantFiles, "server/cover/index.html")
+				wantDirectories = append(wantDirectories, "server/cover")
+			}
 			if len(files) != len(wantFiles) {
 				t.Fatalf("unexpected bundle file count: %d", len(files))
 			}
@@ -61,7 +85,7 @@ func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
 				}
 			}
 			if runtime.GOOS != "windows" {
-				for _, name := range []string{".", "server", "client"} {
+				for _, name := range wantDirectories {
 					info, err := os.Stat(filepath.Join(dir, name))
 					if err != nil || info.Mode().Perm() != 0o700 {
 						t.Fatalf("directory %s must have mode 0700", name)
@@ -101,7 +125,7 @@ func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
 			if err := parseFlagsWithConfig(fs, []string{"--config", filepath.Join(dir, "client", "client.json")}); err != nil {
 				t.Fatal(err)
 			}
-			if tf.mode != "auto" || tf.systemRoots || tf.server != test.server {
+			if tf.mode != test.transport || tf.systemRoots || tf.server != test.server {
 				t.Fatal("generated client changed transport, server or trust defaults")
 			}
 			if err := cert.VerifyHostname(tf.serverName); err != nil {
@@ -120,8 +144,20 @@ func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
 			}
 			_ = dialer.Close()
 			server, err := readCommandConfig(filepath.Join(dir, "server", "server.json"))
-			if err != nil || server["protocol"] != "native" || server["allow-private"] != nil || server["disable-tcp-fallback"] != nil {
+			if err != nil || server["protocol"] != wantProtocol || server["allow-private"] != nil || server["disable-tcp-fallback"] != nil {
 				t.Fatal("generated server changed safe defaults")
+			}
+			if wantProtocol == "web" {
+				if server["cover-root"] != "cover" || server["cover-upstream"] != nil {
+					t.Fatal("web bundle does not use its isolated static cover directory")
+				}
+			} else {
+				if server["cover-root"] != nil || server["cover-upstream"] != nil {
+					t.Fatal("native bundle unexpectedly contains cover options")
+				}
+				if files["README.txt"] != sha256.Sum256([]byte(initBundleInstructions)) {
+					t.Fatal("native bundle instructions changed")
+				}
 			}
 			if err := runInitWith(args, io.Discard); err == nil {
 				t.Fatal("existing output was accepted")
@@ -148,6 +184,9 @@ func TestInitRejectsInvalidOptionsBeforeWriting(t *testing.T) {
 		{"--server", "relay:443", "--server-name", "*.example.com"},
 		{"--server", "relay:443", "--server-name", "relay:443"},
 		{"--server", "relay:443", "--days=0"}, {"--server", "relay:443", "--days=1826"},
+		{"--server", "relay:443", "--protocol="},
+		{"--server", "relay:443", "--protocol", "auto"},
+		{"--server", "relay:443", "--protocol", "quic"},
 		{"--server", "relay:443", "unexpected"},
 	} {
 		dir := filepath.Join(t.TempDir(), "not-created")
@@ -223,24 +262,89 @@ func TestInitHelpAndPartialFailure(t *testing.T) {
 
 func TestInitGeneratedConfigurationsPassOfflineChecks(t *testing.T) {
 	clearPreflightEnvironment(t)
+	dnsCalls := denyPreflightDNS(t)
+	for _, protocol := range []string{"default-web", "native"} {
+		t.Run(protocol, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "bundle")
+			args := []string{"--server=relay.invalid:8443", "--out", dir}
+			if protocol == "native" {
+				args = append(args, "--protocol=native")
+			}
+			if err := runInitWith(args, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotInitBundle(t, dir)
+			for _, role := range []string{"server", "client"} {
+				if err := run(context.Background(), []string{role, "--config", filepath.Join(dir, role, role+".json"), "--check"}); err != nil {
+					t.Fatalf("generated %s offline check: %v", role, err)
+				}
+			}
+			if !reflect.DeepEqual(before, snapshotInitBundle(t, dir)) {
+				t.Fatal("offline checks changed the generated bundle")
+			}
+			// The client trust anchor must contain only the certificate.
+			data, err := os.ReadFile(filepath.Join(dir, "client", "server.crt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			block, rest := pem.Decode(data)
+			if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+				t.Fatal("client trust anchor has unexpected PEM material")
+			}
+		})
+	}
+	if dnsCalls.Load() != 0 {
+		t.Fatal("generated configuration checks performed a DNS lookup")
+	}
+}
+
+func TestInitDefaultWebCoverKeepsCredentialsOutsideDocumentRoot(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "bundle")
 	if err := runInitWith([]string{"--server=relay.invalid:8443", "--out", dir}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	for _, role := range []string{"server", "client"} {
-		if err := run(context.Background(), []string{role, "--config", filepath.Join(dir, role, role+".json"), "--check"}); err != nil {
-			t.Fatalf("generated %s offline check: %v", role, err)
-		}
+	root := filepath.Join(dir, "server", "cover")
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "index.html" || entries[0].IsDir() {
+		t.Fatal("public cover directory contains unexpected files")
 	}
-	// Confirm this really is a certificate-only client package, not another
-	// private key hidden behind the trust-anchor filename.
-	data, err := os.ReadFile(filepath.Join(dir, "client", "server.crt"))
+	page, err := os.ReadFile(filepath.Join(root, "index.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	block, rest := pem.Decode(data)
-	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
-		t.Fatal("client trust anchor has unexpected PEM material")
+	for _, name := range []string{"relay-token", "server.key", "server.crt", "server.json"} {
+		private, err := os.ReadFile(filepath.Join(dir, "server", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(page, bytes.TrimSpace(private)) {
+			t.Fatalf("cover page contains private bundle file %s", name)
+		}
+	}
+	handler, err := buildCoverHandler(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://relay.invalid/", nil))
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), page) {
+		t.Fatalf("cover page response: status=%d", response.Code)
+	}
+	for _, path := range []string{"/relay-token", "/server.key", "/server.crt", "/server.json", "/../server.key"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://relay.invalid"+path, nil))
+		if response.Code == http.StatusOK {
+			t.Fatalf("cover served private path %s", path)
+		}
+	}
+	instructions, err := os.ReadFile(filepath.Join(dir, "README.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"web-cover deployment bundle", "web/web-auto", "server/cover/", "outside that directory", "init --protocol=native"} {
+		if !bytes.Contains(instructions, []byte(text)) {
+			t.Fatalf("web instructions omit %q", text)
+		}
 	}
 }
 

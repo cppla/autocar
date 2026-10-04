@@ -462,6 +462,7 @@ create_secret_volume "$invalid_client_volume"
 	--security-opt no-new-privileges:true \
 	--mount "type=volume,src=${relay_volume},dst=/run/autocar" \
 	"$integration_image_id" init \
+	--protocol=native \
 	--server=relay:8443 \
 	--out=/run/autocar/setup
 
@@ -479,6 +480,7 @@ create_secret_volume "$invalid_client_volume"
 	--mount "type=volume,src=${relay_volume},dst=/run/autocar,readonly" \
 	"$integration_image_id" server \
 	--config=/run/autocar/setup/server/server.json \
+	--protocol=native \
 	--check
 "$docker_bin" run --rm \
 	--name "$wrong_token_container" \
@@ -536,6 +538,7 @@ create_secret_volume "$invalid_client_volume"
 	--mount "type=volume,src=${valid_client_volume},dst=/run/autocar,readonly" \
 	"$integration_image_id" client \
 	--config=/run/autocar/client.json \
+	--transport=auto \
 	--check
 
 integration_network_id=$("$docker_bin" network create --label "$integration_label" "$integration_network")
@@ -572,6 +575,7 @@ relay_container_id=$("$docker_bin" run -d \
 	--mount "type=volume,src=${relay_volume},dst=/run/autocar,readonly" \
 	"$integration_image_id" server \
 	--config=/run/autocar/setup/server/server.json \
+	--protocol=native \
 	--allow-private \
 	--max-streams=8 \
 	--max-connections=4 \

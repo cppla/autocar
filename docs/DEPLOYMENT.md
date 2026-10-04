@@ -2,10 +2,14 @@
 
 AutoCAR has two trusted endpoints: a local proxy client and a relay. Native mode
 prefers AutoCAR v2 over QUIC/UDP and can use a separate native TLS/TCP listener.
-Experimental, opt-in web-cover mode presents one normal website over H1/H2/TCP
-and H3/UDP and can carry new TCP flows over H2 when UDP is unavailable. Choose one relay protocol
-per endpoint and configure clients to match it. The defaults remain a `native`
-relay and an `auto` client; installing v1.0.1 does not enable web-cover.
+Web-cover mode presents one normal website over H1/H2/TCP and H3/UDP and can
+carry new TCP flows over H2 when UDP is unavailable. Current source builds default
+to a `web` relay and `web-auto` for `client`, `doctor`, and `bench-client`.
+The relay still requires exactly one explicit cover source. Choose one relay
+protocol per endpoint and configure clients to match it. Existing explicit
+`native`/`auto` settings remain valid; see [default migration](#11-migrating-to-web-cover-defaults)
+before upgrading commands or configs that omit those settings. The historical
+v1.0.1 binary defaults to `native`/`auto`.
 
 ## 1. Build and create credentials
 
@@ -18,7 +22,7 @@ files, and benchmark commands reject them before startup. Normal flag syntax and
 ### Generate a new paired bundle
 
 With a build containing `init` and `--check` (not the published v1.0.1 binary),
-you can generate matching native server/client configuration without contacting
+you can generate matching web server/client configuration without contacting
 any network:
 
 ```bash
@@ -43,6 +47,11 @@ contain the shared token and must remain private. Unix directories are `0700`
 and files `0600`; Windows deployments must restrict their ACLs independently.
 Assign ownership/read access to each host's runtime user. Generated `.gitignore`
 files help prevent accidental Git adds; they are not a storage/access boundary.
+The default bundle includes `server/cover/index.html`, a small public welcome
+page, and sets `cover-root` to that dedicated directory. Replace its content with
+your own public site if needed. Never point cover-root at `server/`, the credential
+directory, or the repository root. Use `init --protocol native` to generate the
+original native relay/auto client bundle without a cover directory.
 If writing fails, the incomplete private directory is preserved for inspection;
 do not deploy it or expect a retry to overwrite it.
 
@@ -52,8 +61,10 @@ the two directories independently movable. Both TCP and UDP listeners use the
 numeric port in `--server`. No firewall, DNS, service installation or system
 settings are changed. Low ports still require appropriate capability/port
 mapping; don't use root simply to bind a low port. Local proxy listeners stay
-loopback-only and the default destination policy is unchanged. For public-CA or
-experimental web-cover deployments, use the manual configuration below instead.
+loopback-only and the default destination policy is unchanged. The generated
+self-signed certificate is suitable for a private trust deployment, not proof of
+browser-equivalent traffic. For public-CA deployments or a fixed upstream cover,
+use the manual configuration below instead.
 
 ### Manual credentials and runtime user
 
@@ -92,6 +103,7 @@ name and validity checks and has no certificate-verification bypass.
 
 ```bash
 sudo -u autocar /usr/local/bin/autocar server \
+  --protocol native \
   --listen :8443 \
   --tcp-listen :8443 \
   --cert /etc/autocar/server.crt \
@@ -132,8 +144,9 @@ relay.
 
 ## 3. Web-cover relay
 
+Web is the current default relay protocol, but a cover source is still required.
 Use web-cover only with a domain and site content you own or are authorized to
-serve. The static form is:
+serve. The static form makes the protocol explicit for service configuration:
 
 ```bash
 sudo -u autocar /usr/local/bin/autocar server \
@@ -240,6 +253,9 @@ paying the same UDP blackhole timeout. Use `--transport=quic` to require UDP or
 is unavailable rather than crossing the TLS fallback.
 
 ### Web-cover client
+
+`web-auto` is the current default for `client`, `doctor`, and `bench-client`.
+This example records it explicitly so that the chosen protocol stays clear:
 
 ```bash
 ./autocar client \
@@ -441,6 +457,10 @@ and [examples/server.json](../examples/server.json) into your credential
 directory and adjust addresses and filenames. These files contain references,
 not secrets; keep the existing token and private-key permission requirements.
 Do not overwrite an existing deployment config without reviewing/backing it up.
+The supplied templates select web/web-auto. Copy the dedicated
+[examples/cover](../examples/cover/index.html) directory alongside the server
+JSON, or change `cover-root` to your authorized public-only site. Explicit
+native/auto JSON from an existing deployment continues to use that family.
 
 ```bash
 autocar client --config /etc/autocar/client.json
@@ -496,7 +516,8 @@ application requests or migrate already-open streams.
 
 ## 5. Pacing
 
-Use `adaptive-balanced` first. `conservative` reduces probing on shared or
+For native deployments, select `--protocol native` on the relay and a native
+client transport. Use `adaptive-balanced` first. `conservative` reduces probing on shared or
 shallow-buffer paths; `aggressive` should be enabled only after measuring both
 throughput and queue delay. `reno` disables the AutoCAR pacing layer and leaves
 the native upstream quic-go path as the baseline. Web H3 uses the separate pinned
@@ -507,6 +528,7 @@ Fixed-rate is appropriate only for a measured, provisioned link:
 ```bash
 # Relay policy: finite limits in both directions and explicit client opt-in.
 ./autocar server [credential/policy flags] \
+  --protocol native \
   --pacing fixed-rate \
   --max-upload-mbps 80 \
   --max-download-mbps 250 \
@@ -567,7 +589,7 @@ Wants=network-online.target
 Type=simple
 User=autocar
 Group=autocar
-ExecStart=/usr/local/bin/autocar server --listen=:443 --tcp-listen=:443 --cert=/etc/autocar/server.crt --key=/etc/autocar/server.key --token-file=/etc/autocar/relay-token --pacing=adaptive --pacing-profile=balanced
+ExecStart=/usr/local/bin/autocar server --protocol=web --listen=:443 --tcp-listen=:443 --cover-root=/srv/autocar-cover --cert=/etc/autocar/server.crt --key=/etc/autocar/server.key --token-file=/etc/autocar/relay-token
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
@@ -576,7 +598,7 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadOnlyPaths=/etc/autocar
+ReadOnlyPaths=/etc/autocar /srv/autocar-cover
 LimitNOFILE=65536
 
 [Install]
@@ -588,22 +610,22 @@ port 443 as an unprivileged user. Alternatively bind both listeners to a port at
 or above 1024, remove those lines and redirect/publish the port outside the
 process.
 
-For web-cover, use the same hardening but select web protocol and an authorized
-cover source:
+Prepare `/srv/autocar-cover` as an authorized public-only site tree and ensure
+`User=autocar` can traverse and read it. For an existing native deployment,
+retain its client `--transport=auto` and use this explicit native command:
 
 ```ini
-ExecStart=/usr/local/bin/autocar server --protocol=web --listen=:443 --tcp-listen=:443 --cover-root=/srv/autocar-cover --cert=/etc/autocar/server.crt --key=/etc/autocar/server.key --token-file=/etc/autocar/relay-token
+ExecStart=/usr/local/bin/autocar server --protocol=native --listen=:443 --tcp-listen=:443 --cert=/etc/autocar/server.crt --key=/etc/autocar/server.key --token-file=/etc/autocar/relay-token --pacing=adaptive --pacing-profile=balanced
 ```
 
-Add the cover directory to `ReadOnlyPaths` (or an equivalent read-only bind) and
-ensure `User=autocar` can traverse and read it.
+The native service does not need the cover path in `ReadOnlyPaths`.
 
 With a post-v1.0.1 configuration-capable build, first manually copy
 [examples/server.json](../examples/server.json) to `/etc/autocar/server.json`
 and adjust its settings, as described in the reusable-configuration section.
 Templates are not bundled or installed automatically by the release archive or
-container image. After preparing that runtime-readable file, the native service
-can use:
+container image. After preparing that runtime-readable file and its dedicated
+cover directory, the web service can use:
 
 ```ini
 ExecStart=/usr/local/bin/autocar server --config=/etc/autocar/server.json --listen=:443
@@ -631,25 +653,27 @@ sudo install -o 65532 -g 65532 -m 0600 \
 docker run --rm \
   -p 443:8443/udp -p 443:8443/tcp \
   -v /etc/autocar-container:/etc/autocar:ro \
+  -v /srv/autocar-cover:/srv/www:ro \
   autocar:local server \
+  --protocol=web --cover-root=/srv/www \
   --listen=:8443 --tcp-listen=:8443 \
   --cert=/etc/autocar/server.crt \
   --key=/etc/autocar/server.key \
   --token-file=/etc/autocar/relay-token
 ```
 
-For a static web-cover container, mount the authorized site read-only and add
-the web flags while keeping both TCP and UDP port publications:
+Prepare `/srv/autocar-cover` as an authorized public-only site readable by the
+container user. Keep its mount separate from the credentials. For native mode,
+omit the site mount, select the native protocol explicitly, and use an `auto`,
+`quic`, or `tls` client:
 
 ```bash
 docker run --rm \
   -p 443:8443/udp -p 443:8443/tcp \
   -v /etc/autocar-container:/etc/autocar:ro \
-  -v /srv/autocar-cover:/srv/www:ro \
   autocar:local server \
-  --protocol=web \
+  --protocol=native \
   --listen=:8443 --tcp-listen=:8443 \
-  --cover-root=/srv/www \
   --cert=/etc/autocar/server.crt \
   --key=/etc/autocar/server.key \
   --token-file=/etc/autocar/relay-token
@@ -662,6 +686,14 @@ mount for the mapped runtime UID instead, and publish a non-privileged host port
 unless the rootless runtime has been explicitly authorized to bind `443`. The
 image does not need host networking. Apply memory, CPU, PID and file-descriptor
 limits appropriate to the configured connection limits.
+
+The checked-in `docker-compose.yml` selects a web relay and defaults clients to
+`web-auto`. It mounts `examples/cover` read-only at `/srv/www`; replace that
+dedicated sample directory with your authorized site, keeping secrets outside
+it. `AUTOCAR_TRANSPORT=h2` or `h3` can require one web path. To keep a native
+Compose deployment, override the relay command with `--protocol=native` and no
+cover flags, and set `AUTOCAR_TRANSPORT=auto` for its clients. Changing only the
+client transport does not change the relay protocol.
 
 ## 9. Validation and upgrade
 
@@ -746,3 +778,32 @@ configuration when a feature change is not intended.
 These are deployment acceptance steps, not a claim that every operating
 system, network, or application has been tested. Cross-compiled release
 archives alone are not native runtime validation for their target platform.
+
+## 11. Migrating to web-cover defaults
+
+Current source builds change only omitted selections: `server --protocol`
+defaults to `web`, and `client`, `doctor`, and `bench-client --transport` default
+to `web-auto`. A server with no cover source fails validation; it does not
+automatically serve its working directory. Saved JSON or CLI settings that
+explicitly select `native` and `auto` retain their meaning. Native and web
+families remain incompatible and there is no silent fallback between them.
+
+For an existing native deployment, choose one of these paths before restarting:
+
+- Preserve native behavior by recording `--protocol=native` on the relay and
+  `--transport=auto` on clients, diagnostics, and benchmarks, or the matching
+  `"protocol": "native"` and `"transport": "auto"` JSON keys. Native configurations
+  must not include web cover fields.
+- Migrate both endpoints to web/web-auto in a coordinated deployment. Prepare
+  exactly one dedicated public-only `cover-root` or fixed authorized
+  `cover-upstream`, keep keys/tokens outside the site tree, and verify ordinary
+  H1/H2/H3 responses, authenticated TCP, H3 CONNECT-UDP where needed, and H3-to-H2
+  TCP fallback. Use a second TCP/UDP port to stage a rolling migration while the
+  original native endpoint remains available.
+
+Retain the previous executable, service configuration and protected credentials.
+Restarting either endpoint interrupts active streams; applications must reconnect.
+For rollback, restore the matching native relay/client selections together and
+repeat the path checks. A successful local `--check` validates configuration,
+not network availability or traffic classification. The default change itself
+does not establish equivalence to browser traffic or passive-fingerprint quality.

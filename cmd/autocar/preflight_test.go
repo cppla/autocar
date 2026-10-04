@@ -89,6 +89,9 @@ func TestPreflightClientAllTransportsStayOffline(t *testing.T) {
 			}
 		})
 	}
+	if err := runClient(context.Background(), files.clientArgs()); err != nil {
+		t.Fatalf("default web-auto preflight: %v", err)
+	}
 	if got := dnsCalls.Load(); got != 0 {
 		t.Fatalf("offline checks attempted %d DNS connections", got)
 	}
@@ -107,8 +110,10 @@ func TestPreflightServerModesStayOffline(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"native", nil},
-		{"native mTLS", []string{"--client-ca", files.cert}},
+		{"native", []string{"--protocol", "native"}},
+		{"native mTLS", []string{"--protocol", "native", "--client-ca", files.cert}},
+		{"default web static", []string{"--cover-root", files.cover}},
+		{"default web upstream", []string{"--cover-upstream", "https://cover.invalid/"}},
 		{"web static", []string{"--protocol", "web", "--cover-root", files.cover}},
 		{"web unresolved upstream", []string{"--protocol", "web", "--cover-upstream", "https://cover.invalid/"}},
 		{"web live upstream", []string{"--protocol", "web", "--cover-upstream", upstream.URL}},
@@ -199,7 +204,8 @@ func TestPreflightClientRejectsInvalidConfiguration(t *testing.T) {
 		{"CA malformed", "parse CA file", []string{"--ca", files.token}},
 		{"token missing", "stat secret file", []string{"--token-file", missing}},
 		{"mTLS pair missing", "supplied together", []string{"--client-cert", files.cert}},
-		{"mTLS key missing", "open TLS private key", []string{"--client-cert", files.cert, "--client-key", missing}},
+		{"mTLS key missing", "open TLS private key", []string{"--transport", "auto", "--client-cert", files.cert, "--client-key", missing}},
+		{"default web mTLS", "web transports do not support mTLS", []string{"--client-cert", files.cert, "--client-key", files.key}},
 		{"HTTPS pair missing", "requires --proxy-cert", []string{"--https", "127.0.0.1:8443"}},
 		{"HTTPS key missing", "open TLS private key", []string{"--https", "127.0.0.1:8443", "--proxy-cert", files.cert, "--proxy-key", missing}},
 		{"idle timeout", "--idle-timeout", []string{"--idle-timeout", "-1s"}},
@@ -248,7 +254,8 @@ func TestPreflightServerRejectsInvalidConfiguration(t *testing.T) {
 		{"web mTLS", "incompatible", []string{"--protocol", "web", "--cover-root", files.cover, "--client-ca", files.cert}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := runServer(context.Background(), append(files.serverArgs(), test.args...))
+			args := append(files.serverArgs(), "--protocol", "native")
+			err := runServer(context.Background(), append(args, test.args...))
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want substring %q", err, test.want)
 			}
@@ -257,7 +264,7 @@ func TestPreflightServerRejectsInvalidConfiguration(t *testing.T) {
 	if err := os.WriteFile(files.token, []byte("short"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runServer(context.Background(), files.serverArgs()); err == nil || !strings.Contains(err.Error(), "token length") {
+	if err := runServer(context.Background(), append(files.serverArgs(), "--cover-root", files.cover)); err == nil || !strings.Contains(err.Error(), "token length") {
 		t.Fatalf("short token accepted: %v", err)
 	}
 }
@@ -286,12 +293,13 @@ func TestPreflightLocalFilesAndLogs(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
 	t.Cleanup(func() { slog.SetDefault(original) })
 	if err := runClient(context.Background(), append(files.clientArgs(),
+		"--transport", "auto",
 		"--https", "127.0.0.1:8443", "--proxy-cert", files.cert, "--proxy-key", files.key,
 		"--client-cert", files.cert, "--client-key", files.key,
 	)); err != nil {
 		t.Fatal(err)
 	}
-	if err := runServer(context.Background(), files.serverArgs()); err != nil {
+	if err := runServer(context.Background(), append(files.serverArgs(), "--cover-root", files.cover)); err != nil {
 		t.Fatal(err)
 	}
 	for path, previous := range before {
@@ -359,7 +367,7 @@ func TestServerExplicitEmptyClientCAFailsClosed(t *testing.T) {
 	cancel()
 	for _, check := range []string{"true", "false"} {
 		t.Run("check="+check, func(t *testing.T) {
-			args := append(files.serverArgs(), "--check="+check, "--listen", "127.0.0.1:0", "--client-ca", emptyCA)
+			args := append(files.serverArgs(), "--protocol", "native", "--check="+check, "--listen", "127.0.0.1:0", "--client-ca", emptyCA)
 			err := runServer(ctx, args)
 			if err == nil || !strings.Contains(err.Error(), "client CA") {
 				t.Fatalf("empty client CA must never disable mTLS, error = %v", err)
@@ -380,8 +388,8 @@ func TestPreflightRejectsInsecureCredentialPermissions(t *testing.T) {
 		args       []string
 	}{
 		{"client token", files.token, runClient, files.clientArgs()},
-		{"server token", files.token, runServer, files.serverArgs()},
-		{"server key", files.key, runServer, files.serverArgs()},
+		{"server token", files.token, runServer, append(files.serverArgs(), "--cover-root", files.cover)},
+		{"server key", files.key, runServer, append(files.serverArgs(), "--cover-root", files.cover)},
 		{"proxy key", files.key, runClient, append(files.clientArgs(), "--https", "127.0.0.1:8443", "--proxy-cert", files.cert, "--proxy-key", files.key)},
 	} {
 		t.Run(test.name, func(t *testing.T) {

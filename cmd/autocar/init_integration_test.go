@@ -42,7 +42,7 @@ func TestInitGeneratedBundleCarriesNativeTraffic(t *testing.T) {
 	// overridden below with the independently bound QUIC/TLS ephemeral ports;
 	// nothing reserves and releases a port in anticipation of another listener.
 	if err := runInitWith([]string{
-		"--server", target.Listener.Addr().String(), "--out", dir,
+		"--protocol=native", "--server", target.Listener.Addr().String(), "--out", dir,
 	}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +176,146 @@ func TestInitGeneratedBundleCarriesNativeTraffic(t *testing.T) {
 			wantTransport := mode
 			if mode == "auto" {
 				wantTransport = "quic"
+			}
+			reporter, ok := dialer.(selectedTransportReporter)
+			if !ok || reporter.SelectedTransport() != wantTransport {
+				t.Fatalf("successful %s exchange did not report transport %s", mode, wantTransport)
+			}
+		})
+	}
+}
+
+// Only this local harness permits loopback destinations. It checks the generated
+// web bundle against live H2/H3 transports without changing relay policy.
+func TestInitGeneratedDefaultBundleCarriesWebTraffic(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+		if err != nil {
+			http.Error(w, "read test payload", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(func() {
+		target.CloseClientConnections()
+		target.Close()
+	})
+	dir := filepath.Join(t.TempDir(), "generated web bundle")
+	if err := runInitWith([]string{"--server", target.Listener.Addr().String(), "--out", dir}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	serverFlags := flag.NewFlagSet("server", flag.ContinueOnError)
+	protocol := serverFlags.String("protocol", "", "")
+	listen := serverFlags.String("listen", "", "")
+	certFile := serverFlags.String("cert", "", "")
+	keyFile := serverFlags.String("key", "", "")
+	tokenFile := serverFlags.String("token-file", "", "")
+	coverRoot := serverFlags.String("cover-root", "", "")
+	if err := parseFlagsWithConfig(serverFlags, []string{
+		"--config", filepath.Join(dir, "server", "server.json"), "--listen=127.0.0.1:0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if *protocol != "web" || *coverRoot != filepath.Join(dir, "server", "cover") {
+		t.Fatal("generated web protocol or cover directory did not survive config parsing")
+	}
+	certificate, err := security.LoadKeyPair(*certFile, *keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := config.LoadSecret(*tokenFile, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsConfig, err := security.NewServerTLSConfig(security.ServerTLSOptions{
+		Certificates: []tls.Certificate{certificate},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cover, err := buildCoverHandler(*coverRoot, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := tunnel.ListenWeb(tunnel.WebServerConfig{
+		TCPAddress: *listen, UDPAddress: *listen,
+		Token: token, TLSConfig: tlsConfig, Cover: cover,
+		Dialer: &net.Dialer{Timeout: 5 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- relay.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = relay.Close()
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("web relay shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("web relay did not shut down")
+		}
+	})
+
+	for _, mode := range []string{"h2", "h3", "web-auto"} {
+		t.Run(mode, func(t *testing.T) {
+			var tf tunnelFlags
+			clientFlags := flag.NewFlagSet("client", flag.ContinueOnError)
+			addTunnelFlags(clientFlags, &tf)
+			args := []string{
+				"--config", filepath.Join(dir, "client", "client.json"),
+				"--server", relay.TCPAddr().String(), "--open-timeout=10s",
+			}
+			if mode != "web-auto" {
+				args = append(args, "--transport", mode)
+			}
+			if err := parseFlagsWithConfig(clientFlags, args); err != nil {
+				t.Fatal(err)
+			}
+			if tf.mode != mode {
+				t.Fatalf("parsed transport = %q, want %q", tf.mode, mode)
+			}
+			dialer, err := buildTunnelDialer(tf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dialer.Close()
+			probeCtx, stopProbe := context.WithTimeout(ctx, 10*time.Second)
+			defer stopProbe()
+			conn, err := dialer.DialContext(probeCtx, "tcp", target.Listener.Addr().String())
+			if err != nil {
+				t.Fatalf("authenticated web tunnel open: %v", err)
+			}
+			defer conn.Close()
+			deadline, _ := probeCtx.Deadline()
+			if err := conn.SetDeadline(deadline); err != nil {
+				t.Fatal(err)
+			}
+			payload := bytes.Repeat([]byte("generated bundle web traffic\n"), 1024)
+			request, err := http.NewRequestWithContext(probeCtx, http.MethodPost, target.URL, bytes.NewReader(payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := request.Write(conn); err != nil {
+				t.Fatalf("write web tunnel payload: %v", err)
+			}
+			response, err := http.ReadResponse(bufio.NewReader(conn), request)
+			if err != nil {
+				t.Fatalf("read web tunnel response: %v", err)
+			}
+			defer response.Body.Close()
+			got, err := io.ReadAll(io.LimitReader(response.Body, int64(len(payload))+1))
+			if err != nil || response.StatusCode != http.StatusOK || !bytes.Equal(got, payload) {
+				t.Fatalf("web payload roundtrip: status=%d bytes=%d error=%v", response.StatusCode, len(got), err)
+			}
+			wantTransport := mode
+			if mode == "web-auto" {
+				wantTransport = "h3"
 			}
 			reporter, ok := dialer.(selectedTransportReporter)
 			if !ok || reporter.SelectedTransport() != wantTransport {

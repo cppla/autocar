@@ -56,11 +56,13 @@ func TestValidateServerProtocolOptions(t *testing.T) {
 }
 
 func TestRunServerValidatesWebCoverBeforeCredentials(t *testing.T) {
-	err := runServer(context.Background(), []string{"--protocol", "web"})
-	if err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Fatalf("missing web cover error = %v", err)
+	for _, args := range [][]string{nil, {"--protocol", "web"}} {
+		err := runServer(context.Background(), args)
+		if err == nil || !strings.Contains(err.Error(), "exactly one") {
+			t.Fatalf("missing web cover error for %v = %v", args, err)
+		}
 	}
-	err = runServer(context.Background(), []string{
+	err := runServer(context.Background(), []string{
 		"--protocol", "web",
 		"--cover-root", "/srv/www",
 		"--client-ca", "clients.pem",
@@ -92,7 +94,7 @@ func TestBuildUpstreamCoverRejectsNonHTTPOrigin(t *testing.T) {
 	}
 }
 
-func TestRunWebServerAcceptsCanceledLifecycle(t *testing.T) {
+func TestRunDefaultWebServerAcceptsCanceledLifecycle(t *testing.T) {
 	directory := t.TempDir()
 	certFile := filepath.Join(directory, "server.crt")
 	keyFile := filepath.Join(directory, "server.key")
@@ -115,7 +117,6 @@ func TestRunWebServerAcceptsCanceledLifecycle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := runServer(ctx, []string{
-		"--protocol", "web",
 		"--listen", "127.0.0.1:0",
 		"--cover-root", coverRoot,
 		"--cert", certFile,
@@ -146,6 +147,9 @@ func TestTunnelHelpListsWebTransports(t *testing.T) {
 	var flags tunnelFlags
 	addTunnelFlags(fs, &flags)
 	fs.PrintDefaults()
+	if flags.mode != "web-auto" || !strings.Contains(output.String(), `default "web-auto"`) {
+		t.Fatalf("client transport default must be web-auto: flags=%q help=%s", flags.mode, output.String())
+	}
 	for _, mode := range []string{"web-auto", "h3", "h2"} {
 		if !strings.Contains(output.String(), mode) {
 			t.Errorf("tunnel help omitted %q: %s", mode, output.String())

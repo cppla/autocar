@@ -1,6 +1,7 @@
 {
-  "protocol": "native",
+  "protocol": "web",
   "listen": ":8443",
+  "cover-root": "cover",
   "cert": "server.crt",
   "key": "server.key",
   "token-file": "relay-token",

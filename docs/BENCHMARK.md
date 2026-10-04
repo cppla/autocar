@@ -12,6 +12,11 @@ Start the bounded target:
 ./autocar bench-server --listen 127.0.0.1:9000
 ```
 
+`bench-client` defaults to `web-auto` in current source builds. The example
+below explicitly selects native `quic` to measure native pacing; match the
+transport family to the relay. For web measurements, use `web-auto`, `h3`, or
+`h2`; web paths report native pacing as `not-applicable`.
+
 Measure direct and tunneled paths with the same payload, warmup and iterations:
 
 ```bash
@@ -38,9 +43,10 @@ used that rounded index for medians too, selecting the upper middle observation
 for even counts. Recompute from raw samples when comparing those reports.
 The selected transport and sender metadata must remain identical across all
 measured iterations or the command fails. `transport` is the requested policy
-(`auto`, `quic`, `tls` or `direct`); `selected_transport` records the actual
-measured path (`quic`, `tls` or `direct`). Do not treat `transport: "auto"` as
-evidence that QUIC carried the payload. The output also separates:
+(`auto`, `quic`, `tls`, `web-auto`, `h3`, `h2`, or `direct`);
+`selected_transport` records the actual measured path (`quic`, `tls`, `h3`, `h2`,
+or `direct`). Do not treat `transport: "auto"` or `"web-auto"` as evidence that
+QUIC or H3 carried the payload. Native QUIC output also separates:
 
 - `local_tx_acceleration`: the client's current sender;
 - `payload_sender_acceleration`: the sender of the measured payload;
