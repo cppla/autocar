@@ -25,9 +25,12 @@ HTTP/3/UDP，UDP 不可用时让新 TCP 流继续走 HTTPS/HTTP/2/TCP；SOCKS5 U
 升级连接；它仍是网站流量，不是新的代理隧道。限制见
 [WebSocket 网站兼容性](docs/WEB_COVER.md#website-websocket-support-in-source-builds)。
 
-v1.0.1 是功能增强与问题修复版本。默认仍为 `native` 服务端与 `auto` 客户端；
-**Web-cover 是需要显式开启的实验性功能**，发布不代表其被动抗识别能力已经验证。
-变更、升级与限制见 [v1.0.1 发布说明](docs/releases/v1.0.1.md)。
+当前源码默认使用 `web` 服务端与 `web-auto` 客户端、诊断和吞吐测试路径。
+服务端仍须明确提供且只能提供一个 `--cover-root` 或 `--cover-upstream`；
+`init` 默认生成独立的 `server/cover/index.html` 与匹配的两端配置。
+已保存的显式 `native`/`auto` 配置仍按原模式运行。默认值变化不证明浏览器流量等价
+或被动抗识别能力；升级步骤见 [默认值迁移](docs/DEPLOYMENT.md#11-migrating-to-web-cover-defaults)。
+历史 v1.0.1 的默认值和功能边界见 [v1.0.1 发布说明](docs/releases/v1.0.1.md)。
 
 AutoCAR 的身份验证、`autocar/2` 协议、TCP/UDP framing、速率协商、pacing、
 熔断回退和资源边界均由 AutoCAR 实现；自有协议不提供第三方代理协议兼容模式。
@@ -105,8 +108,9 @@ go build -trimpath -o autocar ./cmd/autocar
 ./autocar client --config ./autocar-config/client/client.json --check
 ```
 
-生成的 `server/` 包含服务端配置、证书、私钥和随机令牌；`client/` 只包含客户端配置、
-信任证书和相同令牌，不含私钥。通过可信通道把两份目录分别送到对应机器，保持权限
+生成的 `server/` 包含服务端配置、独立的公开网站目录 `cover/`、证书、私钥和随机令牌；
+`client/` 只包含客户端配置、信任证书和相同令牌，不含私钥。
+通过可信通道把两份目录分别送到对应机器，保持权限
 并交给服务运行用户，再执行：
 
 ```bash
@@ -117,7 +121,10 @@ autocar doctor --config /path/to/client/client.json --target example.com:443
 autocar client --config /path/to/client/client.json
 ```
 
-`init` 只生成 native/auto 的新部署，不安装服务、不改防火墙、不轮换现有凭据。
+`init` 默认生成 web/web-auto 的新部署；用 `--protocol native` 可生成原有的
+native/auto 配置。它不安装服务、不改防火墙、不轮换现有凭据。
+生成的网站是可替换的简短欢迎页；仅将公开内容放入 `server/cover/`，不要把
+`server/`、配置目录或仓库根目录作为 `cover-root`。
 `--out` 的父目录必须存在，目标目录必须不存在；即使已有目录为空也拒绝覆盖。
 默认生成有效期 365 天的自签名证书（`--days` 可调）；用 IP 连接但希望使用 DNS 证书名时，
 可指定 `--server-name`。服务端监听与 `--server` 相同的数字端口，仍须自行开放 TCP/UDP。
@@ -144,6 +151,7 @@ Unix 目录权限为 `0700`、文件为 `0600`；Windows 需另行限制 ACL。
 ./autocar server \
   --listen :8443 \
   --tcp-listen :8443 \
+  --cover-root ./site \
   --cert server.crt \
   --key server.key \
   --token-file token
@@ -158,7 +166,11 @@ Unix 目录权限为 `0700`、文件为 `0600`；Windows 需另行限制 ACL。
   --token-file token
 ```
 
-### Web-cover 模式（v1.0.1，实验性、显式启用）
+上例使用默认的 web/web-auto；先准备独立、只含公开内容的 `./site` 目录。
+如需继续使用 Native 模式，服务端加 `--protocol native` 并去掉 cover 参数，
+客户端、`doctor` 和 `bench-client` 加 `--transport auto`。
+
+### Web-cover 模式（当前默认）
 
 准备一个你拥有或获授权使用的网站目录，然后在同一数字端口上启用 HTTPS/H2 与
 H3。`--cover-root` 和 `--cover-upstream` 必须且只能选一个：
@@ -201,7 +213,7 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
   --server relay.example.com:8443 \
   --ca server.crt \
   --token-file token \
-  --transport auto \
+  --transport web-auto \
   --target example.com:443
 ```
 
@@ -261,15 +273,15 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
   "server": "relay.example.com:8443",
   "ca": "server.crt",
   "token-file": "relay-token",
-  "transport": "auto"
+  "transport": "web-auto"
 }
 ```
 
 ```bash
 ./autocar client --config /path/to/client.json
 ./autocar doctor --config /path/to/client.json --target example.com:443 --json
-# 临时强制 TCP/TLS 诊断，不修改配置文件
-./autocar doctor --config /path/to/client.json --transport tls --target example.com:443
+# 临时强制 HTTPS/H2 诊断，不修改配置文件
+./autocar doctor --config /path/to/client.json --transport h2 --target example.com:443
 ```
 
 字段名对应命令行长选项，但不加 `--`；命令行同名选项优先。配置中的相对文件路径
@@ -281,20 +293,25 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 要让 `client` 和 `doctor` 共用同一个文件，只保存二者共有的隧道参数；
 `socks/http/https` 等客户端专属参数放在启动命令中。中继使用单独的
 [服务端模板](examples/server.json)：`./autocar server --config /path/to/server.json`。
+同时复制示例的独立 [cover 目录](examples/cover/index.html) 到服务端配置文件旁，
+或将 `cover-root` 改为你自己的公开网站目录。
 配置仅在进程启动时读取，修改后需重启；自动回退和恢复只影响新连接，
 已中断的业务连接仍需要应用重新发起，不会自动重放请求。
 
 ## Pacing 模式
 
+本节适用于 Native 模式：服务端显式使用 `--protocol native`，客户端使用
+`--transport auto`、`quic` 或 `tls`。Web 路径不参与 Native pacing 协商。
+
 ```bash
-# 默认：温和探测带宽并根据 RTT/loss 收敛
-./autocar client [连接参数] --pacing adaptive --pacing-profile balanced
+# Native 默认：温和探测带宽并根据 RTT/loss 收敛
+./autocar client [连接参数] --transport auto --pacing adaptive --pacing-profile balanced
 
 # 共享链路更保守
-./autocar client [连接参数] --pacing adaptive --pacing-profile conservative
+./autocar client [连接参数] --transport auto --pacing adaptive --pacing-profile conservative
 
 # 不使用 AutoCAR 应用层 pacing；观察当前 quic-go/Reno 基线
-./autocar client [连接参数] --pacing reno
+./autocar client [连接参数] --transport auto --pacing reno
 ```
 
 只有测得真实容量时才使用 `fixed-rate`。该模式只在 QUIC 路径上协商；上传和下载
@@ -302,6 +319,7 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 
 ```bash
 ./autocar server [服务端参数] \
+  --protocol native \
   --pacing fixed-rate \
   --max-upload-mbps 80 \
   --max-download-mbps 250 \
@@ -333,11 +351,14 @@ Native 模式的 ALPN 是 `autocar/2`；web 模式使用标准 `h2`、`h3` 与
 `http/1.1`。v1.0.0 和 v1.0.1 的 native 模式使用相同的 `autocar/2` 协议，
 v1.0.0 不支持 web 模式。这里的版本号 `v1.0.0` 不等于已经移除的旧协议 AutoCAR v1。
 两种模式均不提供第三方代理协议或旧 AutoCAR v1 兼容模式，客户端与服务端必须
-显式选择匹配的模式。`client --transport` 接受 `auto`、`quic`、`tls`、
+选择匹配的模式。当前默认是服务端 `web` 与客户端、`doctor`、`bench-client`
+的 `web-auto`；已有显式 `native`/`auto` 配置不会被改写。
+`client --transport` 接受 `auto`、`quic`、`tls`、
 `web-auto`、`h3`、`h2`；`bench-client` 另提供 `direct` 对照路径。
-启用 web 时两端都应升级到 v1.0.1；升级不会自动修改现有 native 配置。
+Web 模式要求两端都支持对应功能；只升级一端而仍省略模式参数可能导致协议不匹配。
+迁移时协调两端切换，或在升级前显式固定服务端 `native` 与客户端 `auto`。
 先保留旧二进制和配置，验证实际使用的 TCP、UDP 路径后再切换；具体步骤见
-[部署与升级](docs/DEPLOYMENT.md#10-v100-to-v101-upgrade-and-rollback)。
+[默认值迁移](docs/DEPLOYMENT.md#11-migrating-to-web-cover-defaults)。
 
 ## 验证
 

@@ -48,6 +48,7 @@ class BenchmarkValidationTests(unittest.TestCase):
         for mode in ("quic", "tls", "h2", "h3", "web-auto"):
             with self.subTest(mode=mode):
                 def execute(binary, args, **kwargs):
+                    self.assertIn("--transport=" + mode, args)
                     self.assertIn("--server=relay:8443", args)
                     self.assertIn("--target=target:9000", args)
                     self.assertIn("--token-file=/fixture/token", args)
@@ -59,6 +60,25 @@ class BenchmarkValidationTests(unittest.TestCase):
                     self.lab.benchmark(Path("/not-executed"), "stage", mode)
         self.assertEqual(len(self.lab.checks), 10)
         self.assertEqual({check["direction"] for check in self.lab.checks}, {"upload", "download"})
+
+    def test_default_transport_omits_override_and_keeps_web_auto_receipts(self):
+        def execute(binary, args, **kwargs):
+            self.assertFalse(any(value.startswith("--transport") for value in args))
+            self.assertIn("--server=relay:8443", args)
+            self.assertIn("--target=target:9000", args)
+            self.assertIn("--token-file=/fixture/token", args)
+            direction = next(value.split("=", 1)[1] for value in args if value.startswith("--mode="))
+            return completed(json.dumps(benchmark_output("web-auto", direction)))
+
+        with mock.patch.object(self.lab, "run", side_effect=execute):
+            self.lab.benchmark(Path("/not-executed"), "experimental-web", "web-auto", default_transport=True)
+        self.assertEqual(len(self.lab.checks), 2)
+        self.assertEqual({check["transport"] for check in self.lab.checks}, {"web-auto"})
+        self.assertEqual({check["direction"] for check in self.lab.checks}, {"upload", "download"})
+        with mock.patch.object(self.lab, "run") as run:
+            with self.assertRaises(ValueError):
+                self.lab.benchmark(Path("/not-executed"), "stage", "quic", default_transport=True)
+        run.assert_not_called()
 
     def test_incomplete_or_wrong_payload_cannot_pass(self):
         invalid = [
@@ -236,6 +256,7 @@ class MainMatrixTests(unittest.TestCase):
     def exercise_main(self, corruption=None, cleanup_failure=False):
         original_benchmark = smoke.Lab.benchmark
         generated_tokens = []
+        self.invocations = []
 
         class MockLab(smoke.Lab):
             def __enter__(self):
@@ -250,6 +271,7 @@ class MainMatrixTests(unittest.TestCase):
                     raise RuntimeError("controlled cleanup failure")
 
             def run(self, binary, args, **kwargs):
+                self_test.invocations.append((binary.name, list(args)))
                 if args[0] == "version":
                     if binary.name == "previous":
                         version = "v9.9.9" if corruption == "previous-metadata" else "v1.0.0"
@@ -258,12 +280,12 @@ class MainMatrixTests(unittest.TestCase):
                     return completed(f"autocar {VERSION} (commit {commit}, built {BUILD_DATE}, linux/amd64, go1.25.13)")
                 if args[0] == "bench-client":
                     options = dict(value[2:].split("=", 1) for value in args if value.startswith("--") and "=" in value)
+                    mode = options.get("transport", "web-auto")
                     if options["token-file"].endswith("wrong-token"):
-                        mode = options["transport"]
                         error = (f"tunnel: web-cover {mode.upper()} server authentication failed" if mode in ("h2", "h3")
                                  else "tunnel: remote error: authentication failed (status 2)")
                         return completed(stderr=error, code=1)
-                    return completed(json.dumps(benchmark_output(options["transport"], options["mode"])))
+                    return completed(json.dumps(benchmark_output(mode, options["mode"])))
                 return "mock-container" if kwargs.get("background") else completed()
 
             def ready(self, *args):
@@ -309,6 +331,27 @@ class MainMatrixTests(unittest.TestCase):
         self.assertEqual(len(result["checks"]), 38)
         self.assertEqual(sum(check["authentication"] == "accepted" for check in result["checks"]), 30)
         self.assertEqual(sum(check["authentication"] == "rejected" for check in result["checks"]), 8)
+
+    def test_upgrade_opts_into_native_and_web_stage_exercises_cli_defaults(self):
+        self.exercise_main()
+        server_calls = [(binary, args) for binary, args in self.invocations if args[0] == "server"]
+        self.assertEqual([binary for binary, _ in server_calls], ["previous", "current", "previous", "current"])
+        for index in (0, 2):
+            self.assertFalse(any(value.startswith("--protocol") for value in server_calls[index][1]))
+            self.assertNotIn("--cover-root=/fixture/site", server_calls[index][1])
+        self.assertIn("--protocol=native", server_calls[1][1])
+        self.assertNotIn("--cover-root=/fixture/site", server_calls[1][1])
+        self.assertFalse(any(value.startswith("--protocol") for value in server_calls[3][1]))
+        self.assertIn("--cover-root=/fixture/site", server_calls[3][1])
+        for binary, args in self.invocations:
+            if binary == "previous":
+                self.assertFalse(any(value.startswith("--protocol") for value in args))
+        default_clients = [(binary, args) for binary, args in self.invocations
+                           if args[0] == "bench-client" and not any(value.startswith("--transport") for value in args)]
+        self.assertEqual(len(default_clients), 2)
+        self.assertTrue(all(binary == "current" for binary, _ in default_clients))
+        self.assertEqual({next(value for value in args if value.startswith("--mode="))
+                          for _, args in default_clients}, {"--mode=download", "--mode=upload"})
 
     def test_unexpected_binary_metadata_cannot_pass(self):
         for corruption in ("current-metadata", "previous-metadata"):

@@ -2,7 +2,12 @@
 
 An ordinary AutoCAR release delivers functionality and bug fixes. It does not
 certify browser equivalence, passive indistinguishability, or a comparative
-privacy advantage. v1.0.1 keeps native mode as the default and labels web-cover
+privacy advantage. Current source defaults to a web relay and web-auto clients,
+diagnostics, and benchmarks; exactly one explicit cover source remains required.
+Explicit native/auto configurations retain their meaning. Release notes must
+call out the coordinated endpoint migration or explicit native/auto option;
+see [deployment migration](DEPLOYMENT.md#11-migrating-to-web-cover-defaults).
+The historical v1.0.1 release kept native/auto defaults and introduced web-cover
 as an experimental, explicitly enabled feature.
 
 ## Ordinary release quality
@@ -10,7 +15,7 @@ as an experimental, explicitly enabled feature.
 From the exact, clean release commit, use an explicit version and UTC build time:
 
 ```sh
-make release VERSION=v1.0.1 BUILD_DATE=2026-09-08T00:00:00Z
+make release VERSION=v1.1.0 BUILD_DATE=2026-10-04T00:00:00Z
 ```
 
 Use a recorded UTC build time rather than copying the example timestamp. The

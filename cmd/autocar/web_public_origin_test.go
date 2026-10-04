@@ -15,7 +15,7 @@ func TestRunServerPublicOriginValidationBeforeCredentials(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"native", []string{"--cover-public-origin", "https://site.test"}, "requires --protocol=web"},
+		{"native", []string{"--protocol", "native", "--cover-public-origin", "https://site.test"}, "requires --protocol=web"},
 		{"static", []string{"--protocol", "web", "--cover-root", "/unused", "--cover-public-origin", "https://site.test"}, "requires --protocol=web"},
 		{"http public", []string{"--protocol", "web", "--cover-upstream", "http://origin.test", "--cover-public-origin", "http://site.test"}, "configure upstream cover"},
 		{"whitespace public", []string{"--protocol", "web", "--cover-upstream", "http://origin.test", "--cover-public-origin", " "}, "configure upstream cover"},

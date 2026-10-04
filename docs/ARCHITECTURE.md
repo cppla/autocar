@@ -2,9 +2,11 @@
 
 AutoCAR is a split proxy. It terminates local proxy connections and creates new
 connections at an authenticated relay. The native preferred QUIC path avoids
-nesting a reliable TCP stream inside another reliable TCP stream. The opt-in
+nesting a reliable TCP stream inside another reliable TCP stream. The default
 web-cover path instead prioritizes normal HTTP compatibility: H3 is preferred,
 with genuine HTTPS/H2 over TCP available when UDP is blocked.
+Current source CLI defaults are `web` on the relay and `web-auto` on the client;
+explicit native configurations remain available and unchanged.
 
 ```mermaid
 flowchart LR

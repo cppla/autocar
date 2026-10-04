@@ -47,7 +47,7 @@ type tunnelFlags struct {
 func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
 	fs.StringVar(&flags.server, "server", "", "relay host:port (required)")
 	fs.StringVar(&flags.fallback, "fallback-server", "", "TCP/TLS relay host:port; defaults to --server")
-	fs.StringVar(&flags.mode, "transport", "auto", "transport: auto, quic, tls, web-auto, h3, or h2")
+	fs.StringVar(&flags.mode, "transport", "web-auto", "transport: web-auto (H3 with H2 fallback), h3, h2, or native auto, quic, tls")
 	fs.StringVar(&flags.serverName, "server-name", "", "TLS certificate DNS name; defaults to relay host")
 	fs.StringVar(&flags.caFile, "ca", "", "PEM trust anchor for the relay certificate")
 	fs.BoolVar(&flags.systemRoots, "system-roots", false, "trust the operating-system CA set instead of --ca")

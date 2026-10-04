@@ -18,8 +18,10 @@ services:
     profiles: ["server"]
     command:
       - server
+      - --protocol=web
       - --listen=:8443
       - --tcp-listen=:8443
+      - --cover-root=/srv/www
       - --cert=/run/autocar/server.crt
       - --key=/run/autocar/server.key
       - --token-file=/run/autocar/relay-token
@@ -27,6 +29,7 @@ services:
       - "${AUTOCAR_RELAY_PORT:-443}:8443/udp"
       - "${AUTOCAR_RELAY_PORT:-443}:8443/tcp"
     volumes:
+      - ./examples/cover:/srv/www:ro
       - ./secrets/server.crt:/run/autocar/server.crt:ro
       - ./secrets/server.key:/run/autocar/server.key:ro
       - ./secrets/relay-token:/run/autocar/relay-token:ro
@@ -38,7 +41,7 @@ services:
       - client
       - --server=${AUTOCAR_RELAY:-relay.example.com:443}
       - --server-name=${AUTOCAR_SERVER_NAME:-relay.example.com}
-      - --transport=${AUTOCAR_TRANSPORT:-auto}
+      - --transport=${AUTOCAR_TRANSPORT:-web-auto}
       - --ca=/run/autocar/relay-ca.crt
       - --token-file=/run/autocar/relay-token
       - --socks=0.0.0.0:1080

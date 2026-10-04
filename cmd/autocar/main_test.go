@@ -246,6 +246,7 @@ func TestRunHelpAndUnknownCommand(t *testing.T) {
 
 func TestServerRejectsFallbackSourceLimitAboveGlobalLimit(t *testing.T) {
 	err := runServer(context.Background(), []string{
+		"--protocol", "native",
 		"--cert", "unused.crt",
 		"--key", "unused.key",
 		"--max-streams", "1",
@@ -287,7 +288,7 @@ func TestServerUDPLimitValidation(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			arguments := append([]string{"--cert", "unused.crt", "--key", "unused.key"}, test.arguments...)
+			arguments := append([]string{"--protocol", "native", "--cert", "unused.crt", "--key", "unused.key"}, test.arguments...)
 			err := runServer(context.Background(), arguments)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("runServer error = %v, want substring %q", err, test.want)

@@ -23,16 +23,21 @@ func runInit(args []string) error {
 	return runInitWith(args, os.Stdout)
 }
 
-// init creates a native deployment bundle only. It never contacts the relay,
+// init creates a matching web or native deployment bundle. It never contacts the relay,
 // installs services, opens a firewall, or overwrites an existing output path.
 func runInitWith(args []string, output io.Writer) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	protocolText := fs.String("protocol", "web", "deployment protocol: web or native")
 	server := fs.String("server", "", "client-visible relay host:numeric-port (required; bracket IPv6)")
 	serverName := fs.String("server-name", "", "certificate DNS name or IP; defaults to the relay host")
 	directory := fs.String("out", "autocar-config", "new private output directory; must not already exist")
 	days := fs.Int("days", 365, "self-signed certificate validity in days (1-1825)")
 	if err := parseCommandFlags(fs, args); err != nil {
 		return err
+	}
+	protocolMode := strings.ToLower(strings.TrimSpace(*protocolText))
+	if protocolMode != "web" && protocolMode != "native" {
+		return fmt.Errorf("invalid --protocol %q; want web or native", *protocolText)
 	}
 	if strings.TrimSpace(*directory) == "" {
 		return errors.New("--out must name a new directory")
@@ -63,16 +68,22 @@ func runInitWith(args []string, output io.Writer) error {
 		return fmt.Errorf("generate shared token: %w", err)
 	}
 	token := []byte(base64.RawURLEncoding.EncodeToString(random) + "\n")
-	serverConfig, err := json.MarshalIndent(map[string]any{
-		"protocol": "native", "listen": ":" + port,
+	serverOptions := map[string]any{
+		"protocol": protocolMode, "listen": ":" + port,
 		"cert": "server.crt", "key": "server.key", "token-file": "relay-token",
-	}, "", "  ")
+	}
+	transportMode := "auto"
+	if protocolMode == "web" {
+		serverOptions["cover-root"] = "cover"
+		transportMode = "web-auto"
+	}
+	serverConfig, err := json.MarshalIndent(serverOptions, "", "  ")
 	if err != nil {
 		return err
 	}
 	clientConfig, err := json.MarshalIndent(map[string]any{
 		"server": net.JoinHostPort(host, port), "server-name": name,
-		"ca": "server.crt", "token-file": "relay-token", "transport": "auto",
+		"ca": "server.crt", "token-file": "relay-token", "transport": transportMode,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -84,15 +95,18 @@ func runInitWith(args []string, output io.Writer) error {
 		{"client/server.crt", cert}, {"client/relay-token", token},
 		{"server/server.json", append(serverConfig, '\n')},
 		{"client/client.json", append(clientConfig, '\n')},
-		{"README.txt", []byte(initBundleInstructions)},
+		{"README.txt", []byte(initDeploymentInstructions(protocolMode))},
+	}
+	if protocolMode == "web" {
+		files = append(files, initBundleFile{"server/cover/index.html", []byte(initCoverIndex)})
 	}
 	if err := writeInitBundle(*directory, files); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "Created native configuration bundle in %q.\n"+
+	_, err = fmt.Fprintf(output, "Created %s configuration bundle in %q.\n"+
 		"Copy only server/ to the relay and only client/ to the client over an authenticated channel.\n"+
 		"The server private key is not included in client/. Both directories contain a secret token.\n"+
-		"See README.txt for offline checks and startup. No service or network connection was started.\n", *directory)
+		"See README.txt for offline checks and startup. No service or network connection was started.\n", protocolMode, *directory)
 	if err != nil {
 		return errors.New("bundle was created, but writing the completion message failed; do not overwrite it")
 	}
@@ -177,6 +191,15 @@ func writeInitBundleContents(directory string, files []initBundleFile) error {
 		}
 	}
 	for _, file := range files {
+		if file.path == "server/cover/index.html" {
+			coverDirectory := filepath.Join(directory, "server", "cover")
+			if err := os.Mkdir(coverDirectory, 0o700); err != nil {
+				return err
+			}
+			if err := os.Chmod(coverDirectory, 0o700); err != nil {
+				return err
+			}
+		}
 		if err := writeNewInitFile(filepath.Join(directory, filepath.FromSlash(file.path)), file.data); err != nil {
 			return fmt.Errorf("write bundle file %s: %w", file.path, err)
 		}
@@ -201,6 +224,40 @@ func writeNewInitFile(path string, data []byte) error {
 	}
 	return file.Close()
 }
+
+func initDeploymentInstructions(protocolMode string) string {
+	if protocolMode == "native" {
+		return initBundleInstructions
+	}
+	instructions := strings.Replace(initBundleInstructions, "AutoCAR native deployment bundle", "AutoCAR web-cover deployment bundle", 1)
+	instructions = strings.Replace(instructions, "Existing destination policy and native/auto defaults apply.",
+		"Existing destination policy is unchanged. This bundle explicitly selects web/web-auto.", 1)
+	return instructions + `
+The public website is served only from server/cover/. Its index.html is a
+placeholder; replace it with website content you own or are authorized to serve.
+Keep the token, key, certificate, and configuration outside that directory.
+Never change cover-root to the whole server/ directory or put secrets in cover/.
+The generated self-signed certificate is trusted by the matching client bundle,
+but ordinary browsers require a publicly trusted certificate for a trusted site.
+For TCP, web-auto tries H3 and falls back to H2 after an H3 transport failure.
+SOCKS5 UDP requires H3 and has no H2 fallback. Native pacing and mTLS options
+require a separate native deployment generated with init --protocol=native.
+`
+}
+
+const initCoverIndex = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome</title>
+</head>
+<body>
+  <h1>Welcome</h1>
+  <p>This site is ready for your content.</p>
+</body>
+</html>
+`
 
 const initBundleInstructions = `AutoCAR native deployment bundle
 

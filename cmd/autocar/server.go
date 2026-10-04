@@ -25,7 +25,7 @@ import (
 func runServer(parent context.Context, args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	check := fs.Bool("check", false, "validate local configuration and exit without DNS, network connections, or listeners (numeric ports required)")
-	serverProtocolText := fs.String("protocol", "native", "relay protocol: native or web")
+	serverProtocolText := fs.String("protocol", "web", "relay protocol: web (requires a cover origin) or native")
 	listen := fs.String("listen", ":443", "primary UDP listen address")
 	tcpListen := fs.String("tcp-listen", "", "TCP listener address; defaults to --listen")
 	disableFallback := fs.Bool("disable-tcp-fallback", false, "disable the TCP/TLS fallback listener")

@@ -1,17 +1,25 @@
 # Web-cover mode
 
-AutoCAR v1.0.1 introduces an experimental, opt-in `web` relay mode for deployments
+AutoCAR v1.0.1 introduced an experimental, opt-in `web` relay mode for deployments
 that need a genuine HTTPS origin and reliable TCP service across both UDP-capable and
 UDP-blocked networks. It is intended for lawful privacy, normal website
 compatibility, and service continuity on infrastructure the operator owns or is
 authorized to use.
 
-The default remains a `native` relay and an `auto` client. A normal v1.0.1
-feature/bugfix release does not certify passive-fingerprint quality. Enable
-web-cover only after validating the application's required TCP and UDP paths;
-see [upgrade and rollback](DEPLOYMENT.md#10-v100-to-v101-upgrade-and-rollback).
-Web clients and relays must both support v1.0.1 web mode; v1.0.0 supports native
-`autocar/2` only. Web mode never silently downgrades to that native protocol.
+Current source builds default to a `web` relay and `web-auto` for clients,
+`doctor`, and `bench-client`; the historical v1.0.1 binary retains native/auto
+defaults. The relay still requires exactly one explicit `--cover-root` or
+`--cover-upstream`. `init` defaults to a paired web/web-auto bundle with a
+dedicated `server/cover/index.html`; `init --protocol native` retains the original
+native/auto bundle. Existing explicit native/auto JSON is unchanged.
+
+Validate the application's required TCP and UDP paths before deployment; see
+[default migration and rollback](DEPLOYMENT.md#11-migrating-to-web-cover-defaults).
+Coordinate the protocol change on both endpoints, or explicitly pin native/auto
+before upgrading an existing native deployment. Web clients and relays must
+both support the required web features; v1.0.0 supports native `autocar/2` only.
+Web mode never silently downgrades to that native protocol. Changing defaults
+does not certify passive-fingerprint quality.
 
 It is not an “undetectable” mode. Standard HTTP does not make all TLS, QUIC,
 HTTP framing, packet-size, timing, traffic-volume, endpoint, or application
@@ -142,7 +150,10 @@ separate modes and are not wire-compatible.
 
 ## Relay configuration
 
-The relay requires exactly one cover source.
+The relay defaults to web and requires exactly one explicit cover source. There
+is no automatic working-directory or credential-directory cover. Use a dedicated
+public-only directory, such as the generated `server/cover/`; never serve the
+bundle's `server/` directory or the repository root.
 
 ### Static directory
 
@@ -363,6 +374,10 @@ certificate trust is an operator choice, not an AutoCAR bypass: clients must
 still explicitly choose `--ca` or `--system-roots`.
 
 ## Client transports
+
+`web-auto` is the default for `client`, `doctor`, and `bench-client` in current
+source builds. The explicit setting below also works with an already configured
+web relay and makes the protocol family visible in saved commands.
 
 Recommended configuration:
 
