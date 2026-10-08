@@ -85,40 +85,69 @@ Web cover 的目标是正常网站兼容、减少主动探测暴露并在 UDP �
 
 ## 快速开始
 
-需要 Go 1.25.13 或更高版本：
+客户端和服务端分别在各自机器上构建，需要 Go 1.25.13 或更高版本：
 
 ```bash
 git clone https://github.com/cppla/autocar.git
 cd autocar
-go build -trimpath -o autocar ./cmd/autocar
+make build
 ```
 
-源码构建的各选项型命令只接受命名参数，不接受额外的位置参数（包括 `--` 后的内容）。
-`token`、`cert`、`init` 遇到这类输入会先报错，不生成凭据或配置文件；
-正常参数、`-h/--help` 与既有配置文件覆盖规则保持不变。
+生成的程序位于 `./bin/autocar`。以下命令均在对应机器的项目根目录执行；
+不要把 Mac 程序直接传到 Linux 使用。
 
-### 新部署：生成两端配置并先检查
+### 新部署：三步上手
 
-以下 `init` 与 `--check` 需要包含这些功能的源码构建，已发布的 v1.0.1 不支持。
-将示例地址换成你的中继地址；无需 DNS 查询或连接远端即可生成：
+将示例 IP `203.0.113.10` 换成你的服务器公网 IP，也可以使用域名。
+以下 `init` 与 `--check` 适用于当前源码构建，历史 v1.0.1 不支持。
+
+**一、客户端生成配置（只执行一次）**
 
 ```bash
-./autocar init --server relay.example.com:8443 --out ./autocar-config
-./autocar server --config ./autocar-config/server/server.json --check
-./autocar client --config ./autocar-config/client/client.json --check
+./bin/autocar init --server 203.0.113.10:8443 --out ./autocar-config
 ```
 
-生成的 `server/` 包含服务端配置、独立的公开网站目录 `cover/`、证书、私钥和随机令牌；
-`client/` 只包含客户端配置、信任证书和相同令牌，不含私钥。
-通过可信通道把两份目录分别送到对应机器，保持权限
-并交给服务运行用户，再执行：
+**二、上传 server/，在服务端启动**
+
+通过 SSH/SCP 将完整的 `autocar-config/server/`（包括 `cover/`、证书、私钥和令牌）
+复制到服务端项目根目录，目录名保持为 `server/`。客户端保留本地 `client/`，
+服务端不要再执行 `init`。例如，在客户端上传时替换 SSH 用户和服务端项目路径：
 
 ```bash
-# 在中继机器上，路径换成实际 server/ 目录
-autocar server --config /path/to/server/server.json
-# 在客户端，路径换成实际 client/ 目录
-autocar doctor --config /path/to/client/client.json --target example.com:443
-autocar client --config /path/to/client/client.json
+scp -rp ./autocar-config/server user@203.0.113.10:/path/to/autocar/
+```
+
+在服务端项目根目录执行，并放行安全组和防火墙的 **TCP、UDP 8443**：
+
+```bash
+./bin/autocar server --config ./server/server.json
+```
+
+**三、在客户端启动**
+
+```bash
+./bin/autocar client --config ./autocar-config/client/client.json
+```
+
+浏览器或代理软件设置为 SOCKS5 `127.0.0.1:1080` 或 HTTP `127.0.0.1:8080`；
+启动客户端不会自动修改系统代理。两端均在前台运行，请保持终端打开；
+后台服务与自启动见 [部署指南](docs/DEPLOYMENT.md)。
+
+### 配置检查与注意事项
+
+启动前可在对应机器离线检查；服务端使用上传后的 `server/`：
+
+```bash
+# 服务端
+./bin/autocar server --config ./server/server.json --check
+# 客户端
+./bin/autocar client --config ./autocar-config/client/client.json --check
+```
+
+真实链路可在客户端检查：
+
+```bash
+./bin/autocar doctor --config ./autocar-config/client/client.json --target example.com:443
 ```
 
 `init` 默认生成 web/web-auto 的新部署；用 `--protocol native` 可生成原有的
@@ -130,25 +159,30 @@ native/auto 配置。它不安装服务、不改防火墙、不轮换现有凭�
 可指定 `--server-name`。服务端监听与 `--server` 相同的数字端口，仍须自行开放 TCP/UDP。
 Unix 目录权限为 `0700`、文件为 `0600`；Windows 需另行限制 ACL。
 不要分享或提交这些目录到 Git，自动生成的 `.gitignore` 只是防误操作。
+上传时保持权限，并确保服务运行用户可以读取配置与凭据；`client/` 不含服务端私钥。
 
 `--check` 只读取本地配置和凭据，不查询 DNS、不开监听端口、不连接中继或目标。
 它不能证明端口可绑定、网络可达或远端证书身份正确；真实链路仍用 `doctor` 检查。
 离线检查要求地址使用数字端口；正常启动的服务名端口用法保留。
 `check` 不能写入 JSON 配置，必须在命令行显式指定。
 
+源码构建的各选项型命令只接受命名参数，不接受额外的位置参数（包括 `--` 后的内容）。
+`token`、`cert`、`init` 遇到这类输入会先报错，不生成凭据或配置文件；
+正常参数、`-h/--help` 与既有配置文件覆盖规则保持不变。
+
 ### 手动配置
 
 也可分别生成独立令牌与含真实 SAN 的证书：
 
 ```bash
-./autocar token --out token
-./autocar cert --hosts relay.example.com,203.0.113.10 --cert server.crt --key server.key
+./bin/autocar token --out token
+./bin/autocar cert --hosts relay.example.com,203.0.113.10 --cert server.crt --key server.key
 ```
 
 服务端的 UDP 与 TCP 可以使用相同端口号；这里先使用非特权端口：
 
 ```bash
-./autocar server \
+./bin/autocar server \
   --listen :8443 \
   --tcp-listen :8443 \
   --cover-root ./site \
@@ -160,7 +194,7 @@ Unix 目录权限为 `0700`、文件为 `0600`；Windows 需另行限制 ACL。
 客户端：
 
 ```bash
-./autocar client \
+./bin/autocar client \
   --server relay.example.com:8443 \
   --ca server.crt \
   --token-file token
@@ -176,7 +210,7 @@ Unix 目录权限为 `0700`、文件为 `0600`；Windows 需另行限制 ACL。
 H3。`--cover-root` 和 `--cover-upstream` 必须且只能选一个：
 
 ```bash
-./autocar server \
+./bin/autocar server \
   --protocol web \
   --listen :8443 \
   --tcp-listen :8443 \
@@ -185,7 +219,7 @@ H3。`--cover-root` 和 `--cover-upstream` 必须且只能选一个：
   --key server.key \
   --token-file token
 
-./autocar client \
+./bin/autocar client \
   --server relay.example.com:8443 \
   --ca server.crt \
   --token-file token \
@@ -209,7 +243,7 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 在启动本地代理前，可用同一组隧道参数做一次真实端到端探测：
 
 ```bash
-./autocar doctor \
+./bin/autocar doctor \
   --server relay.example.com:8443 \
   --ca server.crt \
   --token-file token \
@@ -231,7 +265,7 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 不含此功能）。默认仍为 `--probe tcp-open`；UDP 探测不默认查询第三方解析器：
 
 ```bash
-./autocar doctor --config /path/to/client.json --transport h3 \
+./bin/autocar doctor --config /path/to/client.json --transport h3 \
   --probe udp-dns --target 192.0.2.53:53 --dns-name probe.example.test --json
 ```
 
@@ -278,10 +312,10 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 ```
 
 ```bash
-./autocar client --config /path/to/client.json
-./autocar doctor --config /path/to/client.json --target example.com:443 --json
+./bin/autocar client --config /path/to/client.json
+./bin/autocar doctor --config /path/to/client.json --target example.com:443 --json
 # 临时强制 HTTPS/H2 诊断，不修改配置文件
-./autocar doctor --config /path/to/client.json --transport h2 --target example.com:443
+./bin/autocar doctor --config /path/to/client.json --transport h2 --target example.com:443
 ```
 
 字段名对应命令行长选项，但不加 `--`；命令行同名选项优先。配置中的相对文件路径
@@ -292,7 +326,7 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 
 要让 `client` 和 `doctor` 共用同一个文件，只保存二者共有的隧道参数；
 `socks/http/https` 等客户端专属参数放在启动命令中。中继使用单独的
-[服务端模板](examples/server.json)：`./autocar server --config /path/to/server.json`。
+[服务端模板](examples/server.json)：`./bin/autocar server --config /path/to/server.json`。
 同时复制示例的独立 [cover 目录](examples/cover/index.html) 到服务端配置文件旁，
 或将 `cover-root` 改为你自己的公开网站目录。
 配置仅在进程启动时读取，修改后需重启；自动回退和恢复只影响新连接，
@@ -305,27 +339,27 @@ fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2`
 
 ```bash
 # Native 默认：温和探测带宽并根据 RTT/loss 收敛
-./autocar client [连接参数] --transport auto --pacing adaptive --pacing-profile balanced
+./bin/autocar client [连接参数] --transport auto --pacing adaptive --pacing-profile balanced
 
 # 共享链路更保守
-./autocar client [连接参数] --transport auto --pacing adaptive --pacing-profile conservative
+./bin/autocar client [连接参数] --transport auto --pacing adaptive --pacing-profile conservative
 
 # 不使用 AutoCAR 应用层 pacing；观察当前 quic-go/Reno 基线
-./autocar client [连接参数] --transport auto --pacing reno
+./bin/autocar client [连接参数] --transport auto --pacing reno
 ```
 
 只有测得真实容量时才使用 `fixed-rate`。该模式只在 QUIC 路径上协商；上传和下载
 按方向协商，服务端上限优先：
 
 ```bash
-./autocar server [服务端参数] \
+./bin/autocar server [服务端参数] \
   --protocol native \
   --pacing fixed-rate \
   --max-upload-mbps 80 \
   --max-download-mbps 250 \
   --allow-client-rates
 
-./autocar client [连接参数] \
+./bin/autocar client [连接参数] \
   --transport quic \
   --pacing fixed-rate \
   --upload-mbps 60 \
