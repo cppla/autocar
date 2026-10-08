@@ -7,7 +7,7 @@ collection before paying the cost of the preregistered corpus.
 
 The result is always **calibration / `insufficient_evidence`**. Two captures per
 product and cell cannot establish that AutoCAR is less distinguishable than
-the baseline. The control uses upstream quic-go v0.61.0 and is deliberately
+the baseline. The control uses upstream quic-go v0.63.0 and is deliberately
 recorded as **not a real browser**. A later claim-bearing campaign still needs
 the preregistered browser diversity, sample count, held-out evaluation, and
 statistical gates in `docs/STEALTH-BENCHMARK.md`.

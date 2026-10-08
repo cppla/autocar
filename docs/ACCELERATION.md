@@ -153,7 +153,7 @@ delay test matters at least as much as bulk throughput.
 ## `reno`
 
 `reno` bypasses AutoCAR's application-layer admission. It does not implement
-Reno itself; the native pinned upstream quic-go v0.61.0 transport selects Reno
+Reno itself; the native pinned upstream quic-go v0.63.0 transport selects Reno
 for its default sender. This mode therefore measures that actual upstream
 baseline and is useful
 for A/B tests or for operators who do not want an additional application pacing
