@@ -898,6 +898,7 @@ func runCoverServer(args []string) error {
 	keyFile := fs.String("key", "", "TLS private key")
 	originText := fs.String("origin", "", "fixed http(s) cover origin")
 	altSvcMaxAge := fs.Int("alt-svc-max-age", 0, "optional Alt-Svc ma value used by the compared server")
+	altSvcOnH3 := fs.Bool("alt-svc-on-h3", false, "also advertise Alt-Svc on HTTP/3 cover responses")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -940,14 +941,7 @@ func runCoverServer(args []string) error {
 		packet.Close()
 		return errors.New("--alt-svc-max-age cannot be negative")
 	}
-	altSvc := `h3=":` + port + `"`
-	if *altSvcMaxAge > 0 {
-		altSvc += "; ma=" + strconv.Itoa(*altSvcMaxAge)
-	}
-	tcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Alt-Svc", altSvc)
-		handler.ServeHTTP(w, r)
-	})
+	tcpHandler, h3Handler := coverServerHandlers(handler, port, *altSvcMaxAge, *altSvcOnH3)
 	tcpTLS := &tls.Config{
 		MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13,
 		Certificates: []tls.Certificate{certificate}, NextProtos: []string{"h2", "http/1.1"},
@@ -960,7 +954,7 @@ func runCoverServer(args []string) error {
 	}
 	h3TLS := tcpTLS.Clone()
 	h3TLS.NextProtos = []string{http3.NextProtoH3}
-	h3Server := &http3.Server{TLSConfig: h3TLS, Handler: handler}
+	h3Server := &http3.Server{TLSConfig: h3TLS, Handler: h3Handler}
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- tcpServer.Serve(tls.NewListener(tcpListener, tcpTLS)) }()
@@ -981,6 +975,22 @@ func runCoverServer(args []string) error {
 	_ = tcpServer.Close()
 	_ = tcpListener.Close()
 	return nil
+}
+
+func coverServerHandlers(handler http.Handler, port string, maxAge int, altSvcOnH3 bool) (http.Handler, http.Handler) {
+	altSvc := `h3=":` + port + `"`
+	if maxAge > 0 {
+		altSvc += "; ma=" + strconv.Itoa(maxAge)
+	}
+	tcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Alt-Svc", altSvc)
+		handler.ServeHTTP(w, r)
+	})
+	// Keep the default H3 origin policy unchanged for other control profiles.
+	if altSvcOnH3 {
+		return tcpHandler, tcpHandler
+	}
+	return tcpHandler, handler
 }
 
 func runEchoServer(args []string) error {

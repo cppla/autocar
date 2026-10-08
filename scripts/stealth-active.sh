@@ -335,7 +335,7 @@ wait_http http://"$target":9001/
 run_detached "$control" \
 	--user "$host_user" \
 	-v "$tmp:/run/stealth:ro" \
-	"$lab_image" cover-server --listen :8443 --cert /run/stealth/server.crt --key /run/stealth/server.key --origin http://"$origin":8080
+	"$lab_image" cover-server --listen :8443 --cert /run/stealth/server.crt --key /run/stealth/server.key --origin http://"$origin":8080 --alt-svc-on-h3
 run_detached "$hy_control" \
 	--user "$host_user" \
 	-v "$tmp:/run/stealth:ro" \
