@@ -35,7 +35,7 @@ flowchart LR
 | `internal/security` | TLS policy, secrets, remote resolution and SSRF/port/CIDR enforcement |
 | `internal/transport` | Small TCP and packet interfaces shared by frontends |
 
-The native transport uses upstream `github.com/quic-go/quic-go` v0.61.0. Web H3
+The native transport uses upstream `github.com/quic-go/quic-go` v0.63.0. Web H3
 uses the `github.com/apernet/quic-go` fork, pinned exactly to
 `v0.61.1-0.20260806010916-184d081eef3e`, because its client-only ChromeParrot
 profile controls the TLS ClientHello, QUIC transport parameters, connection IDs

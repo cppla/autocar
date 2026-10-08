@@ -512,12 +512,31 @@ func requestTrailerHTTPSExchange(t *testing.T, constructor string, protocol int)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	outboundClosed := make(chan struct{})
+	var outboundCloseOnce sync.Once
+	var outboundCloses atomic.Int64
+	observedTransport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		// Observe the body handed to the real transport. A shallow copy keeps
+		// the trailer bridge's destination map; Request.Clone would detach it.
+		out := *request
+		body := out.Body
+		out.Body = &requestTrailerUnitBody{
+			read: body.Read,
+			close: func() error {
+				err := body.Close()
+				outboundCloses.Add(1)
+				outboundCloseOnce.Do(func() { close(outboundClosed) })
+				return err
+			},
+		}
+		return transport.RoundTrip(&out)
+	})
 	var handler http.Handler
 	if constructor == "public_origin" {
 		public, _ := url.Parse("https://public.example")
-		handler, err = NewReverseProxyHandlerWithPublicOrigin(origin, public, transport)
+		handler, err = NewReverseProxyHandlerWithPublicOrigin(origin, public, observedTransport)
 	} else {
-		handler, err = NewReverseProxyHandler(origin, transport)
+		handler, err = NewReverseProxyHandler(origin, observedTransport)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -539,7 +558,7 @@ func requestTrailerHTTPSExchange(t *testing.T, constructor string, protocol int)
 	reader := strings.NewReader(payload)
 	sourceEOF := make(chan struct{})
 	var eofOnce sync.Once
-	var bodyCloses atomic.Int64
+	var inboundCloses atomic.Int64
 	request.Body = &requestTrailerUnitBody{
 		read: func(p []byte) (int, error) {
 			n, err := reader.Read(p)
@@ -556,10 +575,26 @@ func requestTrailerHTTPSExchange(t *testing.T, constructor string, protocol int)
 			}
 			return n, err
 		},
-		close: func() error { bodyCloses.Add(1); return nil },
+		close: func() error { inboundCloses.Add(1); return nil },
 	}
+	// This direct ServeHTTP fixture owns inbound cleanup, as an HTTP server
+	// would. ReverseProxy may shield that body from outbound Close calls.
+	var inboundCloseOnce sync.Once
+	closeInbound := func() {
+		inboundCloseOnce.Do(func() {
+			if err := request.Body.Close(); err != nil {
+				t.Errorf("owned inbound body close: %v", err)
+			}
+		})
+	}
+	t.Cleanup(closeInbound)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
+	// RoundTrip may close its request body asynchronously after returning.
+	if !requestTrailerWait(t, outboundClosed, "owned outbound transport body close") {
+		return
+	}
+	closeInbound()
 	var got observation
 	select {
 	case got = <-observed:
@@ -592,8 +627,8 @@ func requestTrailerHTTPSExchange(t *testing.T, constructor string, protocol int)
 	} else if got.trailer.Get("Forwarded") != "host=fictional.example" {
 		t.Error("the opt-in trailer forwarding policy affected the default constructor")
 	}
-	if requests.Load() != 1 || unexpected.Load() != 0 || verified.Load() != 1 || badDials.Load() != 0 || bodyCloses.Load() == 0 {
-		t.Errorf("owned lifecycle controls: requests=%d unexpected=%d verified=%d badDials=%d bodyCloses=%d", requests.Load(), unexpected.Load(), verified.Load(), badDials.Load(), bodyCloses.Load())
+	if requests.Load() != 1 || unexpected.Load() != 0 || verified.Load() != 1 || badDials.Load() != 0 || outboundCloses.Load() == 0 || inboundCloses.Load() == 0 {
+		t.Errorf("owned lifecycle controls: requests=%d unexpected=%d verified=%d badDials=%d outboundCloses=%d inboundCloses=%d", requests.Load(), unexpected.Load(), verified.Load(), badDials.Load(), outboundCloses.Load(), inboundCloses.Load())
 	}
 	if !reflect.DeepEqual(request.Header, beforeHeader) || !reflect.DeepEqual(initial, beforeInitial) ||
 		request.ContentLength != int64(len(payload)) || request.Trailer.Get("Authorization") != "fictional-trailer" || request.Trailer.Get("X-Hop") != "fictional-hop" {

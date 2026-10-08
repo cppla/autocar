@@ -172,9 +172,9 @@ def prepare(args: argparse.Namespace) -> None:
         "products": {
             "cover": {"variants": [{
                 "name": "quic-go-standard-h3-control",
-                "client_implementation": "quic-go v0.61.0 standard H3 control (not a browser)",
-                "server_implementation": "quic-go v0.61.0 HTTP/3 fixture",
-                "implementation_version": "v0.61.0-calibration-control",
+                "client_implementation": "quic-go v0.63.0 standard H3 control (not a browser)",
+                "server_implementation": "quic-go v0.63.0 HTTP/3 fixture",
+                "implementation_version": "v0.63.0-calibration-control",
                 "real_browser": False,
                 "runner_image": args.runner_image,
                 "server_container": args.control_container,
