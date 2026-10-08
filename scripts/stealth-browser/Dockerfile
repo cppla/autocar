@@ -7,6 +7,8 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
+ARG DEBIAN_SNAPSHOT
+ARG DEBIAN_SECURITY_SNAPSHOT
 ARG BROWSER_FAMILY
 ARG BROWSER_PACKAGE_VERSION
 ARG WEBDRIVER_PACKAGE_VERSION
@@ -18,8 +20,11 @@ LABEL org.opencontainers.image.title="AutoCAR real-browser workload runner" \
       org.opencontainers.image.licenses="MIT" \
       com.cppla.autocar.browser-family="${BROWSER_FAMILY}" \
       com.cppla.autocar.browser-package-version="${BROWSER_PACKAGE_VERSION}" \
-      com.cppla.autocar.webdriver-package-version="${WEBDRIVER_PACKAGE_VERSION}"
+      com.cppla.autocar.webdriver-package-version="${WEBDRIVER_PACKAGE_VERSION}" \
+      com.cppla.autocar.debian-snapshot="${DEBIAN_SNAPSHOT}" \
+      com.cppla.autocar.debian-security-snapshot="${DEBIAN_SECURITY_SNAPSHOT}"
 
+COPY scripts/stealth-browser/apt_sources.sh /campaign/apt_sources.sh
 COPY scripts/stealth-browser/run_cover.py /campaign/run_cover.py
 COPY scripts/stealth-browser/write_lock.py /campaign/write_lock.py
 
@@ -28,6 +33,9 @@ RUN set -eu; \
     case "${BROWSER_FAMILY}" in chromium|firefox-esr) ;; *) echo 'BROWSER_FAMILY must be chromium or firefox-esr' >&2; exit 2 ;; esac; \
     printf '%s' "${BROWSER_PACKAGE_VERSION}" | grep -Eq '^[A-Za-z0-9.+:~_-]+$' || { echo 'BROWSER_PACKAGE_VERSION must be exact' >&2; exit 2; }; \
     printf '%s' "${WEBDRIVER_PACKAGE_VERSION}" | grep -Eq '^[A-Za-z0-9.+:~_-]+$' || { echo 'WEBDRIVER_PACKAGE_VERSION must be exact' >&2; exit 2; }; \
+    /bin/sh /campaign/apt_sources.sh "${DEBIAN_SNAPSHOT}" "${DEBIAN_SECURITY_SNAPSHOT}" > /tmp/frozen.sources; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; \
+    mv /tmp/frozen.sources /etc/apt/sources.list.d/debian.sources; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates python3; \
     if [ "${BROWSER_FAMILY}" = chromium ]; then \
@@ -78,7 +86,7 @@ RUN set -eu; \
             --output /campaign/browser-lock.json >/dev/null; \
     fi; \
     apt-get clean; \
-    rm -rf /var/lib/apt/lists/* /campaign/write_lock.py
+    rm -rf /var/lib/apt/lists/* /campaign/write_lock.py /campaign/apt_sources.sh
 
 ENV HOME=/tmp \
     STEALTH_BROWSER_LOCK=/campaign/browser-lock.json \
