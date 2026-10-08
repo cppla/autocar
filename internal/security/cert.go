@@ -119,13 +119,14 @@ func GenerateSelfSignedCertificate(opts CertificateOptions) (certPEM, keyPEM []b
 
 // WriteSelfSignedCertificate generates and atomically writes a certificate and
 // private key. The key is always installed with mode 0600, even when replacing
-// a pre-existing file; the certificate is installed with mode 0644.
+// a pre-existing file; the certificate is installed with mode 0644. Destinations
+// in the same directory must not have equal or case-only-different filenames.
 func WriteSelfSignedCertificate(certFile, keyFile string, opts CertificateOptions) error {
 	if strings.TrimSpace(certFile) == "" || strings.TrimSpace(keyFile) == "" {
 		return errors.New("security: certificate and key paths are required")
 	}
-	if filepath.Clean(certFile) == filepath.Clean(keyFile) {
-		return errors.New("security: certificate and key paths must be different")
+	if err := validateCertificateDestinations(certFile, keyFile); err != nil {
+		return err
 	}
 
 	certPEM, keyPEM, err := GenerateSelfSignedCertificate(opts)
@@ -155,6 +156,41 @@ func WriteSelfSignedCertificate(certFile, keyFile string, opts CertificateOption
 	}
 	if err := os.Rename(certTemp, certFile); err != nil {
 		return fmt.Errorf("security: install certificate: %w", err)
+	}
+	return nil
+}
+
+func validateCertificateDestinations(certFile, keyFile string) error {
+	// Compare the directories the filesystem actually resolves, not just path
+	// spellings: relative paths and symlinked parents can name the same entry.
+	// Split preserves symlink/.. semantics that cleaning the path could change.
+	certDir, certName := filepath.Split(certFile)
+	keyDir, keyName := filepath.Split(keyFile)
+	if certDir == "" {
+		certDir = "."
+	}
+	if keyDir == "" {
+		keyDir = "."
+	}
+	certParent, err := os.Stat(certDir)
+	if err != nil {
+		return fmt.Errorf("security: certificate directory: %w", err)
+	}
+	if !certParent.IsDir() {
+		return errors.New("security: certificate parent must be a directory")
+	}
+	keyParent, err := os.Stat(keyDir)
+	if err != nil {
+		return fmt.Errorf("security: private key directory: %w", err)
+	}
+	if !keyParent.IsDir() {
+		return errors.New("security: private key parent must be a directory")
+	}
+	// Conservatively disallow case-only names in one directory, including on
+	// case-sensitive hosts, so a pair is safe on case-insensitive filesystems.
+	// Do not follow the final component: Rename replaces that directory entry.
+	if os.SameFile(certParent, keyParent) && strings.EqualFold(certName, keyName) {
+		return errors.New("security: certificate and key paths must be different")
 	}
 	return nil
 }

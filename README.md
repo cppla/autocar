@@ -179,6 +179,9 @@ Unix 目录权限为 `0700`、文件为 `0600`；Windows 需另行限制 ACL。
 ./bin/autocar cert --hosts relay.example.com,203.0.113.10 --cert server.crt --key server.key
 ```
 
+证书和私钥必须使用不同输出文件；同一目录中的文件名也不能仅大小写不同。
+相对/绝对路径或父目录符号链接指向同一输出文件时，会在写入前拒绝。
+
 服务端的 UDP 与 TCP 可以使用相同端口号；这里先使用非特权端口：
 
 ```bash

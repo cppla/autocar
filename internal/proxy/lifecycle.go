@@ -103,8 +103,9 @@ type trackedConn struct {
 // waiting for upstream setup need not be reading the socket; net/http's reader
 // can also stop after caching a pipelined byte. Socket closure alone therefore
 // need not cancel that work. The frontend calls this once per accepted
-// connection, from HTTP ConnContext or SOCKS TCP setup. Registration and Close
-// may race during shutdown; either ordering must return a canceled context.
+// connection, from HTTP ConnContext or before SOCKS negotiation. Registration
+// and Close may race during shutdown; either ordering must return a canceled
+// context.
 func (c *trackedConn) connectionContext(parent context.Context) context.Context {
 	ctx, cancel := context.WithCancel(parent)
 	c.closeMu.Lock()

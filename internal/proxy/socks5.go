@@ -97,11 +97,18 @@ func (s *SOCKS5Server) Shutdown(ctx context.Context) error {
 
 func (s *SOCKS5Server) serveConn(client net.Conn) {
 	defer client.Close()
+	owner := context.Background()
+	if tracked, ok := client.(*trackedConn); ok {
+		// Own authentication, setup, and the established TCP relay from the
+		// start. Closing the socket must also interrupt work that is not doing
+		// socket I/O, without coupling it to a stage-specific deadline.
+		owner = tracked.connectionContext(owner)
+	}
 	if s.cfg.handshakeTimeout > 0 {
 		_ = client.SetDeadline(time.Now().Add(s.cfg.handshakeTimeout))
 	}
 
-	if err := s.negotiate(client); err != nil {
+	if err := s.negotiate(owner, client); err != nil {
 		return
 	}
 	request, err := readSOCKSRequest(client)
@@ -132,17 +139,10 @@ func (s *SOCKS5Server) serveConn(client net.Conn) {
 		s.serveUDPAssociate(client, request)
 		return
 	}
-	s.serveConnect(client, request)
+	s.serveConnect(owner, client, request)
 }
 
-func (s *SOCKS5Server) serveConnect(client net.Conn, request socksRequest) {
-	owner := context.Background()
-	if tracked, ok := client.(*trackedConn); ok {
-		// Bind this caller's setup wait and established relay to full socket
-		// close, not to a half-close or the independent setup deadline. Do not
-		// add a payload-consuming reader or close the shared upstream dialer.
-		owner = tracked.connectionContext(owner)
-	}
+func (s *SOCKS5Server) serveConnect(owner context.Context, client net.Conn, request socksRequest) {
 	ctx := owner
 	var cancel context.CancelFunc
 	if s.cfg.dialTimeout > 0 {
@@ -623,7 +623,7 @@ wait:
 	}
 }
 
-func (s *SOCKS5Server) negotiate(conn net.Conn) error {
+func (s *SOCKS5Server) negotiate(owner context.Context, conn net.Conn) error {
 	methods, err := readSOCKSGreeting(conn)
 	if err != nil {
 		return err
@@ -647,7 +647,7 @@ func (s *SOCKS5Server) negotiate(conn net.Conn) error {
 		_ = writeFull(conn, []byte{userPasswordVersion, 0x01})
 		return err
 	}
-	ctx := context.Background()
+	ctx := owner
 	if s.cfg.handshakeTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.cfg.handshakeTimeout)
