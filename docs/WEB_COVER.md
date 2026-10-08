@@ -611,6 +611,22 @@ Chrome-facing CDN/server implementation, and it does not make H3 SETTINGS,
 CONNECT/authentication traffic, packet sizes, connection reuse or timing match
 Chrome. The `native` rollback profile disables this client image.
 
+The fixed H3 Chrome profile also disables TLS session resumption inside the
+pinned fork. Supplying `tls.Config.ClientSessionCache` does not change that:
+each replacement QUIC connection performs a full TLS handshake. The H3 `native`
+profile can resume TLS when a caller-provided cache has a valid ticket and the
+server permits it; a nil cache or `SessionTicketsDisabled` retains full
+handshakes. Neither profile enables 0-RTT. Reusing an already-open QUIC
+connection for another stream is connection reuse, not TLS resumption. Every
+replacement physical connection still starts fresh proxy authentication,
+including when its TLS session resumes.
+
+The H3 loopback reconnect regression checks these distinct behaviors with the
+same client and server, an actual received-ticket signal, and both peers' TLS
+state. It does not measure browser similarity. The real-browser calibration
+starts a fresh browser profile for each sample and does not include a controlled
+warm reconnect, so its results cannot establish a resumption advantage or deficit.
+
 The H2 client separately uses the fixed `chrome-133` uTLS ClientHello profile.
 That describes only its TLS ClientHello; H2 settings, header order, flow control,
 connection reuse, payload sizes and timing retain their implementation behavior.
