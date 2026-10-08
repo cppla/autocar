@@ -36,7 +36,7 @@ AutoCAR 的身份验证、`autocar/2` 协议、TCP/UDP framing、速率协商、
 熔断回退和资源边界均由 AutoCAR 实现；自有协议不提供第三方代理协议兼容模式。
 Native 模式继续使用上游 `github.com/quic-go/quic-go`；web H3 则透明依赖
 `github.com/apernet/quic-go` fork，并精确锁定到
-`v0.61.1-0.20260806010916-184d081eef3e`，用于客户端 Chrome QUIC 握手画像。
+`v0.63.1-0.20261004180939-a10df75c260c`，用于客户端 Chrome QUIC 握手画像。
 项目不依赖外部代理应用模块，依赖边界由自动检查验证。
 
 ## 设计目标与实现边界
@@ -44,7 +44,7 @@ Native 模式继续使用上游 `github.com/quic-go/quic-go`；web H3 则透明�
 | 公开设计目标 | AutoCAR 的独立实现 | 不作出的承诺 |
 | --- | --- | --- |
 | 长连接、多流和标准 DATAGRAM | native 模式使用 TLS 1.3 QUIC 热连接、自有 `ACDG` UDP 分片/重组和真实 TCP/TLS fallback | 不提供第三方代理协议兼容模式或 Fast Open |
-| 正常网站兼容与 UDP 受阻时的连续服务 | web 模式在同一数字端口提供 H1/H2/TCP 与 H3/UDP cover；web H3 默认使用固定 `chrome-2026-08` 客户端握手画像与零长度源 CID；`web-auto` 在 H3 传输失败后使用标准 H2/TCP | 固定画像只覆盖客户端握手层；正常 HTTP 和共享实现都不能单独证明流量不可识别 |
+| 正常网站兼容与 UDP 受阻时的连续服务 | web 模式在同一数字端口提供 H1/H2/TCP 与 H3/UDP cover；web H3 默认使用固定 `chrome-2026-10` 客户端握手画像与零长度源 CID；`web-auto` 在 H3 传输失败后使用标准 H2/TCP | 固定画像只覆盖客户端握手层；正常 HTTP 和握手画像都不能单独证明流量不可识别 |
 | BBR 的带宽/RTT 模型思想 | `adaptive` 在应用发送层观察 quic-go 的累计发送、丢失、min RTT 和 smoothed RTT，以有界的近似 delivery-rate 窗口和 pacing gain 调节写入 | 不是 Linux BBR，也不替换 quic-go 的拥塞窗口、ACK、重传或底层 Reno 控制器 |
 | 有损链路上的持续传输 | 双端独立 sender pacing、热连接状态复用、有界流式回压、QUIC 标准丢失恢复 | 不复制任何专有预测算法，不做内核透明代理、FEC、抢先重传或包复制 |
 | 已知容量链路的固定发送 | 双方通过 AutoCAR v2 协商显式上限，使用有界 token bucket | 不是底层拥塞控制器或不可绕过的流量 policer，也不保证对其他流公平 |
@@ -227,7 +227,7 @@ H3。`--cover-root` 和 `--cover-upstream` 必须且只能选一个：
   --ca server.crt \
   --token-file token \
   --transport web-auto \
-  --h3-fingerprint chrome-2026-08
+  --h3-fingerprint chrome-2026-10
 ```
 
 也可用 `--cover-upstream https://www.example.com` 反向代理一个固定、已获授权的
@@ -237,11 +237,17 @@ CONNECT-UDP，`h2` 不支持 UDP。Web 模式要求 TCP/UDP 使用相同数字�
 `--disable-tcp-fallback`，也不能在两端配置 mTLS。详细能力、边界和安全的验证方法见
 [Web-cover 模式](docs/WEB_COVER.md)。
 
-`--h3-fingerprint=chrome-2026-08` 是默认值，固定使用上述依赖版本提供的完整客户端
+`--h3-fingerprint=chrome-2026-10` 是默认值，固定使用上述依赖版本提供的完整客户端
 QUIC/TLS 握手画像，并固定为与画像中版本参数一致的 QUIC v1。
 `--h3-fingerprint=native` 是互操作与故障回滚选项：它关闭该
 fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2` 或第三方代理
 协议，也不会把依赖替换为 native 模式使用的上游模块。
+
+升级前请检查客户端配置：显式的 `chrome-2026-08` 已被拒绝，不会静默映射到新画像；
+请有意识地改为 `chrome-2026-10` 或 `native`。未填写 `h3-fingerprint` 的旧配置会采用
+新默认值，因此也会改变客户端握手。新生成的 web `init` 客户端配置会明确固定
+`chrome-2026-10`；仅运行服务端不需要迁移客户端画像选项。此更新不启用 H3 Chrome
+画像的 TLS 会话恢复或 0-RTT，也不构成隐蔽性保证；旧采集结果仍只属于其冻结版本。
 
 在启动本地代理前，可用同一组隧道参数做一次真实端到端探测：
 
@@ -442,7 +448,8 @@ iptables 下的 UDP `sendmsg` 直接返回 `EPERM`。有损阶段只硬验证协
   `github.com/apernet/quic-go` 版本，拒绝已知外部代理应用模块、local replace 和
   vendored/copied 外部源码目录，并扫描已跟踪及未跟踪的 Go 源；
 - `docker-integration.sh` 在隔离容器网络中验证 QUIC、TLS、自动回退、`doctor`、错误令牌拒绝和非 root 只读运行；
-- `govulncheck.sh` 安装固定版本的扫描器并检查可达漏洞；
+- `govulncheck.sh` 安装固定版本的扫描器并检查可达漏洞；上游 quic-go 公告不会自动
+  覆盖改名 fork，仍需逐项核对其补丁，详见 [依赖安全边界](SECURITY.md#dependency-boundary)；
 - `netem-integration.sh` 创建 Linux network namespace、延迟/丢包链路并保存诊断工件。
 
 更多文档：[Web-cover 模式](docs/WEB_COVER.md)、[隔离小规模 pilot](docs/STEALTH-PILOT.md)、

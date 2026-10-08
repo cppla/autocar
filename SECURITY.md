@@ -38,12 +38,14 @@ use of QUIC/TLS. Web mode serves a real configured H1/H2/H3 origin and routes
 unauthenticated requests through that cover, but normal HTTP semantics do not
 make all observable behavior identical to a browser. The H2 client uses a fixed
 Chrome 133 uTLS ClientHello reference; that is not a claim about the complete
-TLS/H2 fingerprint. Web H3 defaults to the fixed `chrome-2026-08` client
+TLS/H2 fingerprint. Web H3 defaults to the fixed `chrome-2026-10` client
 handshake profile from the exactly pinned `github.com/apernet/quic-go` fork and
 uses a zero-length source CID. That client-only profile does not reproduce the
-relay, H3 SETTINGS, CONNECT traffic, packet sizes, reuse, or timing. Sharing the
-implementation with a comparator is not proof of a classification advantage.
-AutoCAR makes no undetectability guarantee.
+relay, H3 SETTINGS, CONNECT traffic, packet sizes, reuse, or timing. This profile
+still disables TLS session resumption: a replacement connection performs a full
+handshake even with a configured session cache. Neither the dependency update
+nor the profile is proof of a classification advantage. AutoCAR makes no
+undetectability guarantee.
 
 The relay sees destination metadata and any destination protocol that lacks its
 own encryption. A client holding the shared token can distinguish authenticated
@@ -240,7 +242,7 @@ parties.
 
 Native AutoCAR builds on official upstream quic-go. Web H3 uses
 `github.com/apernet/quic-go` pinned exactly to
-`v0.61.1-0.20260806010916-184d081eef3e`; H2 uses x/net HTTP/2 and uTLS for its
+`v0.63.1-0.20261004180939-a10df75c260c`; H2 uses x/net HTTP/2 and uTLS for its
 fixed ClientHello reference. A targeted CI boundary allows only that exact web
 QUIC fork version, rejects the known external proxy application module, local
 replacements, and copied/vendored external-source directories, and scans tracked
@@ -249,3 +251,16 @@ That regression check is not a universal provenance or license detector. CI also
 runs tests, race detection, vet, CodeQL, a reachable vulnerability scan and
 privileged namespace integration tests. These checks reduce risk but are not a
 formal audit.
+
+`govulncheck` matches Go vulnerability records by module and package path. An
+advisory for `github.com/quic-go/quic-go` does not automatically cover the renamed
+`github.com/apernet/quic-go` fork; also scanning the official module does not
+close that gap. Upstream advisories need a separate applicability and patch
+review against the exact pinned fork. A clean scan is not proof that the fork
+has no vulnerabilities.
+
+The current client profile is versioned as `chrome-2026-10`; the retired
+`chrome-2026-08` name is rejected, not aliased. Existing client configurations
+that omit the profile select the new default on upgrade. Review that handshake
+change before deployment; new web `init` client files pin the profile explicitly.
+Server-only deployments have no client-profile setting to migrate.

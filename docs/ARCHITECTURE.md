@@ -37,7 +37,7 @@ flowchart LR
 
 The native transport uses upstream `github.com/quic-go/quic-go` v0.63.0. Web H3
 uses the `github.com/apernet/quic-go` fork, pinned exactly to
-`v0.61.1-0.20260806010916-184d081eef3e`, because its client-only ChromeParrot
+`v0.63.1-0.20261004180939-a10df75c260c`, because its client-only ChromeParrot
 profile controls the TLS ClientHello, QUIC transport parameters, connection IDs
 and Initial packetization as one coherent handshake. AutoCAR explicitly supplies
 a zero-length client source connection ID for that profile.
@@ -197,7 +197,7 @@ TLS 1.3. The handler rejects TLS 1.2 from the tunnel path before ticket
 verification, strips any credential, and delegates the request to the cover.
 H3 remains TLS 1.3-only.
 
-The default web H3 client profile is the immutable `chrome-2026-08` profile. It
+The default web H3 client profile is the immutable `chrome-2026-10` profile. It
 enables the pinned fork's full client handshake image and a zero-length source
 CID, and locks the outer packet version to QUIC v1 so it agrees with the fixed
 version-information transport parameter. `--h3-fingerprint=native` disables ChromeParrot within that same web-H3
@@ -206,6 +206,14 @@ fork for interoperability and rollback; it does not select the native
 QUIC/H3 server, and H3 SETTINGS, CONNECT requests, application traffic and timing
 are outside the handshake profile. H2 independently uses a fixed Chrome 133
 ClientHello but retains the Go HTTP/2 stack.
+
+This version replaces, rather than aliases, the retired `chrome-2026-08` name.
+Explicit old names fail validation; omitted client profiles use the new default.
+New web `init` client configs pin the current name. Server-only deployments do
+not configure a client profile. The Chrome profile still does not resume TLS;
+new physical connections complete a full handshake and fresh proxy authentication,
+with 0-RTT disabled. Historical captures remain tied to their original dependency
+and profile and do not validate this new handshake image.
 
 ## Native UDP association
 

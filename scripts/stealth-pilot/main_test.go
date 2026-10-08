@@ -260,6 +260,27 @@ func TestProxyKeepAliveDoerDoesNotMutateCallerRequest(t *testing.T) {
 	}
 }
 
+func TestAutoCARClientCommandPinsCurrentH3Profile(t *testing.T) {
+	want := []string{
+		"client", "--server", "10.242.90.20:8443", "--transport", "h3",
+		"--h3-fingerprint", "chrome-2026-10", "--server-name", "cover.test",
+		"--ca", "/pilot/server.crt", "--token-file", "/pilot/token", "--socks", "",
+		"--http", "127.0.0.1:18080", "--dial-timeout", "4s", "--open-timeout", "12s",
+		"--idle-timeout", "20s", "--max-connections", "128",
+	}
+	got := autocarClientCommandArgs(
+		"10.242.90.20:8443", "cover.test", "/pilot/server.crt", "/pilot/token", "127.0.0.1:18080",
+	)
+	if len(got) != len(want) {
+		t.Fatalf("AutoCAR client arguments = %q, want %q", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("AutoCAR client arguments = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestHysteriaClientCommandDisablesUpdateCheck(t *testing.T) {
 	want := []string{"client", "--disable-update-check", "-c", "/pilot/hysteria-client.yaml"}
 	got := hysteriaClientCommandArgs("/pilot/hysteria-client.yaml")

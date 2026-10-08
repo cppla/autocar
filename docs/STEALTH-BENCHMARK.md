@@ -82,13 +82,17 @@ documents reverse-proxy masquerading and `listenHTTPS`; its
 [client configuration](https://v2.hysteria.network/docs/advanced/Full-Client-Config/)
 documents that Chrome QUIC parroting is enabled by default.
 
-AutoCAR's default `chrome-2026-08` web-H3 profile deliberately uses the same
-external QUIC fork revision, pinned as
-`github.com/apernet/quic-go v0.61.1-0.20260806010916-184d081eef3e`, and adds a
-zero-length client source CID. This shared implementation is part of the test
-provenance, not evidence that AutoCAR is baseline-wire-compatible or already
-less distinguishable. Both effective configurations and binaries remain pinned
-and hashed independently.
+The earlier `chrome-2026-08` AutoCAR web-H3 profile used the same external QUIC
+fork revision as the frozen baseline,
+`github.com/apernet/quic-go v0.61.1-0.20260806010916-184d081eef3e`, with a
+zero-length client source CID. That is historical provenance, not a statement
+about the current implementation. New AutoCAR captures use `chrome-2026-10`
+and `github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c`; the
+baseline remains unchanged. Both effective configurations and binaries must
+still be pinned and hashed independently. Preserve frozen preregistrations and
+results as recorded; do not relabel old captures or transfer their conclusions
+to the new profile. Neither revision sharing nor upgrading proves wire
+compatibility or a passive-identification advantage.
 
 The baseline's `Gecko` mode is also exercised as a healthy tunnel by the Docker
 run. It is recorded separately because the source documentation states that
@@ -471,8 +475,9 @@ current for the exact release commit:
 
 The pinned ChromeParrot profile addresses known stock ClientHello, client
 transport-parameter, CID and Initial-packetization differences, but it is a
-client-only handshake profile shared with the comparator. Passing a functional
-H3 test—or merely enabling that shared implementation—is not evidence of an
-end-to-end classification advantage. Until the passive gate passes with fresh
+client-only handshake profile. The current revision differs from the frozen
+comparison baseline. Passing a functional H3 test—or merely enabling a maintained
+handshake implementation—is not evidence of an end-to-end classification
+advantage. Until the passive gate passes with fresh
 captures, documentation must not claim that AutoCAR is undetectable or
 universally superior.

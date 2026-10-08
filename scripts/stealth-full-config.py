@@ -276,7 +276,7 @@ def generate(args: argparse.Namespace) -> None:
         "implementation_version": args.autocar_version,
         "binary_sha256": sha256(files["autocar_binary"]),
         "transport": "h3",
-        "h3_fingerprint": "chrome-2026-08",
+        "h3_fingerprint": "chrome-2026-10",
         "relay": f"{endpoints['autocar']}:8443",
         "origin": f"http://{endpoints['origin']}:8080",
         "server_name": "cover.test",
@@ -343,9 +343,9 @@ def generate(args: argparse.Namespace) -> None:
                 ),
             ]},
             "autocar": {"variants": [{
-                "name": "autocar-v101-web-h3",
-                "client_implementation": "AutoCAR v1.0.1 WebH3Client",
-                "server_implementation": "AutoCAR v1.0.1 web H3 server",
+                "name": "autocar-chrome-2026-10-h3",
+                "client_implementation": "AutoCAR worktree WebH3Client (chrome-2026-10)",
+                "server_implementation": "AutoCAR worktree web H3 server",
                 "implementation_version": args.autocar_version,
                 "real_browser": False,
                 "runner_image": images["runner_image"],
@@ -1848,6 +1848,16 @@ def self_test() -> None:
         finally:
             globals()["verify_numeric_sans"] = original
         config = read_json(inputs / "campaign.json")
+        effective = read_json(inputs / "autocar-effective.json")
+        if effective["h3_fingerprint"] != "chrome-2026-10":
+            fail("self-test found an incorrect AutoCAR H3 profile")
+        autocar = config["products"]["autocar"]["variants"][0]
+        if (
+            autocar["name"] != "autocar-chrome-2026-10-h3"
+            or autocar["client_implementation"] != "AutoCAR worktree WebH3Client (chrome-2026-10)"
+            or autocar["implementation_version"] != args.autocar_version
+        ):
+            fail("self-test found stale AutoCAR capture labels")
         campaign_module = runpy.run_path(str(Path(__file__).with_name("stealth-campaign.py")))
         campaign_module["validate_config"](config, inputs)
         if set(config["products"]) != set(PRODUCTS):

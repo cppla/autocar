@@ -22,6 +22,7 @@ import (
 
 	"github.com/cppla/autocar/internal/config"
 	"github.com/cppla/autocar/internal/security"
+	"github.com/cppla/autocar/internal/tunnel"
 )
 
 func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
@@ -127,6 +128,17 @@ func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
 			}
 			if tf.mode != test.transport || tf.systemRoots || tf.server != test.server {
 				t.Fatal("generated client changed transport, server or trust defaults")
+			}
+			clientOptions, err := readCommandConfig(filepath.Join(dir, "client", "client.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wantProtocol == "web" {
+				if clientOptions["h3-fingerprint"] != string(tunnel.H3FingerprintChrome202610) || tf.h3Fingerprint != h3FingerprintFlag(tunnel.H3FingerprintChrome202610) {
+					t.Fatal("web bundle must explicitly pin the current H3 fingerprint")
+				}
+			} else if _, ok := clientOptions["h3-fingerprint"]; ok {
+				t.Fatal("native bundle unexpectedly contains an H3 fingerprint option")
 			}
 			if err := cert.VerifyHostname(tf.serverName); err != nil {
 				t.Fatalf("certificate does not match generated client server name: %v", err)

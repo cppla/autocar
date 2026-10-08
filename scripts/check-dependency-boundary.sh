@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 readonly ALLOWED_WEB_QUIC_MODULE='github.com/apernet/quic-go'
-readonly ALLOWED_WEB_QUIC_VERSION='v0.61.1-0.20260806010916-184d081eef3e'
+readonly ALLOWED_WEB_QUIC_VERSION='v0.63.1-0.20261004180939-a10df75c260c'
 readonly FORBIDDEN_HYSTERIA_PATTERN='github\.com/apernet/hysteria(/|[[:space:]"`]|$)'
 readonly FORBIDDEN_HYSTERIA_GO_PATTERN='["`]github\.com/apernet/hysteria(/[^"`[:space:]]*)?["`]'
 status=0

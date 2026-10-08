@@ -34,7 +34,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## `github.com/apernet/quic-go` `v0.61.1-0.20260806010916-184d081eef3e`
+## `github.com/apernet/quic-go` `v0.63.1-0.20261004180939-a10df75c260c`
 
 ### `LICENSE`
 

@@ -3,7 +3,7 @@ module github.com/cppla/autocar
 go 1.26.8
 
 require (
-	github.com/apernet/quic-go v0.61.1-0.20260806010916-184d081eef3e
+	github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c
 	github.com/quic-go/quic-go v0.63.0
 	github.com/refraction-networking/utls v1.8.2
 	golang.org/x/net v0.59.0

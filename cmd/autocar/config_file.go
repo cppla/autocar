@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"time"
+
+	"github.com/cppla/autocar/internal/tunnel"
 )
 
 const maxCommandConfigSize = 64 << 10
@@ -59,6 +61,11 @@ func parseFlagsWithConfig(fs *flag.FlagSet, args []string) error {
 		// Validate even overridden entries so stale/invalid config never goes
 		// unnoticed. Do not include a possibly sensitive value in diagnostics.
 		if err := fs.Set(name, value); err != nil {
+			if errors.Is(err, tunnel.ErrH3FingerprintProfileRetired) {
+				// This sentinel contains only fixed profile names and migration
+				// instructions; arbitrary option values remain redacted below.
+				return tunnel.ErrH3FingerprintProfileRetired
+			}
 			return fmt.Errorf("invalid config option %q; see command help for its type and format", name)
 		}
 		if cliValue, ok := explicit[name]; ok {

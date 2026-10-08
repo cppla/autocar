@@ -16,6 +16,7 @@ import (
 	"github.com/cppla/autocar/internal/accel"
 	"github.com/cppla/autocar/internal/security"
 	"github.com/cppla/autocar/internal/transport"
+	"github.com/cppla/autocar/internal/tunnel"
 )
 
 func TestValidateServerProtocolOptions(t *testing.T) {
@@ -155,7 +156,7 @@ func TestTunnelHelpListsWebTransports(t *testing.T) {
 			t.Errorf("tunnel help omitted %q: %s", mode, output.String())
 		}
 	}
-	if !strings.Contains(output.String(), "h3-fingerprint") || !strings.Contains(output.String(), "chrome-2026-08") {
+	if flags.h3Fingerprint != h3FingerprintFlag(tunnel.H3FingerprintChrome202610) || !strings.Contains(output.String(), "h3-fingerprint") || !strings.Contains(output.String(), "chrome-2026-10") {
 		t.Errorf("tunnel help omitted versioned H3 fingerprint profile: %s", output.String())
 	}
 }
