@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Validate the selected toolchain; do not silently download a newer compiler.
+  GOTOOLCHAIN: local
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -20,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ['1.26.8', '1.27.x']
+        go: ['1.27.1', '1.27.x']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -60,26 +64,26 @@ jobs:
           if-no-files-found: error
 
   macos-test:
-    name: macOS test (Go 1.26.8)
+    name: macOS test (Go 1.27.1)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.26.8
+          go-version: 1.27.1
           cache: true
       - name: Test
         run: go test -shuffle=on -count=1 ./...
 
   windows-udp-test:
-    name: Windows UDP continuity (Go 1.26.8)
+    name: Windows UDP continuity (Go 1.27.1)
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.26.8
+          go-version: 1.27.1
           cache: true
       - name: Exercise native UDP continuity and platform bind errors
         shell: pwsh
@@ -151,10 +155,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.26.8
+          go-version: 1.27.1
           cache: true
       - name: Run govulncheck
         run: ./scripts/govulncheck.sh
+      - name: Query original uTLS upstream advisories
+        if: always()
+        run: |
+          ./scripts/govulncheck.sh --upstream-utls > "$RUNNER_TEMP/utls-upstream-advisories.json"
+          ./scripts/check-upstream-advisories.sh "$RUNNER_TEMP/utls-upstream-advisories.json"
+      - name: Preserve original uTLS advisory query
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: utls-upstream-advisories
+          path: ${{ runner.temp }}/utls-upstream-advisories.json
+          if-no-files-found: error
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}

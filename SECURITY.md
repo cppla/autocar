@@ -244,8 +244,12 @@ Native AutoCAR builds on official upstream quic-go. Web H3 uses
 `github.com/apernet/quic-go` pinned exactly to
 `v0.63.1-0.20261004180939-a10df75c260c`; H2 uses x/net HTTP/2 and uTLS for its
 fixed ClientHello reference. A targeted CI boundary allows only that exact web
-QUIC fork version, rejects the known external proxy application module, local
-replacements, and copied/vendored external-source directories, and scans tracked
+QUIC fork version and one exact published `github.com/cppla/utls` remote
+replacement for the original uTLS module. The same replacement covers H2 and
+the web-H3 adapter; direct imports of the replacement path are rejected to
+avoid a second uTLS module identity. The boundary rejects the known external
+proxy application module, local replacements, and copied/vendored
+external-source directories, and scans tracked
 and untracked Go source.
 That regression check is not a universal provenance or license detector. CI also
 runs tests, race detection, vet, CodeQL, a reachable vulnerability scan and
@@ -258,6 +262,14 @@ advisory for `github.com/quic-go/quic-go` does not automatically cover the renam
 close that gap. Upstream advisories need a separate applicability and patch
 review against the exact pinned fork. A clean scan is not proof that the fork
 has no vulnerabilities.
+
+The managed uTLS replacement has the same database-identity limitation, even
+though its original import paths are retained. CI separately queries the exact
+original uTLS baseline, retains the JSON output, and stops for human review if
+advisories are returned. This is not a reachability result for the fork. The
+review must also consider relevant Go TLS security fixes. See the executable
+update and advisory-review procedure in
+[dependency maintenance](docs/DEPENDENCY-MAINTENANCE.md).
 
 The current client profile is versioned as `chrome-2026-10`; the retired
 `chrome-2026-08` name is rejected, not aliased. Existing client configurations
