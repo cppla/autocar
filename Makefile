@@ -30,6 +30,7 @@ fmt-check:
 
 dependency-boundary-check:
 	./scripts/check-dependency-boundary.sh
+	python3 scripts/test_dependency_boundary.py
 
 mod-check:
 	$(GO) mod tidy -diff

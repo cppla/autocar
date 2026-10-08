@@ -29,7 +29,8 @@ type WebH2ClientConfig struct {
 	Token         string
 	TLSConfig     *tls.Config
 	// FingerprintProfile defaults to chrome-133, the fixed Chrome 133
-	// reference implemented by uTLS v1.8.2. Native is for tests/debugging.
+	// explicit HelloChrome_133 reference originally shipped in uTLS v1.8.2.
+	// Native is for tests/debugging.
 	FingerprintProfile FingerprintProfile
 	HandshakeTimeout   time.Duration
 	// DialTimeout bounds each TCP connect, separately from TLS/H2 setup.
@@ -684,29 +685,11 @@ func (c *WebH2Client) openSession(ctx context.Context) (*webH2ClientSession, err
 	// through initialization, not just through the TLS handshake.
 	initializationCtx, initializationCancel := context.WithTimeout(dialCtx, c.handshakeTimeout)
 	defer initializationCancel()
-	session, err := c.initializeSession(initializationCtx, raw, c.utlsSessionCache)
-	if !errors.Is(err, errWebH2PSKHelloRetryRequest) {
-		return session, err
-	}
-	// Pinned uTLS cannot rebuild a populated PSK after HRR. The failed
-	// attempt has already closed its raw socket and joined its watcher.
-	// Retry once on a fresh socket without tickets, with the SAME remaining
-	// initialization budget. No HTTP or proxy authentication was sent yet.
-	if cause := context.Cause(initializationCtx); cause != nil {
-		return nil, fmt.Errorf("tunnel: web-cover HTTP/2 TLS handshake: %w", cause)
-	}
-	raw, err = c.dialRaw(initializationCtx)
-	if err != nil {
-		if cause := context.Cause(initializationCtx); cause != nil {
-			err = cause
-		}
-		return nil, fmt.Errorf("tunnel: redial web-cover HTTP/2 server after TLS retry: %w", err)
-	}
-	return c.initializeSession(initializationCtx, raw, nil)
+	return c.initializeSession(initializationCtx, raw, c.utlsSessionCache)
 }
 
 // The TCP budget stays separate from the existing TLS/H2 initialization
-// budget. A retry after HRR is additionally bounded by that original budget.
+// budget, which covers the complete TLS handshake including any HRR.
 func (c *WebH2Client) dialRaw(ctx context.Context) (net.Conn, error) {
 	timeout := c.dialTimeout
 	if timeout == 0 {

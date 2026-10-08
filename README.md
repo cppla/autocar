@@ -85,7 +85,7 @@ Web cover 的目标是正常网站兼容、减少主动探测暴露并在 UDP �
 
 ## 快速开始
 
-客户端和服务端分别在各自机器上构建，需要 Go 1.26.8 或更高版本：
+客户端和服务端分别在各自机器上构建，需要 Go 1.27.1 或更高版本：
 
 ```bash
 git clone https://github.com/cppla/autocar.git

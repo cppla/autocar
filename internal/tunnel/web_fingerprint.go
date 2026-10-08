@@ -1,7 +1,6 @@
 package tunnel
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -15,12 +14,13 @@ import (
 
 // FingerprintProfile names the TLS ClientHello profile used by the TCP web
 // transport. Profile names are deliberately versioned: chrome-133 means the
-// fixed Chrome 133 reference shipped by uTLS v1.8.2, not "current Chrome".
+// explicit HelloChrome_133 reference originally shipped in uTLS v1.8.2,
+// not "current Chrome" or the moving HelloChrome_Auto alias.
 type FingerprintProfile string
 
 const (
 	// FingerprintChrome133 is the audited Chrome 133 ClientHello reference from
-	// uTLS v1.8.2. It is the default for web-cover HTTP/2 connections.
+	// uTLS v1.8.2. The explicit HelloChrome_133 remains the default for H2.
 	FingerprintChrome133 FingerprintProfile = "chrome-133"
 
 	// FingerprintNative uses Go's crypto/tls ClientHello. It is retained for
@@ -86,37 +86,6 @@ type webH2TLSClientConn interface {
 	net.Conn
 	HandshakeContext(context.Context) error
 	ConnectionState() tls.ConnectionState
-}
-
-var errWebH2PSKHelloRetryRequest = errors.New("tunnel: cached H2 TLS session requires an unsupported HelloRetryRequest")
-
-// This diagnostic is private to the pinned uTLS v1.8.2 implementation. It has
-// no exported error type; recognize its exact text AND completed HRR state,
-// never arbitrary certificate, entropy or I/O errors with similar text.
-const webH2UnsupportedPSKHRR = "uTLS does not support reprocessing of PSK key triggered by HelloRetryRequest"
-
-func webH2UnsupportedPSKHelloRetryRequest(err error, state utls.PubClientHandshakeState) bool {
-	if err == nil || err.Error() != webH2UnsupportedPSKHRR || state.Hello == nil || state.ServerHello == nil {
-		return false
-	}
-	hello, server := state.Hello, state.ServerHello
-	hrrRandom := [...]byte{ // RFC 8446 section 4.1.3.
-		0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11,
-		0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
-		0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
-		0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
-	}
-	if server.SupportedVersion != utls.VersionTLS13 || !bytes.Equal(server.Random, hrrRandom[:]) ||
-		len(hello.PskIdentities) == 0 || len(hello.PskBinders) != len(hello.PskIdentities) {
-		return false
-	}
-	if server.SelectedGroup != 0 {
-		// uTLS reaches the unsupported-PSK diagnostic only after generating
-		// and installing the requested share. This excludes an entropy error
-		// with the same text during HRR key generation.
-		return len(hello.KeyShares) == 1 && hello.KeyShares[0].Group == server.SelectedGroup
-	}
-	return len(server.Cookie) > 0
 }
 
 func newWebH2TLSClientConn(raw net.Conn, config *tls.Config, profile FingerprintProfile, sessionCache utls.ClientSessionCache) (webH2TLSClientConn, error) {
@@ -275,9 +244,6 @@ func (c *webH2UTLSConn) HandshakeContext(ctx context.Context) error {
 		}
 	}
 	if err := c.UConn.HandshakeContext(ctx); err != nil {
-		if c.prepareChrome133 && err.Error() == webH2UnsupportedPSKHRR && webH2UnsupportedPSKHelloRetryRequest(err, c.UConn.HandshakeState) {
-			return fmt.Errorf("%w: %w", errWebH2PSKHelloRetryRequest, err)
-		}
 		return err
 	}
 	if c.UConn.ConnectionState().Version != utls.VersionTLS13 {
