@@ -10,7 +10,6 @@ script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 config_tool="$script_dir/stealth-full-config.py"
 campaign_tool="$script_dir/stealth-campaign.py"
-browser_versions="$script_dir/stealth-browser/versions.debian13-amd64.json"
 docker_bin=${DOCKER_BIN:-docker}
 
 caddy_ref='caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d'
@@ -43,7 +42,10 @@ about it safely. Run plan-only first, then checkpoint/resume or explicit full.
 At least 30 GiB free, 50,000 free inodes, and 4 GiB combined physical
 RAM plus configured swap are required (nominal 4 GiB VMs commonly report
 slightly less physical RAM and satisfy this gate with swap).
-Only local unix-socket Docker on Linux/amd64 is accepted.
+Only local unix-socket Docker on native Linux/amd64 or Linux/arm64 is accepted.
+Architecture-specific browser pins and official baseline binaries are selected
+from the local engine, which must match the host CPU architecture. Each new
+host/architecture needs its own frozen preregistration and campaign.
 EOF
 }
 
@@ -67,6 +69,14 @@ absolute_safe_dir() {
 	esac
 }
 
+canonical_architecture() {
+	case "$1" in
+		amd64|x86_64) printf 'amd64\n' ;;
+		arm64|aarch64) printf 'arm64\n' ;;
+		*) return 1 ;;
+	esac
+}
+
 require_local_linux_docker() {
 	[ "$(uname -s)" = Linux ] || die "formal lab orchestration must run on the Linux lab host"
 	context=$($docker_bin context show)
@@ -75,11 +85,11 @@ require_local_linux_docker() {
 		unix://*) ;;
 		*) die "remote Docker contexts are refused: $endpoint" ;;
 	esac
-	architecture=$($docker_bin info --format '{{.Architecture}}')
-	case "$architecture" in
-		amd64|x86_64) ;;
-		*) die "the frozen Debian 13 browser pins currently support Docker amd64 only" ;;
-	esac
+	engine_arch=$($docker_bin info --format '{{.Architecture}}')
+	architecture=$(canonical_architecture "$engine_arch") || die "unsupported Docker architecture: $engine_arch"
+	host_arch=$(canonical_architecture "$(uname -m)") || die "unsupported Linux host architecture"
+	[ "$architecture" = "$host_arch" ] || die "Docker architecture must match the native Linux host"
+	browser_versions="$script_dir/stealth-browser/versions.debian13-$architecture.json"
 }
 
 free_kib() {
@@ -201,6 +211,7 @@ prepare_lab() {
 	require_clean_git
 	capture_host=$(safe_capture_host "${STEALTH_CAPTURE_HOST:-local-linux-docker-full-lab}")
 	[ -f "$browser_versions" ] || die "browser pin manifest is missing"
+	[ "$(json_value "$browser_versions" architecture)" = "$architecture" ] || die "browser pins do not match the native architecture"
 	[ -f "$script_dir/stealth-browser/Dockerfile" ] || die "browser runner Dockerfile is missing"
 
 	mkdir -m 0700 "$lab_dir"
@@ -299,8 +310,8 @@ prepare_lab() {
 
 	hysteria_release="$inputs/hysteria-release"
 	mkdir -m 0700 "$hysteria_release"
-	"$script_dir/stealth-hysteria.sh" fetch "$hysteria_release" amd64 >"$logs/hysteria-fetch.log"
-	hysteria_binary="$hysteria_release/hysteria-linux-amd64"
+	"$script_dir/stealth-hysteria.sh" fetch "$hysteria_release" "$architecture" >"$logs/hysteria-fetch.log"
+	hysteria_binary="$hysteria_release/hysteria-linux-$architecture"
 	hysteria_expected_sha=$(json_value "$hysteria_release/provenance.json" sha256)
 
 	$docker_bin build --pull --label "$ownership_label" -f scripts/stealth-capture.Dockerfile \
@@ -308,6 +319,8 @@ prepare_lab() {
 	capture_id=$(resolve_image_id "$capture_tag")
 
 	base_image=$(json_value "$browser_versions" base_image)
+	debian_snapshot=$(json_value "$browser_versions" apt_snapshots.debian)
+	debian_security_snapshot=$(json_value "$browser_versions" apt_snapshots.debian_security)
 	chromium_package=$(json_value "$browser_versions" chromium.browser_package_version)
 	chromium_driver=$(json_value "$browser_versions" chromium.webdriver_package_version)
 	firefox_package=$(json_value "$browser_versions" firefox-esr.browser_package_version)
@@ -316,6 +329,7 @@ prepare_lab() {
 	pull_pinned_image "$base_image" "browser base" >/dev/null
 	$docker_bin build --pull --label "$ownership_label" \
 		--build-arg BASE_IMAGE="$base_image" --build-arg BROWSER_FAMILY=chromium \
+		--build-arg DEBIAN_SNAPSHOT="$debian_snapshot" --build-arg DEBIAN_SECURITY_SNAPSHOT="$debian_security_snapshot" \
 		--build-arg BROWSER_PACKAGE_VERSION="$chromium_package" \
 		--build-arg WEBDRIVER_PACKAGE_VERSION="$chromium_driver" \
 		-f scripts/stealth-browser/Dockerfile -t "$chromium_tag" . \
@@ -323,6 +337,7 @@ prepare_lab() {
 	chromium_id=$(resolve_image_id "$chromium_tag")
 	$docker_bin build --pull --label "$ownership_label" \
 		--build-arg BASE_IMAGE="$base_image" --build-arg BROWSER_FAMILY=firefox-esr \
+		--build-arg DEBIAN_SNAPSHOT="$debian_snapshot" --build-arg DEBIAN_SECURITY_SNAPSHOT="$debian_security_snapshot" \
 		--build-arg BROWSER_PACKAGE_VERSION="$firefox_package" \
 		--build-arg WEBDRIVER_PACKAGE_VERSION="$gecko_version" \
 		--build-arg WEBDRIVER_ARCHIVE_SHA256="$gecko_sha" \
@@ -727,6 +742,10 @@ cleanup_lab() {
 
 self_test() {
 	[ "$#" -eq 0 ] || { usage; exit 2; }
+	for pair in amd64:amd64 x86_64:amd64 arm64:arm64 aarch64:arm64; do
+		[ "$(canonical_architecture "${pair%%:*}")" = "${pair#*:}" ] || die "architecture mapping self-test failed"
+	done
+	if canonical_architecture ppc64le >/dev/null; then die "unsupported architecture was accepted"; fi
 	require_command python3
 	python3 -m py_compile "$config_tool" "$campaign_tool" \
 		"$script_dir/stealth-browser/run_cover.py" "$script_dir/stealth-browser/write_lock.py"
@@ -734,13 +753,17 @@ self_test() {
 	python3 "$campaign_tool" --self-test
 	python3 "$script_dir/stealth-browser/test_run_cover.py"
 	if command -v go >/dev/null 2>&1; then GOPROXY=off go test ./scripts/stealth-pilot; fi
-	python3 - "$browser_versions" <<'PY'
+	python3 - "$script_dir/stealth-browser" <<'PY'
 import json, re, sys
-value = json.load(open(sys.argv[1], encoding="utf-8"))
-assert value == {
+from pathlib import Path
+expected = {
     "schema_version": 1,
     "architecture": "amd64",
     "base_image": "debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
+    "apt_snapshots": {
+        "debian": "20260904T145907Z",
+        "debian_security": "20260905T202337Z",
+    },
     "chromium": {
         "browser_package_version": "152.0.7977.82-1~deb13u1",
         "webdriver_package_version": "152.0.7977.82-1~deb13u1",
@@ -752,6 +775,14 @@ assert value == {
         "webdriver_archive_sha256": "0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04",
     },
 }
+for architecture, archive_sha in (
+    ("amd64", "0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04"),
+    ("arm64", "b5fd13fc8f05ca99292700896d43fa986747a01b5fdc77f7bfc88a3707dc4241"),
+):
+    expected["architecture"] = architecture
+    expected["firefox-esr"]["webdriver_archive_sha256"] = archive_sha
+    value = json.loads((Path(sys.argv[1]) / f"versions.debian13-{architecture}.json").read_text(encoding="utf-8"))
+    assert value == expected
 PY
 	printf '{"schema_version":1,"status":"pass","self_test":true}\n'
 }

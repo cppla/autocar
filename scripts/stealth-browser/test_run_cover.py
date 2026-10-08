@@ -10,7 +10,9 @@ import io
 import json
 from pathlib import Path
 import runpy
+import shlex
 import stat
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -44,6 +46,144 @@ def seeded_fixture_body(size: int, seed: int, request_index: int, domain: int) -
         value = (value ^ (value >> 31)) & mask
         result[index] = value >> 56
     return bytes(result)
+
+
+class AptSourcesTest(unittest.TestCase):
+    debian_timestamp = "20260915T010203Z"
+    security_timestamp = "20261001T040506Z"
+
+    def sources(self, *args: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                ["sh", str(HERE / "apt_sources.sh"), *args],
+                cwd=directory,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            self.assertEqual(list(Path(directory).iterdir()), [], "helper wrote files")
+            return result
+
+    def test_snapshot_sources_preserve_separate_archives_and_signature_checks(self) -> None:
+        result = self.sources(self.debian_timestamp, self.security_timestamp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        stanzas = result.stdout.strip().split("\n\n")
+        self.assertEqual(len(stanzas), 2)
+        for stanza, archive, timestamp, suites in zip(
+            stanzas,
+            ("debian", "debian-security"),
+            (self.debian_timestamp, self.security_timestamp),
+            ("trixie trixie-updates", "trixie-security"),
+        ):
+            with self.subTest(archive=archive):
+                fields = {}
+                for line in stanza.splitlines():
+                    key, separator, value = line.partition(":")
+                    self.assertEqual(separator, ":", "expected a deb822 field")
+                    self.assertNotIn(key, fields, "duplicate deb822 field")
+                    fields[key] = value.strip()
+                self.assertIn(
+                    fields.pop("URIs", None),
+                    {
+                        f"{scheme}://snapshot.debian.org/archive/{archive}/{timestamp}/"
+                        for scheme in ("http", "https")
+                    },
+                )
+                self.assertEqual(fields, {
+                    "Types": "deb",
+                    "Suites": suites,
+                    "Components": "main",
+                    "Signed-By": "/usr/share/keyrings/debian-archive-keyring.gpg",
+                    "Check-Valid-Until": "no",
+                })
+
+    def test_snapshot_sources_reject_wrong_argument_count_without_output(self) -> None:
+        for args in (
+            (),
+            (self.debian_timestamp,),
+            (self.debian_timestamp, self.security_timestamp, self.security_timestamp),
+        ):
+            with self.subTest(args=args):
+                result = self.sources(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+
+    def test_snapshot_sources_reject_unfrozen_or_injected_values_without_output(self) -> None:
+        for invalid in (
+            "",
+            "latest",
+            "2026-10-01T04:05:06Z",
+            "20261001T040506",
+            "20261001t040506z",
+            "20261001T040506ZZ",
+            " 20261001T040506Z",
+            "20261001T040506Z ",
+            "20261001T040506Z\n",
+            "20261001T040506Z\r\n",
+            "20261001T040506Z\nURIs: https://example.invalid/",
+            "https://snapshot.debian.org/archive/debian/20261001T040506Z/",
+            "../20261001T040506Z",
+            "/archive/debian/20261001T040506Z",
+            "20261001T040506Z/../../etc/apt",
+            "20261001T040506Z; : > injected",
+            "$(printf injected)",
+        ):
+            for index in (0, 1):
+                with self.subTest(invalid=invalid, argument=index):
+                    args = [self.debian_timestamp, self.security_timestamp]
+                    args[index] = invalid
+                    result = self.sources(*args)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+
+    def test_checked_in_manifest_pins_both_apt_archives(self) -> None:
+        snapshots_by_architecture = {}
+        for architecture in ("amd64", "arm64"):
+            with self.subTest(architecture=architecture):
+                pins = json.loads((HERE / f"versions.debian13-{architecture}.json").read_text(encoding="utf-8"))
+                self.assertEqual(pins["architecture"], architecture)
+                self.assertIn("apt_snapshots", pins)
+                snapshots = pins["apt_snapshots"]
+                self.assertEqual(set(snapshots), {"debian", "debian_security"})
+                for archive, timestamp in snapshots.items():
+                    with self.subTest(archive=archive):
+                        self.assertIsInstance(timestamp, str)
+                        self.assertRegex(timestamp, r"\A[0-9]{8}T[0-9]{6}Z\Z")
+                snapshots_by_architecture[architecture] = snapshots
+        self.assertEqual(snapshots_by_architecture.get("amd64"), snapshots_by_architecture.get("arm64"))
+
+    def test_launcher_passes_both_snapshots_to_each_browser_build(self) -> None:
+        launcher = (HERE.parent / "stealth-full-lab.sh").read_text(encoding="utf-8")
+        builds = []
+        for command in launcher.replace("\\\n", " ").splitlines():
+            if "scripts/stealth-browser/Dockerfile" not in command:
+                continue
+            words = shlex.split(command, comments=True)
+            if "build" not in words:
+                continue
+            arguments = {}
+            for index, word in enumerate(words):
+                if word == "--build-arg":
+                    self.assertLess(index + 1, len(words))
+                    argument = words[index + 1]
+                elif word.startswith("--build-arg="):
+                    argument = word.removeprefix("--build-arg=")
+                else:
+                    continue
+                name, separator, value = argument.partition("=")
+                self.assertEqual(separator, "=")
+                self.assertNotIn(name, arguments, "duplicate browser build argument")
+                arguments[name] = value
+            builds.append(arguments)
+        self.assertEqual(len(builds), 2)
+        self.assertCountEqual([build.get("BROWSER_FAMILY") for build in builds], ["chromium", "firefox-esr"])
+        for build in builds:
+            with self.subTest(browser=build["BROWSER_FAMILY"]):
+                self.assertIn(build.get("DEBIAN_SNAPSHOT"), ("$debian_snapshot", "${debian_snapshot}"))
+                self.assertIn(build.get("DEBIAN_SECURITY_SNAPSHOT"), ("$debian_security_snapshot", "${debian_security_snapshot}"))
 
 
 class BrowserRunnerTest(unittest.TestCase):
@@ -94,17 +234,26 @@ class BrowserRunnerTest(unittest.TestCase):
             run_cover.WORKLOAD_SPECS["download_128k"],
         )
 
-    def test_checked_in_amd64_build_inputs_are_exact(self) -> None:
-        pins = json.loads((HERE / "versions.debian13-amd64.json").read_text(encoding="utf-8"))
-        self.assertRegex(pins["base_image"], r"@sha256:[0-9a-f]{64}$")
-        self.assertEqual(
-            pins["chromium"]["browser_package_version"],
-            pins["chromium"]["webdriver_package_version"],
-        )
-        self.assertRegex(
-            pins["firefox-esr"]["webdriver_archive_sha256"], r"^[0-9a-f]{64}$"
-        )
-        self.assertEqual(pins["firefox-esr"]["webdriver_package_version"], "0.36.0")
+    def test_checked_in_build_inputs_are_exact_for_both_architectures(self) -> None:
+        gecko_hashes = {
+            "amd64": "0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04",
+            "arm64": "b5fd13fc8f05ca99292700896d43fa986747a01b5fdc77f7bfc88a3707dc4241",
+        }
+        actual_hashes = {}
+        for architecture, expected_hash in gecko_hashes.items():
+            with self.subTest(architecture=architecture):
+                pins = json.loads((HERE / f"versions.debian13-{architecture}.json").read_text(encoding="utf-8"))
+                self.assertEqual(pins["architecture"], architecture)
+                self.assertRegex(pins["base_image"], r"@sha256:[0-9a-f]{64}\Z")
+                self.assertEqual(pins["chromium"]["browser_package_version"], "152.0.7977.82-1~deb13u1")
+                self.assertEqual(pins["chromium"]["webdriver_package_version"], pins["chromium"]["browser_package_version"])
+                self.assertEqual(pins["firefox-esr"]["browser_package_version"], "140.15.0esr-1~deb13u1")
+                self.assertEqual(pins["firefox-esr"]["webdriver_package_version"], "0.36.0")
+                archive_hash = pins["firefox-esr"]["webdriver_archive_sha256"]
+                self.assertRegex(archive_hash, r"\A[0-9a-f]{64}\Z")
+                self.assertEqual(archive_hash, expected_hash)
+                actual_hashes[architecture] = archive_hash
+        self.assertNotEqual(actual_hashes.get("amd64"), actual_hashes.get("arm64"))
 
     def test_splitmix_reference_vector_and_javascript_contract(self) -> None:
         self.assertEqual(

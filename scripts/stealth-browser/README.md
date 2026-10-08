@@ -28,10 +28,14 @@ the receipt preserves the `browser_h2` label expected by the campaign driver.
 
 ## Reproducible images
 
-Build one immutable image per browser. The reviewed Debian 13 amd64 inputs are
-checked in as `versions.debian13-amd64.json`. Every build requires:
+Build one immutable image per browser. The reviewed Debian 13 inputs are
+checked in separately as `versions.debian13-amd64.json` and
+`versions.debian13-arm64.json`. Package versions and APT snapshots match; the
+Mozilla driver archive checksum is architecture-specific. Every build requires:
 
 - `BASE_IMAGE`: a Debian 13 base reference ending in `@sha256:<64 hex>`;
+- `DEBIAN_SNAPSHOT` and `DEBIAN_SECURITY_SNAPSHOT`: the exact UTC archive
+  timestamps from the manifest, in `YYYYMMDDTHHMMSSZ` format;
 - `BROWSER_FAMILY`: `chromium` or `firefox-esr`;
 - `BROWSER_PACKAGE_VERSION`: an exact Debian package version; and
 - `WEBDRIVER_PACKAGE_VERSION`: the exact matching Debian chromium-driver
@@ -41,11 +45,29 @@ Firefox builds also require `WEBDRIVER_ARCHIVE_SHA256`, which is checked before
 the Mozilla release archive is extracted. The Dockerfile supports `amd64` and
 `arm64` Firefox release assets.
 
+APT uses only the two frozen official Debian snapshot archives. This keeps the
+exact browser packages available after rolling mirrors remove old versions.
+Only archived metadata expiry is ignored, per source; Debian signature and
+package checksum checks remain enabled. HTTP permits bootstrap before the slim
+base has CA certificates; APT authenticates these archives using the base image's
+Debian keyring. These historical browser images are for the isolated experiment,
+not general browsing or production deployment. Changing archive pins changes
+the experiment inputs and requires a new frozen campaign; never rewrite an old
+campaign to use the new images.
+
+The lab launcher selects native Linux amd64 or arm64 pins, refuses a different
+Docker engine architecture, and fetches the matching official baseline binary.
+An ARM pilot is a separate host-bound campaign, not additional samples for an
+existing x86_64 campaign. Passing build and calibration checks does not establish
+browser indistinguishability or cross-architecture equivalence.
+
 Example shapes, with reviewed exact values substituted:
 
 ```sh
 docker build -f scripts/stealth-browser/Dockerfile \
   --build-arg 'BASE_IMAGE=debian:13-slim@sha256:<reviewed-base-digest>' \
+  --build-arg DEBIAN_SNAPSHOT=20260904T145907Z \
+  --build-arg DEBIAN_SECURITY_SNAPSHOT=20260905T202337Z \
   --build-arg BROWSER_FAMILY=chromium \
   --build-arg 'BROWSER_PACKAGE_VERSION=<exact-debian-version>' \
   --build-arg 'WEBDRIVER_PACKAGE_VERSION=<same-exact-debian-version>' \
@@ -53,6 +75,8 @@ docker build -f scripts/stealth-browser/Dockerfile \
 
 docker build -f scripts/stealth-browser/Dockerfile \
   --build-arg 'BASE_IMAGE=debian:13-slim@sha256:<reviewed-base-digest>' \
+  --build-arg DEBIAN_SNAPSHOT=20260904T145907Z \
+  --build-arg DEBIAN_SECURITY_SNAPSHOT=20260905T202337Z \
   --build-arg BROWSER_FAMILY=firefox-esr \
   --build-arg 'BROWSER_PACKAGE_VERSION=<exact-debian-version>' \
   --build-arg 'WEBDRIVER_PACKAGE_VERSION=<exact-geckodriver-version>' \
