@@ -46,10 +46,15 @@ func normalizeFingerprintProfile(profile FingerprintProfile) (FingerprintProfile
 type H3FingerprintProfile string
 
 const (
-	// H3FingerprintChrome202608 is the fixed Chrome QUIC profile provided by
-	// the audited github.com/apernet/quic-go revision dated 2026-08-06. The
+	// H3FingerprintChrome202610 is the fixed Chrome QUIC profile provided by
+	// the audited github.com/apernet/quic-go revision dated 2026-10-04. The
 	// version in the name is immutable; it never means "whatever Chrome does
 	// today". It is the default for web-cover HTTP/3 connections.
+	H3FingerprintChrome202610 H3FingerprintProfile = "chrome-2026-10"
+
+	// H3FingerprintChrome202608 identifies the retired August 2026 profile.
+	// Deprecated: this profile is rejected, not aliased to a different wire
+	// image. Explicitly migrate to H3FingerprintChrome202610 or native.
 	H3FingerprintChrome202608 H3FingerprintProfile = "chrome-2026-08"
 
 	// H3FingerprintNative uses the QUIC library's ordinary Go handshake. It is
@@ -57,14 +62,20 @@ const (
 	H3FingerprintNative H3FingerprintProfile = "native"
 )
 
+// ErrH3FingerprintProfileRetired reports an explicitly selected historical
+// profile whose immutable wire image is no longer provided by the dependency.
+var ErrH3FingerprintProfileRetired = errors.New("tunnel: HTTP/3 fingerprint profile chrome-2026-08 is retired; explicitly set --h3-fingerprint=chrome-2026-10 (new handshake profile) or --h3-fingerprint=native (ordinary Go handshake)")
+
 func normalizeH3FingerprintProfile(profile H3FingerprintProfile) (H3FingerprintProfile, error) {
 	switch profile {
-	case "", H3FingerprintChrome202608:
-		return H3FingerprintChrome202608, nil
+	case "", H3FingerprintChrome202610:
+		return H3FingerprintChrome202610, nil
+	case H3FingerprintChrome202608:
+		return "", ErrH3FingerprintProfileRetired
 	case H3FingerprintNative:
 		return H3FingerprintNative, nil
 	default:
-		return "", fmt.Errorf("tunnel: unsupported web-cover HTTP/3 fingerprint profile %q; supported profiles are %q and %q", profile, H3FingerprintChrome202608, H3FingerprintNative)
+		return "", fmt.Errorf("tunnel: unsupported web-cover HTTP/3 fingerprint profile %q; supported profiles are %q and %q", profile, H3FingerprintChrome202610, H3FingerprintNative)
 	}
 }
 

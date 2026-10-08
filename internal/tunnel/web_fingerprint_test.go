@@ -33,13 +33,13 @@ func TestFingerprintProfileValidation(t *testing.T) {
 }
 
 func TestH3FingerprintProfileValidation(t *testing.T) {
-	for _, input := range []H3FingerprintProfile{"", H3FingerprintChrome202608} {
+	for _, input := range []H3FingerprintProfile{"", H3FingerprintChrome202610} {
 		got, err := normalizeH3FingerprintProfile(input)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != H3FingerprintChrome202608 {
-			t.Fatalf("normalizeH3FingerprintProfile(%q) = %q, want %q", input, got, H3FingerprintChrome202608)
+		if got != H3FingerprintChrome202610 {
+			t.Fatalf("normalizeH3FingerprintProfile(%q) = %q, want %q", input, got, H3FingerprintChrome202610)
 		}
 	}
 	if got, err := normalizeH3FingerprintProfile(H3FingerprintNative); err != nil || got != H3FingerprintNative {
@@ -47,6 +47,32 @@ func TestH3FingerprintProfileValidation(t *testing.T) {
 	}
 	if _, err := normalizeH3FingerprintProfile("chrome-current"); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unversioned H3 profile error = %v", err)
+	}
+	if got, err := normalizeH3FingerprintProfile(H3FingerprintChrome202608); got != "" || !errors.Is(err, ErrH3FingerprintProfileRetired) {
+		t.Fatalf("retired H3 profile = %q, %v; must not alias to the current profile", got, err)
+	}
+}
+
+func TestRetiredH3FingerprintRejectedByConstructors(t *testing.T) {
+	_, clientTLS := testTLSConfigs(t)
+	config := WebH3ClientConfig{
+		ServerAddress: "relay.invalid:443", Token: webTestToken,
+		TLSConfig: clientTLS, FingerprintProfile: H3FingerprintChrome202608,
+	}
+	if client, err := NewWebH3Client(config); !errors.Is(err, ErrH3FingerprintProfileRetired) || client != nil {
+		if client != nil {
+			_ = client.Close()
+		}
+		t.Fatalf("retired H3 constructor: client=%v error=%v", client != nil, err)
+	}
+	if client, err := NewWebClient(WebClientConfig{
+		ServerAddress: config.ServerAddress, Token: config.Token,
+		TLSConfig: clientTLS, H3FingerprintProfile: H3FingerprintChrome202608,
+	}); !errors.Is(err, ErrH3FingerprintProfileRetired) || client != nil {
+		if client != nil {
+			_ = client.Close()
+		}
+		t.Fatalf("retired web-auto constructor: client=%v error=%v", client != nil, err)
 	}
 }
 

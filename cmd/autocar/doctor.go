@@ -75,6 +75,11 @@ func runDoctorWith(parent context.Context, args []string, stdout, stderr io.Writ
 	parseErr := parseFlagsWithConfig(fs, args)
 	effectiveJSON = effectiveJSON || *jsonOutput
 	if err := parseErr; err != nil {
+		// flag.Parse does not preserve a Value.Set error's identity. Recognize
+		// only this exact retired identifier, never arbitrary error text.
+		if tunnel.H3FingerprintProfile(tf.h3Fingerprint) == tunnel.H3FingerprintChrome202608 {
+			err = tunnel.ErrH3FingerprintProfileRetired
+		}
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(stderr, "Usage of doctor:")
 			fs.SetOutput(stderr)
@@ -263,6 +268,9 @@ func doctorFail(stdout io.Writer, jsonOutput bool, exitCode int, code string, er
 // doctorFailureGuidance returns only closed, static text. Typed causes can
 // narrow the next step; unstructured messages must not be parsed or echoed.
 func doctorFailureGuidance(code string, err error) (string, string) {
+	if errors.Is(err, tunnel.ErrH3FingerprintProfileRetired) {
+		return "h3_fingerprint_retired", "The chrome-2026-08 H3 profile is retired. Explicitly set --h3-fingerprint=chrome-2026-10 for the new handshake profile, or --h3-fingerprint=native for the ordinary Go handshake; update the same option in any JSON configuration."
+	}
 	switch code {
 	case "invalid_arguments":
 		if errors.Is(err, os.ErrNotExist) {

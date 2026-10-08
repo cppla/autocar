@@ -93,7 +93,7 @@ func TestWebH3CoverAndAuthenticatedConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	if client.fingerprint != H3FingerprintChrome202608 || !client.quicConfig.ChromeParrot || client.quicConfig.KeepAlivePeriod != 0 {
+	if client.fingerprint != H3FingerprintChrome202610 || !client.quicConfig.ChromeParrot || client.quicConfig.KeepAlivePeriod != 0 {
 		t.Fatalf("default H3 profile = %q ChromeParrot=%v keepalive=%s", client.fingerprint, client.quicConfig.ChromeParrot, client.quicConfig.KeepAlivePeriod)
 	}
 	conn, err := client.DialContext(context.Background(), "tcp", target)

@@ -27,7 +27,7 @@ type WebClientConfig struct {
 	Token         string
 	TLSConfig     *tls.Config
 	QUICConfig    *quic.Config
-	// H3FingerprintProfile defaults to the fixed chrome-2026-08 QUIC profile.
+	// H3FingerprintProfile defaults to the fixed chrome-2026-10 QUIC profile.
 	// Native is an explicit interoperability and rollback path.
 	H3FingerprintProfile H3FingerprintProfile
 

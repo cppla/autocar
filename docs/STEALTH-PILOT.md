@@ -43,11 +43,20 @@ The default pilot records two independent samples for each product in three
 - `parallel_20`: issue twenty concurrent 1 KiB requests through one client
   process, allowing each proxy to multiplex streams over its H3 connection.
 
-AutoCAR runs with `--transport h3` and `--h3-fingerprint chrome-2026-08`.
+New AutoCAR runs use `--transport h3` and `--h3-fingerprint chrome-2026-10`,
+with `github.com/apernet/quic-go` pinned to
+`v0.63.1-0.20261004180939-a10df75c260c`.
 The baseline runs the pinned standard profile with Chrome QUIC parroting enabled,
 its `Gecko` mode disabled, and a real reverse-proxy masquerade. Both proxies fetch the same
 private deterministic HTTP origin. The H3 control fetches the equivalent
 payload directly from its private H3 fixture server.
+
+The baseline stays frozen; it no longer shares AutoCAR's exact QUIC revision.
+New AutoCAR variant labels and effective descriptors record the current profile.
+Do not rewrite old preregistrations or result labels: earlier captures remain
+evidence only for their recorded source, dependency and profile. This update
+does not enable TLS resumption or 0-RTT for the Chrome H3 client and does not
+establish a passive-identification advantage.
 
 ## Running
 

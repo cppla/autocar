@@ -54,14 +54,14 @@ func TestWebH3QUICConfigHardeningCannotBeBypassed(t *testing.T) {
 		t.Fatalf("native rollback versions = %v, want caller's QUIC v2", client.Versions)
 	}
 
-	defaults := hardenedWebH3ClientConfig(nil, 5*time.Second, H3FingerprintChrome202608)
+	defaults := hardenedWebH3ClientConfig(nil, 5*time.Second, H3FingerprintChrome202610)
 	if !defaults.ChromeParrot || defaults.KeepAlivePeriod != 0 {
 		t.Fatalf("default client profile = ChromeParrot %v keepalive %s", defaults.ChromeParrot, defaults.KeepAlivePeriod)
 	}
 	if len(defaults.Versions) != 1 || defaults.Versions[0] != quic.Version1 {
 		t.Fatalf("ChromeParrot versions = %v, want QUIC v1 only", defaults.Versions)
 	}
-	chromeFromV2 := hardenedWebH3ClientConfig(input, 5*time.Second, H3FingerprintChrome202608)
+	chromeFromV2 := hardenedWebH3ClientConfig(input, 5*time.Second, H3FingerprintChrome202610)
 	if len(chromeFromV2.Versions) != 1 || chromeFromV2.Versions[0] != quic.Version1 {
 		t.Fatalf("ChromeParrot retained incompatible caller versions %v", chromeFromV2.Versions)
 	}

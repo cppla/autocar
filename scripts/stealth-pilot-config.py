@@ -109,7 +109,7 @@ def prepare(args: argparse.Namespace) -> None:
         "implementation_version": args.autocar_version,
         "binary_sha256": sha256(files["autocar_binary"]),
         "transport": "h3",
-        "h3_fingerprint": "chrome-2026-08",
+        "h3_fingerprint": "chrome-2026-10",
         "relay": f"{endpoints['autocar']}:8443",
         "origin": f"http://{endpoints['origin']}:8080",
         "server_name": "cover.test",
@@ -189,9 +189,9 @@ def prepare(args: argparse.Namespace) -> None:
                 "environment": {}, "mounts": common_mounts, "user": args.user,
             }]},
             "autocar": {"variants": [{
-                "name": "autocar-v101-worktree-h3",
-                "client_implementation": "AutoCAR v1.0.1 worktree WebH3Client",
-                "server_implementation": "AutoCAR v1.0.1 worktree web H3 server",
+                "name": "autocar-chrome-2026-10-h3",
+                "client_implementation": "AutoCAR worktree WebH3Client (chrome-2026-10)",
+                "server_implementation": "AutoCAR worktree web H3 server",
                 "implementation_version": args.autocar_version,
                 "real_browser": False,
                 "runner_image": args.runner_image,
@@ -465,6 +465,16 @@ def self_test() -> None:
         if secret in retained:
             fail("self-test found a secret in generated retained inputs")
         generated = read_json(root / "campaign.json")
+        effective = read_json(root / "autocar-effective.json")
+        if effective["h3_fingerprint"] != "chrome-2026-10":
+            fail("self-test found an incorrect AutoCAR H3 profile")
+        autocar = generated["products"]["autocar"]["variants"][0]
+        if (
+            autocar["name"] != "autocar-chrome-2026-10-h3"
+            or autocar["client_implementation"] != "AutoCAR worktree WebH3Client (chrome-2026-10)"
+            or autocar["implementation_version"] != args.autocar_version
+        ):
+            fail("self-test found stale AutoCAR capture labels")
         cover = generated["products"]["cover"]["variants"][0]
         if cover["real_browser"] is not False or "not a browser" not in cover["client_implementation"]:
             fail("self-test found a misleading cover-control label")

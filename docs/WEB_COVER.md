@@ -387,7 +387,7 @@ Recommended configuration:
   --system-roots \
   --token-file /etc/autocar/relay-token \
   --transport web-auto \
-  --h3-fingerprint chrome-2026-08 \
+  --h3-fingerprint chrome-2026-10 \
   --quic-attempt-timeout 5s \
   --open-timeout 15s \
   --fallback-cooldown 30s
@@ -401,7 +401,7 @@ The three web transport choices are:
 | `h3` | Require HTTP/3 over UDP for TCP CONNECT and CONNECT-UDP; no H2 fallback |
 | `h2` | Require HTTPS/HTTP/2 over TCP CONNECT; no H3 attempt and no UDP support |
 
-`--h3-fingerprint=chrome-2026-08` is the default for `web-auto` and `h3`. It
+`--h3-fingerprint=chrome-2026-10` is the default for `web-auto` and `h3`. It
 enables the fixed full client QUIC/TLS handshake profile and zero-length source
 CID supplied by the pinned `github.com/apernet/quic-go` fork. The profile is
 locked to QUIC v1 because its fixed version-information transport parameter is
@@ -409,6 +409,14 @@ part of that v1 handshake image.
 `--h3-fingerprint=native` disables ChromeParrot inside that same fork as an
 explicit interoperability and rollback choice. Here `native` names only the H3
 fingerprint fallback; it does not select AutoCAR's native `autocar/2` protocol.
+
+The retired `chrome-2026-08` name is rejected, not mapped to the new image. To
+upgrade an explicitly pinned client config, choose `chrome-2026-10` or `native`
+and validate it with `client --check`. Old configs that omit the profile adopt
+the new default and therefore change their handshake after upgrade. New web
+`init` client files record the current profile explicitly. Review this change
+before deploying clients; server-only configurations have no client-profile
+migration.
 
 For `web-auto`, `0 < --quic-attempt-timeout < --open-timeout` is required.
 When the relay name resolves to both address families, H3 interleaves IPv6 and
@@ -601,9 +609,9 @@ clocks must be synchronized closely enough to satisfy the acceptance window.
 
 ## Fingerprint boundary
 
-The H3 client uses the fixed `chrome-2026-08` profile by default. AutoCAR obtains
+The H3 client uses the fixed `chrome-2026-10` profile by default. AutoCAR obtains
 that profile from the `github.com/apernet/quic-go` fork,
-pinned to `v0.61.1-0.20260806010916-184d081eef3e`. It applies the fork's
+pinned to `v0.63.1-0.20261004180939-a10df75c260c`. It applies the fork's
 ChromeParrot client handshake image—including ClientHello, client transport
 parameters and Initial packetization—and uses a zero-length client source CID.
 ChromeParrot is client-only: it does not turn the AutoCAR relay into a particular
@@ -663,11 +671,13 @@ libraries' default `User-Agent` and automatic `Accept-Encoding: gzip` values.
 AutoCAR does not invent browser headers until the complete request-header set
 and ordering have been measured and implemented as one coherent profile.
 
-Using the same maintained handshake implementation as the comparator removes
-some known stock-QUIC differences, but it is not independent evidence of a
-classification advantage and does not make the two application protocols wire
-compatible. Therefore the project does not claim that web-cover traffic is
-indistinguishable from a browser. A defensible result requires a versioned,
+The new dependency and profile are distinct from the implementation frozen in
+the earlier comparison baseline. Historical shared-revision observations must
+not be described as current implementation equivalence. A maintained handshake
+profile is not independent evidence of a classification advantage and does not
+make different application protocols wire compatible. Therefore the project
+does not claim that web-cover traffic is indistinguishable from a browser.
+A defensible result requires a versioned,
 reproducible capture and a classifier evaluated on held-out runs. Until such a
 gate passes, passive-fingerprint superiority is unproven.
 

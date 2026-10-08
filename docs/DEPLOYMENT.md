@@ -263,7 +263,7 @@ This example records it explicitly so that the chosen protocol stays clear:
   --system-roots \
   --token-file /etc/autocar/relay-token \
   --transport web-auto \
-  --h3-fingerprint chrome-2026-08 \
+  --h3-fingerprint chrome-2026-10 \
   --quic-attempt-timeout 5s \
   --open-timeout 15s \
   --fallback-cooldown 30s
@@ -276,13 +276,24 @@ TCP flows use H2 without repeating the UDP wait. The configured cooldown is a
 base with independent +/-20% jitter; after it, exactly one caller probes H3.
 Use `--transport=h3` or `--transport=h2` to require one path during diagnosis.
 
-`chrome-2026-08` is the default H3 fingerprint. It uses the exactly pinned
+`chrome-2026-10` is the default H3 fingerprint. It uses the exactly pinned
 `github.com/apernet/quic-go` fork for the complete client
 QUIC/TLS handshake profile and a zero-length source CID. Use
 `--h3-fingerprint=native` only as an interoperability or rollback diagnostic; it
 disables ChromeParrot within the same web-H3 fork and does not select native
 `autocar/2`. The profile is client-only and does not claim to reproduce server
 behavior, H3 SETTINGS, CONNECT traffic or timing.
+
+Before upgrading a client, review its effective profile. An explicit
+`chrome-2026-08` is rejected with a migration hint; choose `chrome-2026-10` or
+`native` deliberately. The old name is not an alias for the new handshake.
+An older config that omits `h3-fingerprint` adopts `chrome-2026-10` automatically,
+so omission does not preserve its prior wire behavior. Newly generated web
+`init` client files explicitly pin `h3-fingerprint`. Run `client --check` with
+the intended config before deployment. Server-only deployments need no
+client-profile migration. The Chrome profile still uses full TLS handshakes on
+replacement H3 connections; this update enables neither resumption nor 0-RTT
+and is not evidence of improved passive indistinguishability.
 
 H3 and H2 use the same `--server` address, so `--fallback-server` is not valid
 with web transports. Web transports reject `--client-cert/--client-key` and
@@ -739,7 +750,7 @@ endpoint and fingerprint frozen in the preregistration. See
 and [RELEASING.md](RELEASING.md) for ordinary release quality checks.
 
 `autocar/2` and web-cover do not provide third-party proxy or AutoCAR v1 compatibility.
-The shared web-H3 QUIC implementation does not change that protocol boundary.
+The web-H3 QUIC dependency does not change that protocol boundary.
 For a rolling breaking upgrade, start the new relay on a second UDP/TCP port,
 move clients, verify each selected transport independently, and then retire the
 old endpoint. There is no silent protocol-family downgrade.

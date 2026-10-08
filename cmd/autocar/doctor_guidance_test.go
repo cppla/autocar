@@ -38,6 +38,8 @@ func TestDoctorFailureGuidanceUsesTypedCausesAndRedactsDetails(t *testing.T) {
 		{"missing file", "configuration_failed", &os.PathError{Op: "open", Path: private, Err: os.ErrNotExist}, "file_missing", "paths"},
 		{"file permission", "configuration_failed", &os.PathError{Op: "open", Path: private, Err: os.ErrPermission}, "file_permission", "world-readable"},
 		{"untyped configuration", "configuration_failed", errors.New(private), "configuration", "--token-file"},
+		{"retired H3 flag", "invalid_arguments", tunnel.ErrH3FingerprintProfileRetired, "h3_fingerprint_retired", "--h3-fingerprint=chrome-2026-10"},
+		{"retired H3 configuration", "configuration_failed", tunnel.ErrH3FingerprintProfileRetired, "h3_fingerprint_retired", "--h3-fingerprint=native"},
 		{"cancel", "probe_failed", context.Canceled, "canceled", "canceled"},
 		{"certificate trust", "probe_failed", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{Cert: certificate}}, "certificate_trust", "--ca"},
 		{"certificate hostname", "probe_failed", x509.HostnameError{Certificate: certificate, Host: private}, "certificate_name", "--server-name"},

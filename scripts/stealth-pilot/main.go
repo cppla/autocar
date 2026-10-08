@@ -468,13 +468,7 @@ func runProxyWorkload(ctx context.Context, args []string) error {
 		if *serverName == "" || *caFile == "" || *tokenFile == "" {
 			return errors.New("AutoCAR requires --server-name, --ca, and --token-file")
 		}
-		commandArgs = []string{
-			"client", "--server", *server, "--transport", "h3",
-			"--h3-fingerprint", "chrome-2026-08", "--server-name", *serverName,
-			"--ca", *caFile, "--token-file", *tokenFile, "--socks", "",
-			"--http", *proxyListen, "--dial-timeout", "4s", "--open-timeout", "12s",
-			"--idle-timeout", "20s", "--max-connections", "128",
-		}
+		commandArgs = autocarClientCommandArgs(*server, *serverName, *caFile, *tokenFile, *proxyListen)
 	case "hysteria2":
 		if *clientBin != "/hysteria" || *clientConfig != "/pilot/hysteria-client.yaml" {
 			return errors.New("the Hysteria pilot requires fixed /hysteria and /pilot/hysteria-client.yaml paths")
@@ -508,6 +502,16 @@ func runProxyWorkload(ctx context.Context, args []string) error {
 	defer transport.CloseIdleConnections()
 	client := proxyKeepAliveDoer{inner: &http.Client{Transport: transport}}
 	return executeWorkload(ctx, client, *origin, *workload, *seed, defaultIdle)
+}
+
+func autocarClientCommandArgs(server, serverName, caFile, tokenFile, proxyListen string) []string {
+	return []string{
+		"client", "--server", server, "--transport", "h3",
+		"--h3-fingerprint", "chrome-2026-10", "--server-name", serverName,
+		"--ca", caFile, "--token-file", tokenFile, "--socks", "",
+		"--http", proxyListen, "--dial-timeout", "4s", "--open-timeout", "12s",
+		"--idle-timeout", "20s", "--max-connections", "128",
+	}
 }
 
 func hysteriaClientCommandArgs(config string) []string {

@@ -123,7 +123,7 @@ func TestWebH3ResumptionReconnectContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = client.Close() })
-			if test.profile == "" && client.fingerprint != H3FingerprintChrome202608 {
+			if test.profile == "" && client.fingerprint != H3FingerprintChrome202610 {
 				t.Fatal("default H3 profile changed")
 			}
 			entropy := &webH2AuthEntropyCounter{}

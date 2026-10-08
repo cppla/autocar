@@ -36,12 +36,34 @@ type tunnelFlags struct {
 	openTimeout    time.Duration
 	h2WriteTimeout time.Duration
 	fallbackTTL    time.Duration
-	h3Fingerprint  string
+	h3Fingerprint  h3FingerprintFlag
 	pacing         string
 	pacingProfile  string
 	uploadMbps     uint64
 	downloadMbps   uint64
 	eventHandler   tunnel.ClientEventHandler
+}
+
+// h3FingerprintFlag rejects the retired wire image at parse time, including
+// commands that would not otherwise construct an H3 client. Other values retain
+// their existing transport-specific validation behavior.
+type h3FingerprintFlag string
+
+func (value *h3FingerprintFlag) String() string {
+	if value == nil {
+		return ""
+	}
+	return string(*value)
+}
+
+func (value *h3FingerprintFlag) Get() any { return value.String() }
+
+func (value *h3FingerprintFlag) Set(profile string) error {
+	*value = h3FingerprintFlag(profile)
+	if tunnel.H3FingerprintProfile(profile) == tunnel.H3FingerprintChrome202608 {
+		return tunnel.ErrH3FingerprintProfileRetired
+	}
+	return nil
 }
 
 func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
@@ -59,7 +81,8 @@ func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
 	fs.DurationVar(&flags.openTimeout, "open-timeout", 15*time.Second, "overall remote stream open timeout")
 	fs.DurationVar(&flags.h2WriteTimeout, "h2-write-timeout", 30*time.Second, "shared H2 connection write timeout (h2/web-auto only; 0 uses 30s; not an idle or per-stream timeout)")
 	fs.DurationVar(&flags.fallbackTTL, "fallback-cooldown", 30*time.Second, "base time to prefer the TCP fallback after a UDP path failure (each retry is jittered +/-20%)")
-	fs.StringVar(&flags.h3Fingerprint, "h3-fingerprint", string(tunnel.H3FingerprintChrome202608), "web H3 wire profile: chrome-2026-08 or native")
+	flags.h3Fingerprint = h3FingerprintFlag(tunnel.H3FingerprintChrome202610)
+	fs.Var(&flags.h3Fingerprint, "h3-fingerprint", "web H3 wire profile: chrome-2026-10 or native; chrome-2026-08 is retired")
 	fs.StringVar(&flags.pacing, "pacing", "adaptive", "QUIC application pacing: adaptive, reno, or fixed-rate")
 	fs.StringVar(&flags.pacingProfile, "pacing-profile", "balanced", "adaptive pacing profile: conservative, balanced, or aggressive")
 	fs.Uint64Var(&flags.uploadMbps, "upload-mbps", 0, "client-to-relay fixed pacing rate in Mbit/s")
@@ -72,6 +95,9 @@ type closeDialer interface {
 }
 
 func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
+	if tunnel.H3FingerprintProfile(flags.h3Fingerprint) == tunnel.H3FingerprintChrome202608 {
+		return nil, tunnel.ErrH3FingerprintProfileRetired
+	}
 	if flags.server == "" {
 		return nil, errors.New("--server is required")
 	}
