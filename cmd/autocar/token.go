@@ -6,11 +6,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
 
 func runToken(args []string) error {
+	return runTokenWith(args, os.Stdout)
+}
+
+func runTokenWith(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("token", flag.ContinueOnError)
 	output := fs.String("out", "", "write to a new 0600 file instead of stdout")
 	bytesCount := fs.Int("bytes", 32, "random byte count (16-128)")
@@ -26,7 +31,11 @@ func runToken(args []string) error {
 	}
 	value := base64.RawURLEncoding.EncodeToString(random) + "\n"
 	if *output == "" {
-		fmt.Print(value)
+		if n, err := io.WriteString(stdout, value); err != nil || n != len(value) {
+			// Writers may include the attempted bytes in their errors. Never
+			// expose a generated credential through diagnostics.
+			return errors.New("could not write token to stdout")
+		}
 		return nil
 	}
 	if strings.TrimSpace(*output) == "" {
