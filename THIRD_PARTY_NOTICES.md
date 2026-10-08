@@ -393,7 +393,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## `github.com/quic-go/quic-go` `v0.61.0`
+## `github.com/quic-go/quic-go` `v0.63.0`
 
 ### `LICENSE`
 
@@ -459,7 +459,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## `golang.org/x/crypto` `v0.55.0`
+## `golang.org/x/crypto` `v0.57.0`
 
 ### `LICENSE`
 
@@ -523,7 +523,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 ```
 
-## `golang.org/x/net` `v0.58.0`
+## `golang.org/x/net` `v0.59.0`
 
 ### `LICENSE`
 
@@ -587,7 +587,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 ```
 
-## `golang.org/x/sys` `v0.47.0`
+## `golang.org/x/sys` `v0.48.0`
 
 ### `LICENSE`
 
@@ -651,7 +651,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 ```
 
-## `golang.org/x/text` `v0.41.0`
+## `golang.org/x/text` `v0.42.0`
 
 ### `LICENSE`
 
