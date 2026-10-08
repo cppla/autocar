@@ -199,7 +199,8 @@ func TestSOCKSTCPSetupAlreadyClosedSkipsDial(t *testing.T) {
 	if err := tracked.Close(); err != nil {
 		t.Fatal(err)
 	}
-	server.serveConnect(tracked, socksRequest{command: socksCommandConnect, address: "127.0.0.1:443"})
+	owner := tracked.connectionContext(context.Background())
+	server.serveConnect(owner, tracked, socksRequest{command: socksCommandConnect, address: "127.0.0.1:443"})
 	if dialCalls != 0 {
 		t.Fatalf("already closed SOCKS TCP setup started %d remote dials", dialCalls)
 	}
