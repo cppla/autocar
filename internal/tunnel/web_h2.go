@@ -206,14 +206,8 @@ func (s *WebH2Server) Serve(ctx context.Context) error {
 func (s *WebH2Server) Close() error {
 	s.closeOnce.Do(func() {
 		ownerErr := s.tcpOwner.close()
-		serverErr := s.server.Close()
-		listenerErr := s.listener.Close()
-		if errors.Is(serverErr, http.ErrServerClosed) || errors.Is(serverErr, net.ErrClosed) {
-			serverErr = nil
-		}
-		if errors.Is(listenerErr, net.ErrClosed) {
-			listenerErr = nil
-		}
+		serverErr := normalizeWebServerCloseError(s.server.Close())
+		listenerErr := normalizeWebServerCloseError(s.listener.Close())
 		s.closeErr = errors.Join(ownerErr, serverErr, listenerErr)
 	})
 	return s.closeErr

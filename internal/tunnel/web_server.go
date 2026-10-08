@@ -8,13 +8,17 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/apernet/quic-go"
 	"github.com/cppla/autocar/internal/transport"
 )
+
+const webListenPortAttempts = 8
 
 // WebServerConfig configures one public web origin on a shared numeric port:
 // HTTPS over TCP (HTTP/2 and HTTP/1.1) and HTTP/3 over UDP. TCPAddress is
@@ -70,8 +74,17 @@ type WebServer struct {
 
 // ListenWeb binds both sides of the web-cover origin. TCP is deliberately
 // bound before UDP so a :0 configuration can use exactly the same numeric port
-// for both protocols.
+// for both protocols. If that ephemeral port is already occupied by UDP, it
+// closes TCP and tries another pair, with a bounded number of attempts. Fixed
+// ports and errors other than UDP address-in-use are never retried.
 func ListenWeb(config WebServerConfig) (*WebServer, error) {
+	return listenWebWith(config, listenWebH2WithCore, listenWebH3WithCore)
+}
+
+func listenWebWith(config WebServerConfig,
+	listenH2 func(WebH2ServerConfig, *serverCore, *webAuthVerifier) (*WebH2Server, error),
+	listenH3 func(WebH3ServerConfig, *serverCore, *webAuthVerifier) (*WebH3Server, error),
+) (*WebServer, error) {
 	var err error
 	config.TCPAddress, config.UDPAddress, err = normalizeWebListenAddresses(config.TCPAddress, config.UDPAddress)
 	if err != nil {
@@ -114,65 +127,105 @@ func ListenWeb(config WebServerConfig) (*WebServer, error) {
 	// last moment, so a cover origin cannot accidentally advertise a stale or
 	// unrelated alternative service.
 	publicCover := &webAltSvcCover{next: config.Cover}
-	h2, err := listenWebH2WithCore(WebH2ServerConfig{
-		Address:                 config.TCPAddress,
-		Token:                   config.Token,
-		TLSConfig:               config.TLSConfig,
-		Cover:                   publicCover,
-		Dialer:                  config.Dialer,
-		HandshakeTimeout:        config.HandshakeTimeout,
-		DialTimeout:             config.DialTimeout,
-		DestinationWriteTimeout: config.DestinationWriteTimeout,
-		MaxConcurrentStreams:    config.MaxConcurrentStreams,
-		StreamAdmission:         config.StreamAdmission,
-		ReplayEntries:           config.ReplayEntries,
-		MaxConnections:          config.MaxConnections,
-		MaxClientConnections:    config.MaxClientConnections,
-		MaxHeaderBytes:          config.MaxHeaderBytes,
-		connectionAdmission:     connectionAdmission,
-	}, core, verifier)
-	if err != nil {
-		return nil, err
+	attempts := 1
+	// Use the normalized TCP port: :0 plus a fixed UDP port is a fixed-port
+	// request, not permission to choose another public endpoint.
+	if webEphemeralListenAddress(config.TCPAddress) {
+		attempts = webListenPortAttempts
 	}
-
-	udpAddress, err := webUDPAddressForTCP(config.UDPAddress, h2.Addr())
-	if err != nil {
-		_ = h2.Close()
-		return nil, err
-	}
-	h3, err := listenWebH3WithCore(WebH3ServerConfig{
-		Address:                 udpAddress,
-		Token:                   config.Token,
-		TLSConfig:               config.TLSConfig,
-		QUICConfig:              config.QUICConfig,
-		Dialer:                  config.Dialer,
-		Cover:                   publicCover,
-		HandshakeTimeout:        config.HandshakeTimeout,
-		DialTimeout:             config.DialTimeout,
-		DestinationWriteTimeout: config.DestinationWriteTimeout,
-		MaxConcurrentStreams:    config.MaxConcurrentStreams,
-		StreamAdmission:         config.StreamAdmission,
-		MaxHeaderBytes:          config.MaxHeaderBytes,
-		ReplayEntries:           config.ReplayEntries,
-		MaxConnections:          config.MaxConnections,
-		MaxClientConnections:    config.MaxClientConnections,
-		connectionAdmission:     connectionAdmission,
-		UDPResolver:             config.UDPResolver,
-		MaxUDPSessions:          config.MaxUDPSessions,
-		MaxClientUDPSessions:    config.MaxClientUDPSessions,
-		MaxUDPDestinations:      config.MaxUDPDestinations,
-		UDPReceiveQueue:         config.UDPReceiveQueue,
-	}, core, verifier)
-	if err != nil {
-		closeErr := normalizeWebServerCloseError(h2.Close())
-		if closeErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("tunnel: close web-cover TCP listener after UDP bind failure: %w", closeErr))
+	for attempt := 1; ; attempt++ {
+		h2, err := listenH2(WebH2ServerConfig{
+			Address:                 config.TCPAddress,
+			Token:                   config.Token,
+			TLSConfig:               config.TLSConfig,
+			Cover:                   publicCover,
+			Dialer:                  config.Dialer,
+			HandshakeTimeout:        config.HandshakeTimeout,
+			DialTimeout:             config.DialTimeout,
+			DestinationWriteTimeout: config.DestinationWriteTimeout,
+			MaxConcurrentStreams:    config.MaxConcurrentStreams,
+			StreamAdmission:         config.StreamAdmission,
+			ReplayEntries:           config.ReplayEntries,
+			MaxConnections:          config.MaxConnections,
+			MaxClientConnections:    config.MaxClientConnections,
+			MaxHeaderBytes:          config.MaxHeaderBytes,
+			connectionAdmission:     connectionAdmission,
+		}, core, verifier)
+		if err != nil {
+			return nil, err
 		}
-		return nil, err
-	}
 
-	publicCover.value = webH3AltSvcValue(h3.Addr())
-	return &WebServer{h2: h2, h3: h3}, nil
+		udpAddress, err := webUDPAddressForTCP(config.UDPAddress, h2.Addr())
+		if err != nil {
+			_ = h2.Close()
+			return nil, err
+		}
+		h3, err := listenH3(WebH3ServerConfig{
+			Address:                 udpAddress,
+			Token:                   config.Token,
+			TLSConfig:               config.TLSConfig,
+			QUICConfig:              config.QUICConfig,
+			Dialer:                  config.Dialer,
+			Cover:                   publicCover,
+			HandshakeTimeout:        config.HandshakeTimeout,
+			DialTimeout:             config.DialTimeout,
+			DestinationWriteTimeout: config.DestinationWriteTimeout,
+			MaxConcurrentStreams:    config.MaxConcurrentStreams,
+			StreamAdmission:         config.StreamAdmission,
+			MaxHeaderBytes:          config.MaxHeaderBytes,
+			ReplayEntries:           config.ReplayEntries,
+			MaxConnections:          config.MaxConnections,
+			MaxClientConnections:    config.MaxClientConnections,
+			connectionAdmission:     connectionAdmission,
+			UDPResolver:             config.UDPResolver,
+			MaxUDPSessions:          config.MaxUDPSessions,
+			MaxClientUDPSessions:    config.MaxClientUDPSessions,
+			MaxUDPDestinations:      config.MaxUDPDestinations,
+			UDPReceiveQueue:         config.UDPReceiveQueue,
+		}, core, verifier)
+		if err != nil {
+			closeErr := normalizeWebServerCloseError(h2.Close())
+			if closeErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("tunnel: close web-cover TCP listener after UDP bind failure: %w", closeErr))
+			}
+			if attempt < attempts && webUDPListenAddressInUse(err) {
+				continue
+			}
+			return nil, err
+		}
+
+		publicCover.value = webH3AltSvcValue(h3.Addr())
+		return &WebServer{h2: h2, h3: h3}, nil
+	}
+}
+
+func webEphemeralListenAddress(address string) bool {
+	_, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	port, err := net.LookupPort("tcp", portText)
+	return err == nil && port == 0
+}
+
+func webUDPListenAddressInUse(err error) bool {
+	// Do not conceal a second failure joined to an otherwise retryable bind
+	// error. Only an unambiguous UDP listen failure is eligible.
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		if _, joined := current.(interface{ Unwrap() []error }); joined {
+			return false
+		}
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || opErr.Op != "listen" || opErr.Net != "udp" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		// Windows bind returns WSAEADDRINUSE, not the synthetic POSIX errno.
+		const winsockAddressInUse syscall.Errno = 10048
+		return errors.Is(opErr.Err, winsockAddressInUse)
+	}
+	return errors.Is(opErr.Err, syscall.EADDRINUSE)
 }
 
 func normalizeWebListenAddresses(tcpAddress, udpAddress string) (string, string, error) {
@@ -402,21 +455,48 @@ func (w *webAltSvcResponseWriter) ReadFrom(r io.Reader) (int64, error) {
 func (w *webAltSvcResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func normalizeWebServerCloseError(err error) error {
+	normalized, _ := normalizeWebServerCloseErrorTree(err)
+	return normalized
+}
+
+// The bool reports an actual rewrite without comparing arbitrary error
+// values, whose concrete types need not be comparable. Do not use errors.Is:
+// finding one benign leaf (or a custom Is match) does not make a tree benign.
+func normalizeWebServerCloseErrorTree(err error) (error, bool) {
 	if err == nil {
-		return nil
+		return nil, false
+	}
+	if err == net.ErrClosed || err == http.ErrServerClosed {
+		return nil, true
 	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		parts := joined.Unwrap()
 		normalized := make([]error, 0, len(parts))
+		changed := false
 		for _, part := range parts {
-			if part = normalizeWebServerCloseError(part); part != nil {
+			var rewritten bool
+			part, rewritten = normalizeWebServerCloseErrorTree(part)
+			changed = changed || rewritten
+			if part != nil {
 				normalized = append(normalized, part)
 			}
 		}
-		return errors.Join(normalized...)
+		if !changed {
+			// In particular, an unknown multi-error with no actual children
+			// is not evidence of successful cleanup.
+			return err, false
+		}
+		return errors.Join(normalized...), true
 	}
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed) {
-		return nil
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if inner := wrapped.Unwrap(); inner != nil {
+			if normalized, _ := normalizeWebServerCloseErrorTree(inner); normalized == nil {
+				return nil, true
+			}
+		}
 	}
-	return err
+	// A wrapper around a mixed tree cannot be reconstructed generically. Keep
+	// its identity and diagnostics, including any benign siblings, rather than
+	// hiding the meaningful cleanup failure.
+	return err, false
 }

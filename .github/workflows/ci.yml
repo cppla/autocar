@@ -97,6 +97,23 @@ jobs:
             }
             Write-Output "Verified ${testName}: $passes passes, $skips skips"
           }
+      - name: Exercise bounded web listener retries and rollback on Windows
+        shell: pwsh
+        run: |
+          $retryTests = @('TestWebListenRetryRealUDPCollision', 'TestWebListenRetryPolicy', 'TestWebListenRetryCloseFailure')
+          $testOutput = & go test ./internal/tunnel -run ('^(' + ($retryTests -join '|') + ')$') -count=3 -timeout=90s -json
+          $testExit = $LASTEXITCODE
+          $testOutput | Write-Output
+          if ($testExit -ne 0) { exit $testExit }
+          $testEvents = @($testOutput | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+          foreach ($testName in $retryTests) {
+            $passes = @($testEvents | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' }).Count
+            $skips = @($testEvents | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' }).Count
+            if ($passes -ne 3 -or $skips -ne 0) {
+              throw "$testName requires exactly 3 passes and 0 skips; got $passes passes and $skips skips"
+            }
+            Write-Output "Verified ${testName}: $passes passes, $skips skips"
+          }
       - name: Exercise static cover path policy on Windows
         shell: pwsh
         run: |

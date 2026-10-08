@@ -162,6 +162,12 @@ Web-cover presents one HTTPS origin over TCP and UDP on the same numeric port:
 | HTTP/2 | TCP/TLS 1.2 or 1.3 | configured cover | TLS 1.3-only standard `CONNECT` stream for TCP |
 | HTTP/3 | QUIC/UDP/TLS 1.3 | configured cover | standard `CONNECT` for TCP; RFC 9298 `CONNECT-UDP` with HTTP Datagrams for UDP |
 
+When both effective listen ports are `0`, startup binds TCP first and uses its
+selected port for UDP. If that port is already occupied by UDP, startup closes
+TCP before trying a new pair, with at most eight total attempts. A fixed port
+on either side disables this retry. Other bind errors and rollback failures
+are returned immediately; the server never silently switches a fixed port.
+
 HTTP/1.1 and HTTP/2 cover responses include an `Alt-Svc` value for the bound H3
 port. Only H2 and H3 requests with method `CONNECT`, an empty path and query,
 and exactly one valid `Proxy-Authorization` value are eligible to become a TCP
