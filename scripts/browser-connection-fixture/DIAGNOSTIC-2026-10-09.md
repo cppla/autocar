@@ -17,7 +17,7 @@ web-H3 client or its maintained dependency replacement.
 
 One fixture instance served the entire successful experiment, with the same
 lab certificate and TLS ticket keys. It listened only on numeric IPv4 loopback,
-had a 540-second lifetime, 64-request/32-admitted-connection budgets and the
+had a 540-second maximum lifetime, 64-request/32-admitted-connection budgets and the
 unchanged 30-second idle limits. It had no TCP listener. The certificate had a
 loopback SAN and a one-day validity; no system trust store was changed.
 

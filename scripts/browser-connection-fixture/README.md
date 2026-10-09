@@ -46,7 +46,7 @@ H3 from an exit code alone: verify navigation and fetch Resource Timing report
 an HTTPS URL does not configure H3; use browser-version-appropriate lab settings
 and certificate trust or a narrowly scoped lab pin.
 
-Requests and `/probe` responses also contain a small `tls` object:
+Request log records and `/probe` responses also contain a small `tls` object:
 `handshake_complete`, `did_resume`, numeric `version` (772 for TLS 1.3), and
 `alpn` (`h3` for this origin). Missing TLS state is explicitly `null`, not an
 assertion that a handshake was cold. Unexpected nonempty ALPN values are
