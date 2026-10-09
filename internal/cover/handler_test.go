@@ -212,6 +212,64 @@ func TestReverseProxyFailureIsGeneric(t *testing.T) {
 	assertNoProductMarker(t, response.Result())
 }
 
+func TestReverseProxyRejectsCONNECTBeforeUpstream(t *testing.T) {
+	for _, publicOrigin := range []bool{false, true} {
+		name := "fixed_origin"
+		if publicOrigin {
+			name = "public_origin"
+		}
+		t.Run(name, func(t *testing.T) {
+			var calls int
+			upstream := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if request.Method != http.MethodGet {
+					t.Errorf("unsupported method reached upstream: %s", request.Method)
+				}
+				return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody}, nil
+			})
+			target := &url.URL{Scheme: "http", Host: "fixed-origin.invalid"}
+			var handler http.Handler
+			var err error
+			if publicOrigin {
+				handler, err = NewReverseProxyHandlerWithPublicOrigin(target, &url.URL{Scheme: "https", Host: "public.example"}, upstream)
+			} else {
+				handler, err = NewReverseProxyHandler(target, upstream)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			get := func() {
+				t.Helper()
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://public.example/", nil))
+				if response.Code != http.StatusNoContent {
+					t.Fatalf("ordinary GET status = %d, want 204", response.Code)
+				}
+			}
+			get() // Positive control: the transport is active before CONNECT.
+			for _, body := range []string{"", "unforwarded CONNECT body"} {
+				request := httptest.NewRequest(http.MethodConnect, "public.example:443", strings.NewReader(body))
+				request.Header.Set("Authorization", "fictional origin credential")
+				request.Header.Set("Proxy-Authorization", "fictional proxy credential")
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				_ = request.Body.Close()
+				if calls != 1 {
+					t.Fatalf("CONNECT called the upstream transport: %d calls, want only the initial GET", calls)
+				}
+				if response.Code != http.StatusBadGateway || response.Body.String() != "Bad Gateway\n" {
+					t.Fatalf("CONNECT status/body = %d/%q, want generic 502", response.Code, response.Body.String())
+				}
+				assertNoProductMarker(t, response.Result())
+			}
+			get() // Rejection must not disable later ordinary website requests.
+			if calls != 2 {
+				t.Fatalf("upstream calls = %d, want exactly the two ordinary GETs", calls)
+			}
+		})
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

@@ -222,6 +222,17 @@ the upstream cannot be reached. Consequently, an upstream that requires an
 `Authorization` request header is not suitable without a separate authorized
 front end.
 
+With the minimum Go 1.27.2 security update, the standard reverse proxy rejects
+`CONNECT` before contacting the upstream, addressing
+[GO-2026-6605](https://pkg.go.dev/vuln/GO-2026-6605). Unauthenticated or invalid
+CONNECT/CONNECT-UDP requests delegated to a reverse-proxy cover therefore get
+its generic `502`, with no upstream informational response. The combined
+listener still supplies its bound `Alt-Svc`. These same-method invalid probes
+must agree with each other, but are not expected to equal an ordinary GET.
+AutoCAR does not rewrite CONNECT to GET or bypass the standard-library guard.
+Authenticated tunnel handling occurs before cover delegation and is unchanged;
+static or custom cover handlers retain their own method policy.
+
 Source builds after v1.0.1 preserve declared end-to-end request trailers for
 nonempty streamed uploads through the fixed-origin and public-origin proxies.
 For example, a website can receive a late `Content-Digest` after consuming the

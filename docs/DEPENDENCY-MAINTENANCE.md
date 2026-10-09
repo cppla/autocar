@@ -11,7 +11,7 @@ identity instead of repairing the existing dependency graph.
 The upstream baseline is
 `v1.8.3-0.20261006222701-ff1b50fbbe9a`
 (`ff1b50fbbe9a6dff1dcb1cfc0493bd5b0f073f67`). It requires Go 1.27;
-AutoCAR's minimum supported toolchain is Go 1.27.1. Native transport continues
+AutoCAR's minimum supported toolchain is Go 1.27.2. Native transport continues
 to use official quic-go. Web H3 retains its existing, independently pinned
 QUIC dependency; this change does not require another maintained QUIC fork.
 
@@ -105,3 +105,27 @@ that renamed fork. Record those source/patch reviews separately; do not call
 them automated reachability results or reuse an older review for changed code.
 
 This is an update/release procedure, not a background monitoring service.
+
+## October 2026 security refresh
+
+The October 9 pre-merge scan reported 11 reachable advisory IDs in the Go
+1.27.1 / `x/net v0.59.0` build, following the October 8 advisory publication.
+Current builds require [Go 1.27.2](https://go.dev/doc/devel/release#go1.27.0)
+and select `x/net v0.60.0`, including the
+[HTTP/2 HPACK race fix](https://pkg.go.dev/vuln/GO-2026-6617). CI, release builds
+and all current Go builder images are updated together; historical validation
+records and frozen capture inputs are not rewritten.
+
+The uTLS fork separately backports Go commit
+[`f022e61963529d5e691f0e42a87fd5b520f01636`](https://github.com/golang/go/commit/f022e61963529d5e691f0e42a87fd5b520f01636)
+for [GO-2026-6607](https://pkg.go.dev/vuln/GO-2026-6607). A newer compiler cannot
+repair copied TLS source. This shared decoder serves ECH server processing and
+local custom-client transcript reconstruction. AutoCAR's configured fork use is
+client-side with GREASE ECH, limiting the affected server-input path, but the
+public fork still receives the exact upstream fix and bounded regressions.
+
+Go 1.27.2 also rejects CONNECT in `httputil.ReverseProxy`; tests retain this
+security behavior and assert no upstream dial. See the
+[cover compatibility boundary](WEB_COVER.md#fixed-upstream-origin). Functional
+passes, a clean reachability scan, and the separate copied-source review remain
+distinct evidence, not a claim that every dependency is vulnerability-free.
