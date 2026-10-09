@@ -377,7 +377,7 @@ func (f *webH2DialSharingFixture) raw(raws <-chan *webH2DialSharingRaw) *webH2Di
 }
 
 func TestWebH2DialSharingFailureAndLaterRetry(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			f := newWebH2DialSharingFixture(t)
 			_, clientTLS := testTLSConfigs(t)
@@ -494,7 +494,7 @@ func (f *webH2DialSharingFixture) target() string {
 }
 
 func TestWebH2DialInitiatingCallerCancellationKeepsPhysicalInitialization(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			f := newWebH2DialSharingFixture(t)
 			serverTLS, clientTLS := testTLSConfigs(t)
@@ -643,7 +643,7 @@ func TestWebH2DialInitiatingCallerCancellationKeepsPhysicalInitialization(t *tes
 }
 
 func TestWebH2DialAllWaitersAbandonThenClose(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			f := newWebH2DialSharingFixture(t)
 			_, clientTLS := testTLSConfigs(t)

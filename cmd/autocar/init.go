@@ -87,6 +87,7 @@ func runInitWith(args []string, output io.Writer) error {
 		"ca": "server.crt", "token-file": "relay-token", "transport": transportMode,
 	}
 	if protocolMode == "web" {
+		clientOptions["h2-fingerprint"] = string(tunnel.FingerprintChrome155)
 		clientOptions["h3-fingerprint"] = string(tunnel.H3FingerprintChrome202610)
 	}
 	clientConfig, err := json.MarshalIndent(clientOptions, "", "  ")

@@ -21,7 +21,7 @@ import (
 const webH2IntegrationWriteTimeout = 300 * time.Millisecond
 
 func TestWebH2WriteByteTimeoutPreservesHealthyTLS(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			client := newWebH2WriteTimeoutIntegrationClient(t, profile)
 			target := startWebTCPEcho(t)
@@ -62,7 +62,7 @@ func TestWebH2WriteByteTimeoutPreservesHealthyTLS(t *testing.T) {
 }
 
 func TestWebH2WriteByteTimeoutReachesTLSRawConnection(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			client := newWebH2WriteTimeoutIntegrationClient(t, profile)
 			target := startWebTCPEcho(t)

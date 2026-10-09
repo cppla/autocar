@@ -222,6 +222,17 @@ the upstream cannot be reached. Consequently, an upstream that requires an
 `Authorization` request header is not suitable without a separate authorized
 front end.
 
+With the minimum Go 1.27.2 security update, the standard reverse proxy rejects
+`CONNECT` before contacting the upstream, addressing
+[GO-2026-6605](https://pkg.go.dev/vuln/GO-2026-6605). Unauthenticated or invalid
+CONNECT/CONNECT-UDP requests delegated to a reverse-proxy cover therefore get
+its generic `502`, with no upstream informational response. The combined
+listener still supplies its bound `Alt-Svc`. These same-method invalid probes
+must agree with each other, but are not expected to equal an ordinary GET.
+AutoCAR does not rewrite CONNECT to GET or bypass the standard-library guard.
+Authenticated tunnel handling occurs before cover delegation and is unchanged;
+static or custom cover handlers retain their own method policy.
+
 Source builds after v1.0.1 preserve declared end-to-end request trailers for
 nonempty streamed uploads through the fixed-origin and public-origin proxies.
 For example, a website can receive a late `Content-Digest` after consuming the
@@ -387,6 +398,7 @@ Recommended configuration:
   --system-roots \
   --token-file /etc/autocar/relay-token \
   --transport web-auto \
+  --h2-fingerprint chrome-155 \
   --h3-fingerprint chrome-2026-10 \
   --quic-attempt-timeout 5s \
   --open-timeout 15s \
@@ -400,6 +412,14 @@ The three web transport choices are:
 | `web-auto` | For TCP, try H3 first and use H2 during an H3-failure cooldown; for UDP, require H3 CONNECT-UDP with no H2 fallback |
 | `h3` | Require HTTP/3 over UDP for TCP CONNECT and CONNECT-UDP; no H2 fallback |
 | `h2` | Require HTTPS/HTTP/2 over TCP CONNECT; no H3 attempt and no UDP support |
+
+`--h2-fingerprint=chrome-155` selects the fixed Chrome 155 ClientHello for
+explicit `h2` and the H2 fallback in `web-auto`. The other choices are the
+unchanged `chrome-133` profile and `native` (Go TLS, for interoperability and
+debugging). JSON uses the same `h2-fingerprint` key. New web `init` client files
+pin `chrome-155`; omitted values in existing configs still select `chrome-133`.
+There is no moving "current Chrome" alias or silent rewrite of a named profile.
+This setting does not change H3 or the server's TLS implementation.
 
 `--h3-fingerprint=chrome-2026-10` is the default for `web-auto` and `h3`. It
 enables the fixed full client QUIC/TLS handshake profile and zero-length source
@@ -635,11 +655,18 @@ state. It does not measure browser similarity. The real-browser calibration
 starts a fresh browser profile for each sample and does not include a controlled
 warm reconnect, so its results cannot establish a resumption advantage or deficit.
 
-The H2 client separately uses the fixed `chrome-133` uTLS ClientHello profile.
-That describes only its TLS ClientHello; H2 settings, header order, flow control,
+The H2 client separately offers fixed `chrome-133` and `chrome-155` uTLS
+ClientHello profiles. The Chrome 155 regression compares bytes emitted by the
+actual AutoCAR TLS wrapper with an independently captured official Chrome
+155.0.8059.40 cold handshake, under empty-cache, nil-cache and disabled-ticket
+policies. The [fixture and comparison boundaries](../internal/tunnel/testdata/chrome155/README.md)
+record its source, date, checksum and normalization rules. This is reuse of a
+historical browser capture, not a new browser run or a warm-handshake comparison.
+Advertised trust-anchor IDs do not replace or expand the configured `RootCAs`.
+These profiles describe only the TLS ClientHello; H2 settings, header order, flow control,
 connection reuse, payload sizes and timing retain their implementation behavior.
 Source builds after v1.0.1 also support ordinary TLS 1.3 session resumption for
-this profile when the caller enables a TLS session cache. An empty cache keeps
+both profiles when the caller enables a TLS session cache. An empty cache keeps
 the fixed cold ClientHello shape; a valid cached ticket adds uTLS's native
 `pre_shared_key` extension and binder as the last extension, as required by
 [RFC 8446 section 4.2.11](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.2.11).
@@ -647,13 +674,12 @@ The cache is private to one configured H2 client. A nil caller cache or
 `SessionTicketsDisabled` keeps full handshakes. This does not enable 0-RTT:
 every new physical connection completes TLS and starts fresh proxy authentication,
 even when TLS resumes; connection-scoped proxy tickets are never inherited.
-The pinned uTLS implementation cannot rebuild a populated PSK after a TLS 1.3
-HelloRetryRequest. For this narrowly recognized library limitation, the H2 client
-closes the failed socket and retries once on a fresh connection without a ticket,
-within the same remaining initialization timeout. Certificate/hostname checks,
-TLS 1.3 and h2 are still mandatory; unrelated TLS failures are not retried.
-The library may invalidate the failed cached ticket. This compatibility fallback
-is a full handshake, not successful HRR resumption or a browser-equivalence claim.
+The pinned uTLS implementation rebuilds a populated PSK after a TLS 1.3
+HelloRetryRequest on the same physical connection. Regression tests require
+the second ClientHello's binder, both peers' resumed state, and fresh proxy
+authentication; the former private-error-text-triggered cold redial has been
+removed. Certificate/hostname checks, TLS 1.3 and h2 remain mandatory. Functional
+HRR resumption does not establish that warm handshakes match a browser.
 
 Resumption retains the previously verified TLS session rather than repeating a
 full certificate exchange or calling `VerifyPeerCertificate` again. Callers

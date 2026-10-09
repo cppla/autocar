@@ -20,11 +20,15 @@ import (
 )
 
 func TestWebH2ResumptionHRRInitializationCancellation(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testWebH2ResumptionHRRInitializationCancellation)
+}
+
+func testWebH2ResumptionHRRInitializationCancellation(t *testing.T, profile FingerprintProfile) {
 	for _, stage := range []string{"hrr_read", "h2_preface"} {
 		t.Run(stage, func(t *testing.T) {
 			for _, mode := range []string{"handshake_timeout", "caller_cancel", "client_close"} {
 				t.Run(mode, func(t *testing.T) {
-					fixture := webH2HRRPrime(t)
+					fixture := webH2HRRPrime(t, profile)
 					fixture.client.handshakeTimeout = 1500 * time.Millisecond
 					warm := webH2HRRInstallWarm(t, fixture)
 					warm.blockPreface = stage == "h2_preface"
@@ -83,7 +87,11 @@ func TestWebH2ResumptionHRRInitializationCancellation(t *testing.T) {
 }
 
 func TestWebH2ResumptionHRRWriteFailureDoesNotRetry(t *testing.T) {
-	fixture := webH2HRRPrime(t)
+	forEachWebH2ChromeProfile(t, testWebH2ResumptionHRRWriteFailureDoesNotRetry)
+}
+
+func testWebH2ResumptionHRRWriteFailureDoesNotRetry(t *testing.T, profile FingerprintProfile) {
+	fixture := webH2HRRPrime(t, profile)
 	warm := webH2HRRInstallWarm(t, fixture)
 	// Even the retired library's exact error text is only an I/O failure here.
 	// A genuine HRR must not turn it into an extra cold physical connection.
@@ -115,9 +123,13 @@ func TestWebH2ResumptionHRRWriteFailureDoesNotRetry(t *testing.T) {
 }
 
 func TestWebH2ResumptionDoesNotRetryOtherTLSErrors(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testWebH2ResumptionDoesNotRetryOtherTLSErrors)
+}
+
+func testWebH2ResumptionDoesNotRetryOtherTLSErrors(t *testing.T, profile FingerprintProfile) {
 	for _, mode := range []string{"certificate", "alpn", "matching_text_without_hrr"} {
 		t.Run(mode, func(t *testing.T) {
-			fixture := webH2HRRPrime(t)
+			fixture := webH2HRRPrime(t, profile)
 			serverTLS := fixture.serverTLS.Clone()
 			serverTLS.SessionTicketsDisabled = true
 			serverTLS.CurvePreferences = []tls.CurveID{tls.X25519}
@@ -196,13 +208,13 @@ type webH2HRRFixture struct {
 
 // GET primes only TLS tickets and H2 initialization, deliberately bypassing
 // CONNECT/app authentication. Healthy authenticated HRR tests live separately.
-func webH2HRRPrime(t *testing.T) *webH2HRRFixture {
+func webH2HRRPrime(t *testing.T, profile FingerprintProfile) *webH2HRRFixture {
 	t.Helper()
 	serverTLS, config := webH2ResumptionTLSConfigs(t)
 	waitingSecondHello := make(chan struct{})
 	address, attempts, requests, handlerDone, destination := webH2HRRServer(t, serverTLS, "unused.invalid:443", 2, waitingSecondHello)
 	config.ClientSessionCache = tls.NewLRUClientSessionCache(2)
-	client, err := NewWebH2Client(WebH2ClientConfig{ServerAddress: address, Token: webTestToken, TLSConfig: config, HandshakeTimeout: 3 * time.Second})
+	client, err := NewWebH2Client(WebH2ClientConfig{ServerAddress: address, Token: webTestToken, TLSConfig: config, FingerprintProfile: profile, HandshakeTimeout: 3 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

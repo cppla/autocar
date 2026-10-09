@@ -204,8 +204,12 @@ version-information transport parameter. `--h3-fingerprint=native` disables Chro
 fork for interoperability and rollback; it does not select the native
 `autocar/2` transport. ChromeParrot is client-only: the relay remains an ordinary
 QUIC/H3 server, and H3 SETTINGS, CONNECT requests, application traffic and timing
-are outside the handshake profile. H2 independently uses a fixed Chrome 133
-ClientHello but retains the Go HTTP/2 stack.
+are outside the handshake profile. H2 independently supports fixed Chrome 133
+and Chrome 155 ClientHello profiles but retains the Go HTTP/2 stack. New web
+`init` bundles explicitly pin `h2-fingerprint` to `chrome-155`; omitted values
+keep Chrome 133 for compatibility. The explicit setting also reaches H2 fallback
+in `web-auto`. A historical real-browser cold ClientHello fixture validates the
+new template's normalized fields, not complete browser traffic equivalence.
 
 This version replaces, rather than aliases, the retired `chrome-2026-08` name.
 Explicit old names fail validation; omitted client profiles use the new default.

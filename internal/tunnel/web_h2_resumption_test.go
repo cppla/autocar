@@ -246,15 +246,19 @@ func webH2ResumptionOrigin(t *testing.T, serverTLS *tls.Config) (string, <-chan 
 	return listener.Addr().String(), results, requests, handlerDone, &dialCalls
 }
 
-func webH2ResumptionCheckChromeHello(t *testing.T, hello parsedClientHello, warm bool) {
+func webH2ResumptionCheckChromeHello(t *testing.T, hello parsedClientHello, profile FingerprintProfile, warm bool) {
 	t.Helper()
 	wantCiphers := []uint16{0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035}
 	if got := withoutGREASE(hello.cipherSuites); !reflect.DeepEqual(got, wantCiphers) {
 		t.Errorf("Chrome cold/warm cipher order changed: %#v", got)
 	}
-	// This exact non-GREASE membership is the original pinned Chrome-133
-	// preset. Order is deliberately not frozen: the preset shuffles it.
+	// Both fixed profiles retain this common non-GREASE membership; Chrome155
+	// additionally advertises its captured trust-anchor IDs. Extension order
+	// is deliberately not frozen: the presets shuffle it.
 	wantExtensions := []uint16{0, 5, 10, 11, 13, 16, 18, 23, 27, 35, 43, 45, 51, 17613, 0xfe0d, 0xff01}
+	if profile == FingerprintChrome155 {
+		wantExtensions = append(wantExtensions, 0xca34)
+	}
 	if warm {
 		wantExtensions = append(wantExtensions, 41)
 	}
@@ -283,6 +287,9 @@ func TestWebH2RealTLSResumptionAndFreshAuthentication(t *testing.T) {
 		{name: "chrome_enabled", profile: FingerprintChrome133, cacheEnabled: true, wantResume: true},
 		{name: "chrome_nil_cache", profile: FingerprintChrome133},
 		{name: "chrome_tickets_disabled", profile: FingerprintChrome133, cacheEnabled: true, ticketsDisabled: true},
+		{name: "chrome155_enabled", profile: FingerprintChrome155, cacheEnabled: true, wantResume: true},
+		{name: "chrome155_nil_cache", profile: FingerprintChrome155},
+		{name: "chrome155_tickets_disabled", profile: FingerprintChrome155, cacheEnabled: true, ticketsDisabled: true},
 		{name: "native_positive", profile: FingerprintNative, cacheEnabled: true, wantResume: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -301,7 +308,7 @@ func TestWebH2RealTLSResumptionAndFreshAuthentication(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = client.Close() })
 			var chromeCache *webH2ResumptionUTLSCache
-			if test.profile == FingerprintChrome133 {
+			if test.profile == FingerprintChrome133 || test.profile == FingerprintChrome155 {
 				if test.wantResume {
 					if client.utlsSessionCache == nil {
 						t.Fatal("enabled cache policy did not create a uTLS cache")
@@ -405,8 +412,8 @@ func TestWebH2RealTLSResumptionAndFreshAuthentication(t *testing.T) {
 					if warm && result.hello.extensions[len(result.hello.extensions)-1] != 41 {
 						t.Error("warm ClientHello PSK extension is not last")
 					}
-					if test.profile == FingerprintChrome133 {
-						webH2ResumptionCheckChromeHello(t, result.hello, warm)
+					if test.profile == FingerprintChrome133 || test.profile == FingerprintChrome155 {
+						webH2ResumptionCheckChromeHello(t, result.hello, test.profile, warm)
 					}
 				case <-time.After(2 * time.Second):
 					t.Fatal("real physical HTTP/2 worker did not return")

@@ -77,7 +77,7 @@ func TestWebH3AltSvcConsistencyPublicCommitModes(t *testing.T) {
 
 func TestWebH3AltSvcConsistencyReverseProxyInvalidProbes(t *testing.T) {
 	var credentials, dials, resolves atomic.Int64
-	website := webAltSvcReverseProxyOrigin(t, &credentials)
+	website, originRequests := webAltSvcReverseProxyOrigin(t, &credentials)
 	server, clientTLS := webAltSvcCombinedServer(t, website, webAltSvcForbiddenDialer(&dials), &resolves)
 	bound := []string{webH3AltSvcValue(server.UDPAddr())}
 	for _, proto := range []int{1, 2, 3} {
@@ -108,7 +108,7 @@ func TestWebH3AltSvcConsistencyReverseProxyInvalidProbes(t *testing.T) {
 					}{"udp_malformed_invalid", http.MethodConnect, "/not-a-template", []string{"Bearer invalid"}, true},
 				)
 			}
-			var visitor http.Header
+			var visitor, unsupportedConnect http.Header
 			for _, probe := range probes {
 				t.Run(probe.name, func(t *testing.T) {
 					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -128,14 +128,35 @@ func TestWebH3AltSvcConsistencyReverseProxyInvalidProbes(t *testing.T) {
 						request.Proto = webConnectUDPProtocol
 						request.Header.Set(webCapsuleProtocolHeader, webCapsuleProtocolValue)
 					}
+					before := originRequests.Load()
 					result := webAltSvcRoundTrip(t, rt, request, proto)
-					webAltSvcAssertPublic(t, result, []int{103, 102, 103}, 200, "ordinary website", bound)
+					if probe.method == http.MethodConnect {
+						// Go 1.27.2 rejects CONNECT before ReverseProxy calls its
+						// transport (GO-2026-6605). Keep that security boundary:
+						// compare unauthenticated probes with the same method,
+						// not with an unrelated ordinary GET response.
+						webAltSvcAssertPublic(t, result, nil, http.StatusBadGateway, "Bad Gateway\n", bound)
+						if got := originRequests.Load(); got != before {
+							t.Fatalf("unsupported CONNECT reached the fixed origin: %d -> %d", before, got)
+						}
+					} else {
+						webAltSvcAssertPublic(t, result, []int{103, 102, 103}, 200, "ordinary website", bound)
+						if got := originRequests.Load(); got != before+1 {
+							t.Fatalf("GET origin requests = %d, want %d", got, before+1)
+						}
+					}
 					normalized := result.header.Clone()
 					normalized.Del("Date")
 					if probe.name == "visitor" {
 						visitor = normalized
-					} else if !reflect.DeepEqual(visitor, normalized) {
-						t.Errorf("same-protocol invalid probe metadata differs from visitor: %v vs %v", normalized, visitor)
+					} else if probe.method == http.MethodGet {
+						if !reflect.DeepEqual(visitor, normalized) {
+							t.Errorf("same-protocol invalid GET metadata differs from visitor: %v vs %v", normalized, visitor)
+						}
+					} else if probe.name == "connect_missing" {
+						unsupportedConnect = normalized
+					} else if !reflect.DeepEqual(unsupportedConnect, normalized) {
+						t.Errorf("same-protocol invalid CONNECT metadata differs from missing credentials: %v vs %v", normalized, unsupportedConnect)
 					}
 				})
 			}
@@ -144,7 +165,7 @@ func TestWebH3AltSvcConsistencyReverseProxyInvalidProbes(t *testing.T) {
 	if dials.Load() != 0 || resolves.Load() != 0 || credentials.Load() != 0 {
 		t.Fatalf("public target dial/resolution/credential counters=%d/%d/%d", dials.Load(), resolves.Load(), credentials.Load())
 	}
-	t.Log("real H1/H2/H3 visitor and invalid probes: target dial/resolution/credential counters=0/0/0")
+	t.Logf("real H1/H2/H3 visitor and invalid probes: %d fixed-origin GETs, zero origin CONNECTs, target dial/resolution/credential counters=0/0/0", originRequests.Load())
 }
 
 func TestWebH3AltSvcConsistencyAuthenticatedResponsesRemainPrivate(t *testing.T) {
@@ -204,7 +225,7 @@ func TestWebH3AltSvcConsistencyAuthenticatedResponsesRemainPrivate(t *testing.T)
 
 func TestWebH3AltSvcConsistencyStandalonePreservesOriginPolicy(t *testing.T) {
 	var credentials, dials atomic.Int64
-	website := webAltSvcReverseProxyOrigin(t, &credentials)
+	website, originRequests := webAltSvcReverseProxyOrigin(t, &credentials)
 	serverTLS, clientTLS := testTLSConfigs(t)
 	server, err := ListenWebH3(WebH3ServerConfig{Address: "127.0.0.1:0", Token: webTestToken, TLSConfig: serverTLS, Cover: website, Dialer: webAltSvcForbiddenDialer(&dials)})
 	if err != nil {
@@ -222,6 +243,9 @@ func TestWebH3AltSvcConsistencyStandalonePreservesOriginPolicy(t *testing.T) {
 	webAltSvcAssertPublic(t, result, []int{103, 102, 103}, 200, "ordinary website", webAltSvcOriginValues)
 	if dials.Load() != 0 || credentials.Load() != 0 {
 		t.Fatal("standalone public request touched tunnel destination or credentials")
+	}
+	if got := originRequests.Load(); got != 1 {
+		t.Fatalf("standalone fixed origin requests = %d, want 1", got)
 	}
 }
 
@@ -261,9 +285,11 @@ func webAltSvcWebsite(w http.ResponseWriter, mode string) {
 	}
 }
 
-func webAltSvcReverseProxyOrigin(t *testing.T, credentials *atomic.Int64) http.Handler {
+func webAltSvcReverseProxyOrigin(t *testing.T, credentials *atomic.Int64) (http.Handler, *atomic.Int64) {
 	t.Helper()
+	originRequests := new(atomic.Int64)
 	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originRequests.Add(1)
 		if r.Header.Get("Authorization") != "" || r.Header.Get("Proxy-Authorization") != "" {
 			credentials.Add(1)
 		}
@@ -282,7 +308,7 @@ func webAltSvcReverseProxyOrigin(t *testing.T, credentials *atomic.Int64) http.H
 	if err != nil {
 		t.Fatal(err)
 	}
-	return website
+	return website, originRequests
 }
 
 func webAltSvcForbiddenDialer(dials *atomic.Int64) transport.Dialer {

@@ -24,12 +24,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ['1.27.1', '1.27.x']
+        include:
+          - go: '1.27.2'
+            version: '1.27.2'
+          - go: '1.27.x'
+            # Reject stale manifests and caches below the security baseline.
+            version: '>=1.27.2 <1.28.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ matrix.go }}
+          go-version: ${{ matrix.version }}
+          # Floating versions must not reuse an older cached security patch.
+          check-latest: ${{ matrix.go == '1.27.x' }}
           cache: true
       - name: Verify formatting
         if: matrix.go == '1.27.x'
@@ -64,26 +71,26 @@ jobs:
           if-no-files-found: error
 
   macos-test:
-    name: macOS test (Go 1.27.1)
+    name: macOS test (Go 1.27.2)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.2
           cache: true
       - name: Test
         run: go test -shuffle=on -count=1 ./...
 
   windows-udp-test:
-    name: Windows UDP continuity (Go 1.27.1)
+    name: Windows UDP continuity (Go 1.27.2)
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.2
           cache: true
       - name: Exercise native UDP continuity and platform bind errors
         shell: pwsh
@@ -144,7 +151,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.x
+          go-version: '>=1.27.2 <1.28.0'
+          check-latest: true
           cache: true
       - run: make race
 
@@ -155,7 +163,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.1
+          go-version: 1.27.2
           cache: true
       - name: Run govulncheck
         run: ./scripts/govulncheck.sh
@@ -203,7 +211,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.x
+          go-version: '>=1.27.2 <1.28.0'
+          check-latest: true
           cache: true
       - name: Cross-build
         env:

@@ -427,7 +427,7 @@ SOFTWARE.
 
 ## `github.com/refraction-networking/utls` `v1.8.3-0.20261006222701-ff1b50fbbe9a`
 
-Effective source replacement: `github.com/cppla/utls v0.0.0-20261008110020-7295e1b508c3`.
+Effective source replacement: `github.com/cppla/utls v0.0.0-20261009014536-ff869e255a30`.
 
 ### `LICENSE`
 
@@ -527,7 +527,7 @@ rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
 ```
 
-## `golang.org/x/net` `v0.59.0`
+## `golang.org/x/net` `v0.60.0`
 
 ### `LICENSE`
 

@@ -13,15 +13,19 @@ import (
 )
 
 // FingerprintProfile names the TLS ClientHello profile used by the TCP web
-// transport. Profile names are deliberately versioned: chrome-133 means the
-// explicit HelloChrome_133 reference originally shipped in uTLS v1.8.2,
-// not "current Chrome" or the moving HelloChrome_Auto alias.
+// transport. Profile names select explicit, fixed uTLS ClientHello references,
+// never "current Chrome" or the moving HelloChrome_Auto alias.
 type FingerprintProfile string
 
 const (
 	// FingerprintChrome133 is the audited Chrome 133 ClientHello reference from
 	// uTLS v1.8.2. The explicit HelloChrome_133 remains the default for H2.
 	FingerprintChrome133 FingerprintProfile = "chrome-133"
+
+	// FingerprintChrome155 selects the Chrome 155.0.8059.40 macOS cold
+	// ClientHello reference captured on 2026-10-06. It is an explicit opt-in;
+	// omitted profiles retain Chrome 133 for configuration compatibility.
+	FingerprintChrome155 FingerprintProfile = "chrome-155"
 
 	// FingerprintNative uses Go's crypto/tls ClientHello. It is retained for
 	// tests and protocol debugging, not as an anti-fingerprinting profile.
@@ -32,10 +36,10 @@ func normalizeFingerprintProfile(profile FingerprintProfile) (FingerprintProfile
 	switch profile {
 	case "", FingerprintChrome133:
 		return FingerprintChrome133, nil
-	case FingerprintNative:
-		return FingerprintNative, nil
+	case FingerprintChrome155, FingerprintNative:
+		return profile, nil
 	default:
-		return "", fmt.Errorf("tunnel: unsupported web-cover HTTP/2 fingerprint profile %q; supported profiles are %q and %q", profile, FingerprintChrome133, FingerprintNative)
+		return "", fmt.Errorf("tunnel: unsupported web-cover HTTP/2 fingerprint profile %q; supported profiles are %q, %q and %q", profile, FingerprintChrome133, FingerprintChrome155, FingerprintNative)
 	}
 }
 
@@ -96,8 +100,8 @@ func newWebH2TLSClientConn(raw net.Conn, config *tls.Config, profile Fingerprint
 		return nil, errors.New("tunnel: nil web-cover HTTP/2 TLS config")
 	}
 	switch profile {
-	case FingerprintChrome133:
-		utlsConfig, err := chrome133UTLSConfig(config, sessionCache)
+	case FingerprintChrome133, FingerprintChrome155:
+		utlsConfig, err := chromeUTLSConfig(config, sessionCache)
 		if err != nil {
 			return nil, err
 		}
@@ -105,13 +109,18 @@ func newWebH2TLSClientConn(raw net.Conn, config *tls.Config, profile Fingerprint
 		// custom copy when resumption is enabled so uTLS can populate its own
 		// PSK identity and binder, without changing the empty-cache wire shape.
 		resume := utlsConfig.ClientSessionCache != nil && !utlsConfig.SessionTicketsDisabled
-		hello := utls.HelloChrome_133
+		profileID := utls.HelloChrome_133
+		if profile == FingerprintChrome155 {
+			profileID = utls.HelloChrome_155
+		}
+		hello := profileID
 		if resume {
 			hello = utls.HelloCustom
 		}
 		return &webH2UTLSConn{
-			UConn:            utls.UClient(raw, utlsConfig, hello),
-			prepareChrome133: resume,
+			UConn:         utls.UClient(raw, utlsConfig, hello),
+			chromeHelloID: profileID,
+			prepareResume: resume,
 		}, nil
 	case FingerprintNative:
 		return tls.Client(raw, config.Clone()), nil
@@ -120,11 +129,11 @@ func newWebH2TLSClientConn(raw net.Conn, config *tls.Config, profile Fingerprint
 	}
 }
 
-// chrome133UTLSConfig translates the security-relevant client subset from the
+// chromeUTLSConfig translates the security-relevant client subset from the
 // already hardened crypto/tls configuration. uTLS and crypto/tls intentionally
 // use distinct Config and Certificate types, so this conversion stays explicit
 // and fail-closed for callbacks that cannot be preserved exactly.
-func chrome133UTLSConfig(input *tls.Config, sessionCache utls.ClientSessionCache) (*utls.Config, error) {
+func chromeUTLSConfig(input *tls.Config, sessionCache utls.ClientSessionCache) (*utls.Config, error) {
 	if input == nil {
 		return nil, errors.New("tunnel: nil web-cover HTTP/2 TLS config")
 	}
@@ -132,10 +141,10 @@ func chrome133UTLSConfig(input *tls.Config, sessionCache utls.ClientSessionCache
 		return nil, errors.New("tunnel: InsecureSkipVerify is forbidden")
 	}
 	if input.GetClientCertificate != nil {
-		return nil, errors.New("tunnel: chrome-133 fingerprint profile does not support dynamic GetClientCertificate; configure static client Certificates or use the native test/debug profile")
+		return nil, errors.New("tunnel: Chrome fingerprint profiles do not support dynamic GetClientCertificate; configure static client Certificates or use the native test/debug profile")
 	}
 	if input.VerifyConnection != nil {
-		return nil, errors.New("tunnel: chrome-133 fingerprint profile cannot preserve crypto/tls VerifyConnection exactly; use VerifyPeerCertificate or the native test/debug profile")
+		return nil, errors.New("tunnel: Chrome fingerprint profiles cannot preserve crypto/tls VerifyConnection exactly; use VerifyPeerCertificate or the native test/debug profile")
 	}
 
 	certificates := make([]utls.Certificate, len(input.Certificates))
@@ -202,20 +211,21 @@ func cloneCertificateForUTLS(input tls.Certificate) utls.Certificate {
 
 type webH2UTLSConn struct {
 	*utls.UConn
-	prepareChrome133  bool
+	chromeHelloID     utls.ClientHelloID
+	prepareResume     bool
 	prepareOnce       sync.Once
 	prepareErr        error
 	handshakeComplete atomic.Bool
 }
 
 // HandshakeContext enforces the application's TLS 1.3-only policy after the
-// fixed browser ClientHello is applied. The Chrome 133 wire profile advertises
-// its historical TLS 1.2 compatibility; uTLS therefore cannot express the
+// fixed browser ClientHello is applied. Both Chrome wire profiles advertise
+// their historical TLS 1.2 compatibility; uTLS therefore cannot express the
 // stricter application policy in the visible supported_versions extension
 // without ceasing to be that profile. Failing before any HTTP bytes are sent
 // keeps the policy fail-closed even if a future caller forgets a second check.
 func (c *webH2UTLSConn) HandshakeContext(ctx context.Context) error {
-	if c.prepareChrome133 {
+	if c.prepareResume {
 		if !c.handshakeComplete.Load() {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -225,7 +235,7 @@ func (c *webH2UTLSConn) HandshakeContext(ctx context.Context) error {
 			// ApplyPreset generates entropy and key shares: keep it inside the
 			// caller's handshake budget rather than in the connection factory.
 			// Each connection owns the extension pointers mutated by uTLS.
-			spec, err := utls.UTLSIdToSpec(utls.HelloChrome_133)
+			spec, err := utls.UTLSIdToSpec(c.chromeHelloID)
 			if err == nil {
 				// TLS 1.3 requires this extension to be last. OmitEmptyPsk
 				// suppresses it until a valid cached session is available.

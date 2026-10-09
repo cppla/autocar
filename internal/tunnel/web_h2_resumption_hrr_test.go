@@ -400,6 +400,9 @@ func TestWebH2ResumptionHRRKeepsHealthyTunnel(t *testing.T) {
 		{name: "chrome_enabled", profile: FingerprintChrome133, cacheEnabled: true, resumed: true},
 		{name: "chrome_nil_cache", profile: FingerprintChrome133},
 		{name: "chrome_tickets_disabled", profile: FingerprintChrome133, cacheEnabled: true, ticketsDisabled: true},
+		{name: "chrome155_enabled", profile: FingerprintChrome155, cacheEnabled: true, resumed: true},
+		{name: "chrome155_nil_cache", profile: FingerprintChrome155},
+		{name: "chrome155_tickets_disabled", profile: FingerprintChrome155, cacheEnabled: true, ticketsDisabled: true},
 		{name: "native_positive", profile: FingerprintNative, cacheEnabled: true, resumed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -419,7 +422,7 @@ func TestWebH2ResumptionHRRKeepsHealthyTunnel(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = client.Close() })
 			var chromeCache *webH2ResumptionUTLSCache
-			if test.profile == FingerprintChrome133 && test.resumed {
+			if (test.profile == FingerprintChrome133 || test.profile == FingerprintChrome155) && test.resumed {
 				chromeCache = &webH2ResumptionUTLSCache{inner: client.utlsSessionCache}
 				client.utlsSessionCache = chromeCache
 			}

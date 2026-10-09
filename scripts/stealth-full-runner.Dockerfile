@@ -3,7 +3,7 @@
 # Build both formal-campaign clients from the same pinned Go toolchain and
 # module graph. The launcher records the resulting immutable image ID, then
 # extracts the two binaries for campaign provenance.
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS build
 
 ARG TARGETOS
 ARG TARGETARCH

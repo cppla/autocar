@@ -32,7 +32,7 @@ class DependencyBoundaryTests(unittest.TestCase):
         self.fork = PINS["ALLOWED_UTLS_REPLACEMENT"]
         self.replacement = f"replace {self.upstream} => {self.fork} {FORK_VERSION}"
         self.module = (
-            "module example.invalid/fixture\n\ngo 1.27.1\n\nrequire (\n"
+            "module example.invalid/fixture\n\ngo 1.27.2\n\nrequire (\n"
             f"\t{PINS['ALLOWED_WEB_QUIC_MODULE']} {PINS['ALLOWED_WEB_QUIC_VERSION']}\n"
             f"\t{self.upstream} {PINS['ALLOWED_UTLS_UPSTREAM_VERSION']}\n"
             ")\n\n" + self.replacement + "\n"

@@ -30,6 +30,9 @@ type WebClientConfig struct {
 	// H3FingerprintProfile defaults to the fixed chrome-2026-10 QUIC profile.
 	// Native is an explicit interoperability and rollback path.
 	H3FingerprintProfile H3FingerprintProfile
+	// H2FingerprintProfile selects the TCP fallback ClientHello independently
+	// of H3. Empty retains chrome-133; chrome-155 is an explicit opt-in.
+	H2FingerprintProfile FingerprintProfile
 
 	HandshakeTimeout time.Duration
 	H3DialTimeout    time.Duration
@@ -134,12 +137,13 @@ func NewWebClient(config WebClientConfig) (*WebClient, error) {
 		return nil, fmt.Errorf("tunnel: configure web-cover H3 primary: %w", err)
 	}
 	h2, err := NewWebH2Client(WebH2ClientConfig{
-		ServerAddress:    config.ServerAddress,
-		Token:            config.Token,
-		TLSConfig:        config.TLSConfig,
-		HandshakeTimeout: config.HandshakeTimeout,
-		DialTimeout:      config.H2DialTimeout,
-		WriteByteTimeout: config.H2WriteByteTimeout,
+		ServerAddress:      config.ServerAddress,
+		Token:              config.Token,
+		TLSConfig:          config.TLSConfig,
+		FingerprintProfile: config.H2FingerprintProfile,
+		HandshakeTimeout:   config.HandshakeTimeout,
+		DialTimeout:        config.H2DialTimeout,
+		WriteByteTimeout:   config.H2WriteByteTimeout,
 	})
 	if err != nil {
 		_ = h3.Close()

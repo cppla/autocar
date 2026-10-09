@@ -58,7 +58,7 @@ func (c *webH2TCPHandoffContext) Deadline() (time.Time, bool) {
 }
 
 func TestWebH2TCPHandoffHonorsCallerCancellation(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			f := newWebH2DialSharingFixture(t)
 			target := f.target()
