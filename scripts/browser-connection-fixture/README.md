@@ -2,7 +2,8 @@
 
 This small test origin assigns an ID to each admitted physical QUIC connection.
 It helps inspect whether a browser navigation and subsequent fetch reuse a
-connection. It is not an AutoCAR proxy, a formal corpus generator, or a
+connection, and whether a later physical connection resumes TLS. It is not an
+AutoCAR proxy, a formal corpus generator, or a
 production traffic optimization.
 
 An explicitly limited [Chrome diagnostic](DIAGNOSTIC-2026-09-22.md) records one
@@ -44,6 +45,31 @@ H3 from an exit code alone: verify navigation and fetch Resource Timing report
 `h3`, and retain browser version, launch settings and server logs. Merely opening
 an HTTPS URL does not configure H3; use browser-version-appropriate lab settings
 and certificate trust or a narrowly scoped lab pin.
+
+Request log records and `/probe` responses also contain a small `tls` object:
+`handshake_complete`, `did_resume`, numeric `version` (772 for TLS 1.3), and
+`alpn` (`h3` for this origin). Missing TLS state is explicitly `null`, not an
+assertion that a handshake was cold. Unexpected nonempty ALPN values are
+replaced by `<other>`; tickets, keys, certificates and arbitrary TLS fields are
+never serialized.
+
+Each admitted connection emits exactly one `connection_closed` record with
+only `kind` and `connection_id`, after its actual QUIC context ends. Request or
+stream completion does not produce that event. Observer count is bounded by the
+connection budget, and shutdown joins observers before returning. No close
+reason is exposed: the event proves physical closure, not which peer or timer
+caused it. Filter by `kind` instead of assuming every line after `ready` is a
+request.
+
+For a warm-reconnection diagnostic, keep the same browser process/context,
+fixture instance and certificate. Check cold and same-origin reuse requests
+have the same ID and `did_resume: false`; wait for that ID's actual close event
+without sending target requests; then require a different ID, successful H3
+response and `did_resume: true`. Save runtime browser version and command line
+before target navigation. Server-observed browser TLS state is not both-peer
+instrumentation or wire-level proof about 0-RTT. See the bounded
+[warm-reconnection observation](DIAGNOSTIC-2026-10-09.md), including its initial
+readiness failure.
 
 ## Separate from the WebDriver workload diagnostic
 

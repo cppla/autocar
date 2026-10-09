@@ -105,11 +105,36 @@ func (log *jsonLog) write(value any) error {
 type connectionKey struct{}
 
 type requestRecord struct {
+	Kind         string      `json:"kind"`
+	ConnectionID uint64      `json:"connection_id"`
+	Path         string      `json:"path"`
+	Trial        string      `json:"trial"`
+	Protocol     string      `json:"protocol"`
+	TLS          *tlsSummary `json:"tls"`
+}
+
+// Keep only non-secret connection state; never serialize tls.ConnectionState.
+type tlsSummary struct {
+	HandshakeComplete bool   `json:"handshake_complete"`
+	DidResume         bool   `json:"did_resume"`
+	Version           uint16 `json:"version"`
+	ALPN              string `json:"alpn"`
+}
+
+func summarizeTLS(state *tls.ConnectionState) *tlsSummary {
+	if state == nil {
+		return nil
+	}
+	alpn := state.NegotiatedProtocol
+	if alpn != "" && alpn != http3.NextProtoH3 {
+		alpn = "<other>"
+	}
+	return &tlsSummary{state.HandshakeComplete, state.DidResume, state.Version, alpn}
+}
+
+type connectionClosedRecord struct {
 	Kind         string `json:"kind"`
 	ConnectionID uint64 `json:"connection_id"`
-	Path         string `json:"path"`
-	Trial        string `json:"trial"`
-	Protocol     string `json:"protocol"`
 }
 
 type fixture struct {
@@ -118,6 +143,21 @@ type fixture struct {
 	requests    atomic.Uint64
 	connections atomic.Uint64
 	stop        context.CancelFunc
+	observers   sync.WaitGroup
+}
+
+func (f *fixture) observeConnection(id uint64, conn *quic.Conn) {
+	// Called only for admitted connections, so the run's existing connection
+	// budget bounds both goroutines and close records. run joins the HTTP/3
+	// serving loop and handlers before waiting, so no Add can race with Wait.
+	f.observers.Add(1)
+	go func() {
+		defer f.observers.Done()
+		<-conn.Context().Done()
+		if err := f.log.write(connectionClosedRecord{"connection_closed", id}); err != nil {
+			f.stop()
+		}
+	}()
 }
 
 func validTrial(value string) bool {
@@ -158,7 +198,8 @@ func (f *fixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		queryValid = queryValid && r.URL.RawQuery == ""
 	}
 	// Never log arbitrary URL text, query values, headers, or peer addresses.
-	if err := f.log.write(requestRecord{"request", id, path, trial, "HTTP/3.0"}); err != nil {
+	tlsState := summarizeTLS(r.TLS)
+	if err := f.log.write(requestRecord{"request", id, path, trial, "HTTP/3.0", tlsState}); err != nil {
 		f.stop()
 		http.Error(w, "diagnostic output unavailable", http.StatusServiceUnavailable)
 		return
@@ -208,9 +249,10 @@ func (f *fixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method == http.MethodGet {
 		_ = json.NewEncoder(w).Encode(struct {
-			ConnectionID uint64 `json:"connection_id"`
-			Protocol     string `json:"protocol"`
-		}{id, "HTTP/3.0"})
+			ConnectionID uint64      `json:"connection_id"`
+			Protocol     string      `json:"protocol"`
+			TLS          *tlsSummary `json:"tls"`
+		}{id, "HTTP/3.0", tlsState})
 	}
 }
 
@@ -244,6 +286,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			id := f.connections.Add(1)
 			if id > uint64(opts.maxConnections) {
 				_ = conn.CloseWithError(0x100, "connection budget exhausted")
+			} else {
+				f.observeConnection(id, conn)
 			}
 			return context.WithValue(ctx, connectionKey{}, id)
 		},
@@ -252,10 +296,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.New("could not initialize the HTTP/3 QUIC listener")
 	}
-	defer listener.Close()
-	defer server.Close()
 	done := make(chan error, 1)
-	go func() { done <- server.ServeListener(listener) }()
+	servingDone := make(chan struct{})
+	go func() {
+		defer close(servingDone)
+		done <- server.ServeListener(listener)
+	}()
+	defer func() {
+		// Stop accepting and join the serving loop before closing handlers.
+		// Server.Close joins its connection handlers (including ConnContext),
+		// after which no new observer can be registered. Every emitted close
+		// record comes from actual QUIC context completion, never a timer guess.
+		_ = listener.Close()
+		<-servingDone
+		_ = server.Close()
+		_ = packet.Close()
+		f.observers.Wait()
+	}()
 	if err := f.log.write(struct {
 		Kind    string `json:"kind"`
 		Address string `json:"address"`
