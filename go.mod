@@ -6,7 +6,7 @@ go 1.27.2
 replace github.com/refraction-networking/utls => github.com/cppla/utls v0.0.0-20261009031926-14c2a4cb1403
 
 // The web adapter is independent of native transport's official QUIC module.
-replace github.com/apernet/quic-go => github.com/cppla/quic-go v0.63.1-0.20261009040133-c1cae948af15
+replace github.com/apernet/quic-go => github.com/cppla/quic-go v0.63.1-0.20261009113701-3a0e2cdb87a8
 
 require (
 	github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c

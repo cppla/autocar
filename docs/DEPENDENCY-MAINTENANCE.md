@@ -66,7 +66,14 @@ The fork adds explicit opt-in browser-profile session resumption, its
 regressions, and narrowly scoped test/build maintenance. It also fixes CRYPTO
 tail offset and memory ownership across later handshake flights, including
 cold HelloRetryRequest handshakes, without changing the initial cold packet
-layout. See [the exact patch queue](https://github.com/cppla/quic-go/blob/main/FORK.md).
+layout. The migration follow-up synchronizes active send-connection replacement
+with public address accessors, remote-address updates and connection-state
+reads. Gated publication tests and real concurrent path migration reproduce
+the old race; AutoCAR additionally checks that authentication established by
+HTTP/3 CONNECT-UDP survives migration for a subsequent TCP stream on the same
+physical connection. This does not enable
+automatic client path switching in AutoCAR.
+See [the exact patch queue](https://github.com/cppla/quic-go/blob/main/FORK.md).
 Preserve the existing full-handshake profile,
 certificate verification, transport-parameter ownership and per-client cache
 isolation. A resumed TLS connection still requires fresh AutoCAR authentication;

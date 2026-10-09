@@ -4,7 +4,7 @@ set -Eeuo pipefail
 readonly ALLOWED_WEB_QUIC_MODULE='github.com/apernet/quic-go'
 readonly ALLOWED_WEB_QUIC_VERSION='v0.63.1-0.20261004180939-a10df75c260c'
 readonly ALLOWED_WEB_QUIC_REPLACEMENT='github.com/cppla/quic-go'
-readonly ALLOWED_WEB_QUIC_FORK_VERSION='v0.63.1-0.20261009040133-c1cae948af15'
+readonly ALLOWED_WEB_QUIC_FORK_VERSION='v0.63.1-0.20261009113701-3a0e2cdb87a8'
 readonly ALLOWED_UTLS_MODULE='github.com/refraction-networking/utls'
 readonly ALLOWED_UTLS_UPSTREAM_VERSION='v1.8.3-0.20261006222701-ff1b50fbbe9a'
 readonly ALLOWED_UTLS_REPLACEMENT='github.com/cppla/utls'

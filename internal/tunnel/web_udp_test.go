@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -292,11 +293,9 @@ func TestWebH3ConnectionAuthSurvivesClientPathMigration(t *testing.T) {
 	if physicalConnection == nil || session == nil || session.authState != webH3ClientAuthReady {
 		t.Fatal("CONNECT-UDP did not establish connection authentication before migration")
 	}
-	// Wait until the HTTP/3 control stream has consumed SETTINGS before asking
-	// quic-go to switch paths.  The migration API mutates the active path, while
-	// control-stream initialization reads ConnectionState; overlapping those two
-	// operations exercises an upstream initialization race instead of the
-	// connection-authentication behavior this test is meant to cover.
+	// Finish HTTP/3 setup before exercising authenticated path migration.
+	// Metadata reads below deliberately overlap the path change: neither this
+	// SETTINGS barrier nor Path.Switch is a substitute for dependency locking.
 	settingsContext, cancelSettings := context.WithTimeout(context.Background(), 2*time.Second)
 	err = waitWebH3DatagramSettings(settingsContext, session.client)
 	cancelSettings()
@@ -317,6 +316,34 @@ func TestWebH3ConnectionAuthSurvivesClientPathMigration(t *testing.T) {
 		_ = migratedTransport.Close()
 		_ = migratedSocket.Close()
 	})
+	metadataContext, stopMetadata := context.WithCancel(context.Background())
+	metadataStarted, metadataDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(metadataDone)
+		close(metadataStarted)
+		for {
+			select {
+			case <-metadataContext.Done():
+				return
+			default:
+			}
+			// These exported methods are also used by normal stream creation
+			// and HTTP/3. Reading them during migration must remain race-free.
+			_ = physicalConnection.LocalAddr().String()
+			_ = physicalConnection.RemoteAddr().String()
+			_ = physicalConnection.ConnectionState()
+			runtime.Gosched()
+		}
+	}()
+	t.Cleanup(func() {
+		stopMetadata()
+		select {
+		case <-metadataDone:
+		case <-time.After(2 * time.Second):
+			t.Error("connection metadata reader did not stop")
+		}
+	})
+	<-metadataStarted
 	path, err := physicalConnection.AddPath(migratedTransport)
 	if err != nil {
 		t.Fatal(err)
@@ -330,6 +357,11 @@ func TestWebH3ConnectionAuthSurvivesClientPathMigration(t *testing.T) {
 	if err := path.Switch(); err != nil {
 		t.Fatal(err)
 	}
+	// Switch requests migration asynchronously; keep concurrent metadata reads
+	// active until the run loop has actually selected the probed path.
+	waitForCondition(t, 2*time.Second, func() bool {
+		return physicalConnection.LocalAddr().String() == migratedSocket.LocalAddr().String()
+	}, "authenticated connection to select the migrated path")
 
 	if err := exchange(client, tcpTarget, "after-migration"); err != nil {
 		t.Fatal(err)
