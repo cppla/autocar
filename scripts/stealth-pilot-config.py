@@ -9,6 +9,9 @@ only SHA-256 commitments are retained by the campaign driver.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import copy
 import csv
 import hashlib
 import ipaddress
@@ -24,6 +27,28 @@ PRODUCTS = ("cover", "autocar", "hysteria2")
 WORKLOADS = ("idle", "download_1k", "parallel_20")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 USER_RE = re.compile(r"[1-9][0-9]*(?::[1-9][0-9]*)?")
+BUILD_INFO_LIMIT = 32 << 10
+BUILD_INFO_KIND = "autocar-pilot-build-provenance"
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+GO_VERSION_RE = re.compile(r"go[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:(?:rc|beta)[0-9]+)?")
+MODULE_VERSION_RE = re.compile(
+    r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+NATIVE_QUIC = "github.com/quic-go/quic-go"
+WEB_QUIC = "github.com/apernet/quic-go"
+UTLS = "github.com/refraction-networking/utls"
+MODULE_SOURCES = {
+    NATIVE_QUIC: (NATIVE_QUIC,),
+    WEB_QUIC: (WEB_QUIC, "github.com/cppla/quic-go"),
+    UTLS: (UTLS, "github.com/cppla/utls"),
+}
+BUILD_MODULES = {"autocar": (NATIVE_QUIC, WEB_QUIC, UTLS), "control": (NATIVE_QUIC,)}
+BUILD_PACKAGES = {
+    "autocar": "github.com/cppla/autocar/cmd/autocar",
+    "control": "github.com/cppla/autocar/scripts/stealth-pilot",
+}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -37,7 +62,7 @@ def parser() -> argparse.ArgumentParser:
         "autocar-container", "autocar-ip", "hysteria-container", "hysteria-ip",
         "origin-ip", "cert", "key", "token", "autocar-binary", "hysteria-binary",
         "hysteria-client-config", "hysteria-server-config", "autocar-version",
-        "hysteria-version", "hysteria-expected-sha256",
+        "hysteria-version", "hysteria-expected-sha256", "build-info", "control-binary",
     ):
         prepare.add_argument("--" + name, required=True)
 
@@ -83,7 +108,7 @@ def prepare(args: argparse.Namespace) -> None:
         name: under(root, Path(getattr(args, name)).resolve(strict=True), name)
         for name in (
             "cert", "key", "token", "autocar_binary", "hysteria_binary",
-            "hysteria_client_config", "hysteria_server_config",
+            "hysteria_client_config", "hysteria_server_config", "build_info", "control_binary",
         )
     }
     for path in files.values():
@@ -101,6 +126,10 @@ def prepare(args: argparse.Namespace) -> None:
     if hysteria_hash != args.hysteria_expected_sha256:
         fail("Hysteria binary does not match the pinned official checksum")
 
+    build_provenance = read_build_provenance(
+        files["build_info"], files["autocar_binary"], files["control_binary"]
+    )
+    control_version = build_provenance["control"]["modules"][0]["source_version"]
     auth_hash = sha256(files["token"])
     autocar_effective = {
         "schema_version": 1,
@@ -108,6 +137,7 @@ def prepare(args: argparse.Namespace) -> None:
         "product": "autocar",
         "implementation_version": args.autocar_version,
         "binary_sha256": sha256(files["autocar_binary"]),
+        "build_provenance": build_provenance,
         "transport": "h3",
         "h3_fingerprint": "chrome-2026-10",
         "relay": f"{endpoints['autocar']}:8443",
@@ -172,9 +202,9 @@ def prepare(args: argparse.Namespace) -> None:
         "products": {
             "cover": {"variants": [{
                 "name": "quic-go-standard-h3-control",
-                "client_implementation": "quic-go v0.63.0 standard H3 control (not a browser)",
-                "server_implementation": "quic-go v0.63.0 HTTP/3 fixture",
-                "implementation_version": "v0.63.0-calibration-control",
+                "client_implementation": f"quic-go {control_version} standard H3 control (not a browser)",
+                "server_implementation": f"quic-go {control_version} HTTP/3 fixture",
+                "implementation_version": f"{control_version}-calibration-control",
                 "real_browser": False,
                 "runner_image": args.runner_image,
                 "server_container": args.control_container,
@@ -430,13 +460,109 @@ def read_json(path: Path) -> Dict[str, Any]:
     return value
 
 
+def exact_build_keys(value: Any, keys: Iterable[str]) -> None:
+    # Never echo unrecognized keys or values: this report is retained publicly.
+    if not isinstance(value, dict) or set(value) != set(keys):
+        fail("build provenance contains an invalid object or unexpected fields")
+
+
+def unique_build_object(pairs: Iterable[tuple[str, Any]]) -> Dict[str, Any]:
+    value: Dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            fail("build provenance contains duplicate JSON fields")
+        value[key] = item
+    return value
+
+
+def require_build_string(value: Any, pattern: re.Pattern[str]) -> None:
+    if not isinstance(value, str) or len(value) > 256 or not pattern.fullmatch(value):
+        fail("build provenance contains an invalid version or digest")
+
+
+def require_module_sum(value: Any) -> None:
+    if not isinstance(value, str) or not value.startswith("h1:") or len(value) != 47:
+        fail("build provenance contains an invalid module checksum")
+    try:
+        digest = base64.b64decode(value[3:], validate=True)
+    except (binascii.Error, ValueError):
+        fail("build provenance contains an invalid module checksum")
+    if len(digest) != 32 or base64.b64encode(digest).decode("ascii") != value[3:]:
+        fail("build provenance contains a non-canonical module checksum")
+
+
+def read_build_provenance(path: Path, autocar_binary: Path, control_binary: Path) -> Dict[str, Any]:
+    with path.open("rb") as handle:
+        encoded = handle.read(BUILD_INFO_LIMIT + 1)
+    if len(encoded) > BUILD_INFO_LIMIT:
+        fail("build provenance exceeds the 32 KiB input limit")
+    try:
+        report = json.loads(encoded.decode("utf-8"), object_pairs_hook=unique_build_object)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        fail("build provenance is not valid bounded JSON")
+    exact_build_keys(report, ("schema_version", "kind", "autocar", "control"))
+    if type(report["schema_version"]) is not int or report["schema_version"] != 1 or report["kind"] != BUILD_INFO_KIND:
+        fail("build provenance schema or kind is unsupported")
+    sanitized: Dict[str, Any] = {"schema_version": 1, "kind": BUILD_INFO_KIND}
+    for role, binary in (("autocar", autocar_binary), ("control", control_binary)):
+        record = report[role]
+        exact_build_keys(record, (
+            "binary_sha256", "go_version", "goos", "goarch", "package", "modules",
+        ))
+        require_build_string(record["binary_sha256"], SHA256_RE)
+        require_build_string(record["go_version"], GO_VERSION_RE)
+        if record["binary_sha256"] != sha256(binary):
+            fail("build provenance binary checksum does not match the supplied binary")
+        if record["goos"] != "linux" or record["goarch"] not in ("amd64", "arm64"):
+            fail("build provenance must describe a supported Linux pilot binary")
+        if record["package"] != BUILD_PACKAGES[role]:
+            fail("build provenance describes an unexpected command package")
+        modules = record["modules"]
+        if not isinstance(modules, list) or len(modules) != len(BUILD_MODULES[role]):
+            fail("build provenance has an incomplete module set")
+        validated = {}
+        for module in modules:
+            exact_build_keys(module, (
+                "module_path", "requested_version", "source_path", "source_version", "source_sum", "replaced",
+            ))
+            identity = module["module_path"]
+            if not isinstance(identity, str) or identity not in BUILD_MODULES[role] or identity in validated:
+                fail("build provenance has duplicate or unexpected module identities")
+            if module["source_path"] not in MODULE_SOURCES[identity]:
+                fail("build provenance module source is not an approved remote path")
+            require_build_string(module["requested_version"], MODULE_VERSION_RE)
+            require_build_string(module["source_version"], MODULE_VERSION_RE)
+            require_module_sum(module["source_sum"])
+            if type(module["replaced"]) is not bool:
+                fail("build provenance replacement flag must be a boolean")
+            if identity == NATIVE_QUIC and module["replaced"]:
+                fail("build provenance may not replace native official QUIC")
+            if not module["replaced"] and (
+                module["source_path"] != identity or module["source_version"] != module["requested_version"]
+            ):
+                fail("build provenance has inconsistent non-replaced module metadata")
+            validated[identity] = dict(module)
+        if set(validated) != set(BUILD_MODULES[role]):
+            fail("build provenance has an incomplete module set")
+        sanitized[role] = {
+            "binary_sha256": record["binary_sha256"], "go_version": record["go_version"],
+            "goos": record["goos"], "goarch": record["goarch"], "package": record["package"],
+            "modules": [validated[identity] for identity in BUILD_MODULES[role]],
+        }
+    if any(sanitized["autocar"][key] != sanitized["control"][key] for key in ("go_version", "goos", "goarch")):
+        fail("build provenance binaries must use the same Go version and target")
+    if sanitized["autocar"]["modules"][0] != sanitized["control"]["modules"][0]:
+        fail("build provenance binaries must use the same official QUIC dependency")
+    return sanitized
+
+
 def self_test() -> None:
     with tempfile.TemporaryDirectory(prefix="stealth-pilot-config-test.") as directory:
         root = Path(directory)
         secret = "this-value-must-not-appear"
         for name, content in {
             "cert.pem": "certificate", "key.pem": "private-key", "token": secret,
-            "autocar": "autocar-binary", "hysteria": "hysteria-binary",
+            "autocar": "autocar-binary", "hysteria": "hysteria-binary", "stealth-pilot": "control-binary",
             "hysteria-client.yaml": f"auth: {secret}",
             "hysteria-server.yaml": f"password: {secret}",
         }.items():
@@ -452,11 +578,14 @@ def self_test() -> None:
             hysteria_container="hysteria", hysteria_ip="10.242.1.30", origin_ip="10.242.1.40",
             cert=str(root / "cert.pem"), key=str(root / "key.pem"), token=str(root / "token"),
             autocar_binary=str(root / "autocar"), hysteria_binary=str(root / "hysteria"),
+            control_binary=str(root / "stealth-pilot"), build_info=str(root / "build-info.json"),
             hysteria_client_config=str(root / "hysteria-client.yaml"),
             hysteria_server_config=str(root / "hysteria-server.yaml"),
             autocar_version="v1.0.1-self-test", hysteria_version="v2.12.2-619a6f8",
             hysteria_expected_sha256=sha256(root / "hysteria"),
         )
+        provenance = self_test_build_provenance(root)
+        write_json(Path(args.build_info), provenance)
         prepare(args)
         retained = "".join(
             (root / name).read_text(encoding="utf-8")
@@ -468,6 +597,8 @@ def self_test() -> None:
         effective = read_json(root / "autocar-effective.json")
         if effective["h3_fingerprint"] != "chrome-2026-10":
             fail("self-test found an incorrect AutoCAR H3 profile")
+        if effective["build_provenance"] != provenance:
+            fail("self-test did not retain validated replacement-aware provenance")
         autocar = generated["products"]["autocar"]["variants"][0]
         if (
             autocar["name"] != "autocar-chrome-2026-10-h3"
@@ -484,7 +615,157 @@ def self_test() -> None:
         networks.write_text(json.dumps([{"IPAM": {"Config": [{"Subnet": "10.242.64.0/24"}]}}]), encoding="utf-8")
         if select_subnet(str(networks)) != "10.242.65.0/24":
             fail("self-test subnet selection was not deterministic")
+        self_test_build_rejections(root, args, provenance)
     print(json.dumps({"schema_version": 1, "status": "pass", "self_test": True}))
+
+
+def self_test_build_provenance(root: Path) -> Dict[str, Any]:
+    report: Dict[str, Any] = {"schema_version": 1, "kind": BUILD_INFO_KIND}
+    for role, filename in (("autocar", "autocar"), ("control", "stealth-pilot")):
+        report[role] = {
+            "binary_sha256": sha256(root / filename), "go_version": "go1.27.2",
+            "goos": "linux", "goarch": "arm64", "package": BUILD_PACKAGES[role],
+            "modules": [{
+                "module_path": identity, "requested_version": "v0.63.0" if identity == NATIVE_QUIC else "v1.2.3",
+                "source_path": MODULE_SOURCES[identity][-1],
+                "source_version": "v0.63.0" if identity == NATIVE_QUIC else "v0.0.0-20261009040133-c1cae948af15",
+                "source_sum": "h1:" + base64.b64encode(hashlib.sha256(identity.encode()).digest()).decode("ascii"),
+                "replaced": identity != NATIVE_QUIC,
+            } for identity in BUILD_MODULES[role]],
+        }
+    return report
+
+
+def self_test_build_rejections(root: Path, args: argparse.Namespace, valid: Dict[str, Any]) -> None:
+    report_path = Path(args.build_info)
+
+    def reject(report: Any) -> None:
+        write_json(report_path, report)
+        outputs = [Path(args.output), Path(args.autocar_effective_output), Path(args.hysteria_effective_output)]
+        before = [path.read_bytes() for path in outputs]
+        try:
+            prepare(args)
+        except SystemExit:
+            if before != [path.read_bytes() for path in outputs]:
+                raise AssertionError("invalid build provenance changed retained outputs")
+            return
+        raise AssertionError("invalid build provenance was accepted")
+
+    def changed(path: tuple[Any, ...], value: Any) -> Dict[str, Any]:
+        report = copy.deepcopy(valid)
+        target = report
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        return report
+
+    for path, value in (
+        (("schema_version",), True), (("schema_version",), 1.0), (("schema_version",), 2), (("kind",), "other"),
+        (("secret",), "PRIVATE_SECRET"), (("autocar", "secret"), "PRIVATE_SECRET"),
+        (("autocar", "modules", 1, "secret"), "PRIVATE_SECRET"),
+        (("autocar", "binary_sha256"), "0" * 64), (("control", "binary_sha256"), "0" * 64),
+        (("autocar", "binary_sha256"), "A" * 64), (("autocar", "binary_sha256"), 12),
+        (("autocar", "go_version"), "devel"), (("control", "go_version"), "go1.26.1"),
+        (("autocar", "goos"), "darwin"), (("autocar", "goarch"), "386"),
+        (("control", "goarch"), "amd64"), (("autocar", "package"), BUILD_PACKAGES["control"]),
+        (("autocar", "modules"), {}), (("autocar", "modules"), valid["autocar"]["modules"][:-1]),
+        (("autocar", "modules", 1), valid["autocar"]["modules"][0]),
+        (("autocar", "modules", 1, "module_path"), "github.com/cppla/quic-go"),
+        (("autocar", "modules", 1, "module_path"), []),
+        (("autocar", "modules", 1, "source_path"), "/tmp/local-quic"),
+        (("autocar", "modules", 1, "source_path"), "github.com/unapproved/quic-go"),
+        (("autocar", "modules", 1, "source_path"), "github.com/cppla/utls"),
+        (("autocar", "modules", 1, "source_version"), ""),
+        (("autocar", "modules", 1, "source_version"), "main"),
+        (("autocar", "modules", 1, "requested_version"), "(devel)"),
+        (("autocar", "modules", 1, "replaced"), 1),
+        (("autocar", "modules", 1, "replaced"), False),
+        (("autocar", "modules", 0, "replaced"), True),
+        (("autocar", "modules", 0, "source_version"), "v0.62.0"),
+        (("autocar", "modules", 1, "source_sum"), "h1:" + "A" * 43 + "!"),
+        (("autocar", "modules", 1, "source_sum"), "h1:" + "A" * 42 + "B="),
+        (("autocar", "modules", 1, "source_sum"), "PRIVATE_SECRET"),
+        (("control", "modules", 0, "source_sum"), "h1:" + "A" * 43 + "="),
+    ):
+        reject(changed(path, value))
+    missing = copy.deepcopy(valid)
+    del missing["autocar"]["go_version"]
+    reject(missing)
+    missing = copy.deepcopy(valid)
+    del missing["control"]
+    reject(missing)
+    different_native = copy.deepcopy(valid)
+    different_native["control"]["modules"][0].update(requested_version="v0.64.0", source_version="v0.64.0")
+    reject(different_native)
+    encoded = json.dumps(valid).encode("utf-8")
+    for malformed in (
+        b" " * (BUILD_INFO_LIMIT + 1), b"\xff", b"{", b"[]",
+        b'{"schema_version":1,"schema_version":1}',
+        encoded.replace(b'"modules":', b'"modules":[],"modules":', 1),
+    ):
+        report_path.write_bytes(malformed)
+        try:
+            read_build_provenance(report_path, root / "autocar", root / "stealth-pilot")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("malformed or oversized build provenance was accepted")
+    # A valid report is bound to both supplied files, not merely well-formed hashes.
+    write_json(report_path, valid)
+    for filename in ("autocar", "stealth-pilot"):
+        binary = root / filename
+        original = binary.read_bytes()
+        binary.write_bytes(original + b" changed")
+        try:
+            prepare(args)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("changed pilot binary was accepted")
+        finally:
+            binary.write_bytes(original)
+    # Original upstream sources and same-path versioned replacements are valid,
+    # whereas native official QUIC can never be replaced.
+    for replaced in (False, True):
+        upstream = copy.deepcopy(valid)
+        for module in upstream["autocar"]["modules"][1:]:
+            module.update(source_path=module["module_path"], source_version=module["requested_version"], replaced=replaced)
+        write_json(report_path, upstream)
+        read_build_provenance(report_path, root / "autocar", root / "stealth-pilot")
+    # The limit is inclusive, and module order is normalized rather than trusted.
+    report_path.write_bytes(encoded + b" " * (BUILD_INFO_LIMIT - len(encoded)))
+    if read_build_provenance(report_path, root / "autocar", root / "stealth-pilot") != valid:
+        raise AssertionError("valid report at the input-size limit was rejected")
+    reordered = copy.deepcopy(valid)
+    reordered["autocar"]["modules"].reverse()
+    write_json(report_path, reordered)
+    if read_build_provenance(report_path, root / "autocar", root / "stealth-pilot") != valid:
+        raise AssertionError("valid module order was not normalized")
+    for field in ("build_info", "control_binary"):
+        original = getattr(args, field)
+        setattr(args, field, str(Path(__file__).resolve()))
+        try:
+            prepare(args)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("provenance input outside inputs-root was accepted")
+        finally:
+            setattr(args, field, original)
+    future_native = copy.deepcopy(valid)
+    for role in ("autocar", "control"):
+        future_native[role]["modules"][0].update(requested_version="v0.64.0", source_version="v0.64.0")
+    write_json(report_path, future_native)
+    prepare(args)
+    cover = read_json(Path(args.output))["products"]["cover"]["variants"][0]
+    if (
+        cover["name"] != "quic-go-standard-h3-control"
+        or cover["client_implementation"] != "quic-go v0.64.0 standard H3 control (not a browser)"
+        or cover["server_implementation"] != "quic-go v0.64.0 HTTP/3 fixture"
+        or cover["implementation_version"] != "v0.64.0-calibration-control"
+    ):
+        raise AssertionError("control labels did not follow the validated effective version")
+    write_json(report_path, valid)
 
 
 def fail(message: str) -> None:

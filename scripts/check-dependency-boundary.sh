@@ -138,10 +138,6 @@ if [[ -n ${local_replacements} ]]; then
 fi
 
 while IFS= read -r -d '' source_file; do
-  if grep -qE '["`]github\.com/cppla/(utls|quic-go)(/[^"`[:space:]]*)?["`]' "${source_file}"; then
-    echo "error: ${source_file#./} imports the replacement path directly; retain the original module import path" >&2
-    status=1
-  fi
   if imports=$(grep -nE "${FORBIDDEN_HYSTERIA_GO_PATTERN}" "${source_file}"); then
     echo "error: Go source references the prohibited Hysteria application module:" >&2
     while IFS= read -r match; do
@@ -159,12 +155,16 @@ done < <(find . -type f -name '*.go' ! -path './.git/*' -print0)
 
 # Go permits escaped interpreted-string import paths. Require their canonical
 # spelling too, so literal path checks cannot miss a second module identity.
-# Tokenize only enough to distinguish import declarations from comments,
-# ordinary strings and rune literals. This stays offline and does not run Go.
-escaped_imports=$(
-  python3 - <<'PY'
+# Check replacement identities only inside actual import declarations: metadata
+# strings may name a source without importing it. The separate application-module
+# whole-source prohibition above remains unchanged. This stays offline.
+invalid_imports=$(
+  python3 - "${ALLOWED_UTLS_REPLACEMENT}" "${ALLOWED_WEB_QUIC_REPLACEMENT}" <<'PY'
 from pathlib import Path
 import re
+import sys
+
+replacement_paths = sys.argv[1:]
 
 tokens = re.compile(
     r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\[\s\S]|[^"\\])*"|'
@@ -175,7 +175,10 @@ tokens = re.compile(
 for path in Path(".").rglob("*.go"):
     if ".git" in path.parts or not path.is_file():
         continue
-    source = path.read_text(encoding="utf-8")
+    # Preserve CR bytes so raw-string interpretation matches Go, not Python's
+    # universal-newline conversion to LF.
+    with path.open(encoding="utf-8", newline="") as handle:
+        source = handle.read()
     importing = grouped = False
     for match in tokens.finditer(source):
         token = match.group()
@@ -191,14 +194,20 @@ for path in Path(".").rglob("*.go"):
                 if token.startswith('"') and "\\" in token:
                     line = source.count("\n", 0, match.start()) + 1
                     print(f"{path}:{line}: escaped import path")
+                else:
+                    # Go discards carriage returns inside raw string literals.
+                    imported = token[1:-1].replace("\r", "") if token.startswith(chr(96)) else token[1:-1]
+                    if any(imported == name or imported.startswith(name + "/") for name in replacement_paths):
+                        line = source.count("\n", 0, match.start()) + 1
+                        print(f"{path}:{line}: imports the replacement path directly; retain the original module import path")
                 importing = grouped
             elif token == ")" or (token == ";" and not grouped):
                 importing = False
 PY
 )
-if [[ -n ${escaped_imports} ]]; then
-  echo "error: Go import paths must use unescaped canonical spelling:" >&2
-  printf '%s\n' "${escaped_imports}" >&2
+if [[ -n ${invalid_imports} ]]; then
+  echo "error: Go imports must retain original module identities and unescaped canonical spelling:" >&2
+  printf '%s\n' "${invalid_imports}" >&2
   status=1
 fi
 

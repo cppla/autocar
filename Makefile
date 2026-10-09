@@ -157,7 +157,7 @@ integration-netem: build
 
 stealth-tools-check: release-recipe-check
 	$(GO) test -race ./scripts/stealth-probe
-	GOPROXY=off $(GO) test ./scripts/stealth-pilot
+	GOPROXY=off $(GO) test ./scripts/stealth-pilot ./scripts/stealth-build-info
 	sh -n scripts/stealth-active.sh scripts/stealth-hysteria.sh scripts/stealth-passive.sh scripts/stealth-campaign-smoke.sh scripts/stealth-pilot.sh scripts/stealth-offline-container.sh scripts/stealth-full-lab.sh scripts/stealth-full-offline.sh
 	sh -n scripts/check-stealth-hysteria-update-disabled.sh
 	./scripts/check-stealth-hysteria-update-disabled.sh

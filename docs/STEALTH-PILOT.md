@@ -43,9 +43,12 @@ The default pilot records two independent samples for each product in three
 - `parallel_20`: issue twenty concurrent 1 KiB requests through one client
   process, allowing each proxy to multiplex streams over its H3 connection.
 
-New AutoCAR runs use `--transport h3` and `--h3-fingerprint chrome-2026-10`,
-with `github.com/apernet/quic-go` pinned to
-`v0.63.1-0.20261004180939-a10df75c260c`.
+New AutoCAR runs use `--transport h3` and `--h3-fingerprint chrome-2026-10`.
+The web-H3 module identity remains `github.com/apernet/quic-go`, but its
+effective source is the reviewed `github.com/cppla/quic-go` replacement; the
+original `require` version alone does not identify the code being tested.
+Native transport and the standard H3 control still use official QUIC.
+See [dependency maintenance](DEPENDENCY-MAINTENANCE.md) for the current pins.
 The baseline runs the pinned standard profile with Chrome QUIC parroting enabled,
 its `Gecko` mode disabled, and a real reverse-proxy masquerade. Both proxies fetch the same
 private deterministic HTTP origin. The H3 control fetches the equivalent
@@ -55,8 +58,25 @@ The baseline stays frozen; it no longer shares AutoCAR's exact QUIC revision.
 New AutoCAR variant labels and effective descriptors record the current profile.
 Do not rewrite old preregistrations or result labels: earlier captures remain
 evidence only for their recorded source, dependency and profile. This update
-does not enable TLS resumption or 0-RTT for the Chrome H3 client and does not
-establish a passive-identification advantage.
+does not opt this pilot into TLS resumption or 0-RTT and does not establish a
+passive-identification advantage. Each workload starts a fresh client process;
+this pilot does not exercise the separate `chrome-2026-10-resume` reconnect
+mode or a real browser's warm connection.
+
+Before any server starts, the runner reads the two compiled Go binaries with
+the offline `scripts/stealth-build-info` helper; it never executes a binary to
+discover its dependencies. The retained `build-provenance.json` records their
+SHA-256 hashes, compiler/target, command package, and requested versus effective
+sources/checksums for the selected QUIC and uTLS modules. It omits arbitrary
+build settings, linker arguments, local paths and unrelated dependencies.
+The configuration generator validates this report against both binary hashes
+and embeds it in the effective AutoCAR descriptor, whose checksum is frozen by
+the campaign driver. Missing metadata, local replacements for those selected
+modules, mismatched targets, unexpected fields or missing required modules fail
+closed. The report describes embedded build metadata, not a signed build
+attestation or a vulnerability scan. Hashes identify the binaries; metadata
+alone does not prove source contents or describe build tags and experiments.
+Historical descriptors and frozen results are not rewritten.
 
 ## Running
 
