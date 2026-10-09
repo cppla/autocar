@@ -17,7 +17,15 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-func TestChrome133ResumptionPolicyFactoryIsLazy(t *testing.T) {
+func TestChromeResumptionPolicyFactoryIsLazy(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testChromeResumptionPolicyFactoryIsLazy)
+}
+
+func testChromeResumptionPolicyFactoryIsLazy(t *testing.T, profile FingerprintProfile) {
+	profileID := utls.HelloChrome_133
+	if profile == FingerprintChrome155 {
+		profileID = utls.HelloChrome_155
+	}
 	for _, test := range []struct {
 		name     string
 		disabled bool
@@ -25,9 +33,9 @@ func TestChrome133ResumptionPolicyFactoryIsLazy(t *testing.T) {
 		wantID   utls.ClientHelloID
 	}{
 		{name: "enabled-cache", cache: true, wantID: utls.HelloCustom},
-		{name: "nil-cache", wantID: utls.HelloChrome_133},
+		{name: "nil-cache", wantID: profileID},
 		// Supplying a cache cannot override SessionTicketsDisabled.
-		{name: "tickets-disabled-with-cache", disabled: true, cache: true, wantID: utls.HelloChrome_133},
+		{name: "tickets-disabled-with-cache", disabled: true, cache: true, wantID: profileID},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			entropy := &webResumptionPolicyRand{}
@@ -42,7 +50,7 @@ func TestChrome133ResumptionPolicyFactoryIsLazy(t *testing.T) {
 			if test.cache {
 				cache = utls.NewLRUClientSessionCache(1)
 			}
-			client, err := newWebH2TLSClientConn(raw, config, FingerprintChrome133, cache)
+			client, err := newWebH2TLSClientConn(raw, config, profile, cache)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -63,7 +71,11 @@ func TestChrome133ResumptionPolicyFactoryIsLazy(t *testing.T) {
 	}
 }
 
-func TestChrome133ResumptionPolicyPreCancelledHandshakeRemainsReusable(t *testing.T) {
+func TestChromeResumptionPolicyPreCancelledHandshakeRemainsReusable(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testChromeResumptionPolicyPreCancelledHandshakeRemainsReusable)
+}
+
+func testChromeResumptionPolicyPreCancelledHandshakeRemainsReusable(t *testing.T, profile FingerprintProfile) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 	serverTLS.MinVersion = tls.VersionTLS13
 	serverTLS.MaxVersion = tls.VersionTLS13
@@ -77,7 +89,7 @@ func TestChrome133ResumptionPolicyPreCancelledHandshakeRemainsReusable(t *testin
 	defer clientPipe.Close()
 	defer serverPipe.Close()
 	raw := &webResumptionPolicyConn{Conn: clientPipe}
-	client, err := newWebH2TLSClientConn(raw, clientTLS, FingerprintChrome133, newWebH2UTLSSessionCache(clientTLS))
+	client, err := newWebH2TLSClientConn(raw, clientTLS, profile, newWebH2UTLSSessionCache(clientTLS))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +143,11 @@ func TestChrome133ResumptionPolicyPreCancelledHandshakeRemainsReusable(t *testin
 	}
 }
 
-func TestChrome133ResumptionPolicyConcurrentPreCancellationDoesNotWaitForPeer(t *testing.T) {
+func TestChromeResumptionPolicyConcurrentPreCancellationDoesNotWaitForPeer(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testChromeResumptionPolicyConcurrentPreCancellationDoesNotWaitForPeer)
+}
+
+func testChromeResumptionPolicyConcurrentPreCancellationDoesNotWaitForPeer(t *testing.T, profile FingerprintProfile) {
 	entropy := &webResumptionPolicyRand{}
 	config := &tls.Config{
 		ServerName:         "cover.example",
@@ -142,7 +158,7 @@ func TestChrome133ResumptionPolicyConcurrentPreCancellationDoesNotWaitForPeer(t 
 	defer clientPipe.Close()
 	defer serverPipe.Close()
 	raw := &webResumptionPolicyConn{Conn: clientPipe, writeStarted: make(chan struct{}, 1)}
-	client, err := newWebH2TLSClientConn(raw, config, FingerprintChrome133, newWebH2UTLSSessionCache(config))
+	client, err := newWebH2TLSClientConn(raw, config, profile, newWebH2UTLSSessionCache(config))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +220,11 @@ func TestChrome133ResumptionPolicyConcurrentPreCancellationDoesNotWaitForPeer(t 
 	}
 }
 
-func TestChrome133ResumptionPolicyPreparationErrorIsStableAndDoesNotTouchSocket(t *testing.T) {
+func TestChromeResumptionPolicyPreparationErrorIsStableAndDoesNotTouchSocket(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testChromeResumptionPolicyPreparationErrorIsStableAndDoesNotTouchSocket)
+}
+
+func testChromeResumptionPolicyPreparationErrorIsStableAndDoesNotTouchSocket(t *testing.T, profile FingerprintProfile) {
 	fault := errors.New("resumption-policy entropy fault")
 	entropy := &webResumptionPolicyRand{fault: fault}
 	raw := &webResumptionPolicyConn{}
@@ -213,7 +233,7 @@ func TestChrome133ResumptionPolicyPreparationErrorIsStableAndDoesNotTouchSocket(
 		Rand:               entropy,
 		ClientSessionCache: tls.NewLRUClientSessionCache(1),
 	}
-	client, err := newWebH2TLSClientConn(raw, config, FingerprintChrome133, newWebH2UTLSSessionCache(config))
+	client, err := newWebH2TLSClientConn(raw, config, profile, newWebH2UTLSSessionCache(config))
 	if err != nil {
 		t.Fatalf("factory eagerly prepared the handshake: %v", err)
 	}
@@ -244,7 +264,11 @@ func TestChrome133ResumptionPolicyPreparationErrorIsStableAndDoesNotTouchSocket(
 	}
 }
 
-func TestChrome133ResumptionPolicyStillVerifiesPeer(t *testing.T) {
+func TestChromeResumptionPolicyStillVerifiesPeer(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testChromeResumptionPolicyStillVerifiesPeer)
+}
+
+func testChromeResumptionPolicyStillVerifiesPeer(t *testing.T, profile FingerprintProfile) {
 	for _, name := range []string{"untrusted-roots", "wrong-server-name"} {
 		t.Run(name, func(t *testing.T) {
 			serverTLS, clientTLS := testTLSConfigs(t)
@@ -263,7 +287,7 @@ func TestChrome133ResumptionPolicyStillVerifiesPeer(t *testing.T) {
 			defer clientPipe.Close()
 			defer serverPipe.Close()
 			raw := &webResumptionPolicyConn{Conn: clientPipe}
-			client, err := newWebH2TLSClientConn(raw, clientTLS, FingerprintChrome133, newWebH2UTLSSessionCache(clientTLS))
+			client, err := newWebH2TLSClientConn(raw, clientTLS, profile, newWebH2UTLSSessionCache(clientTLS))
 			if err != nil {
 				t.Fatal(err)
 			}

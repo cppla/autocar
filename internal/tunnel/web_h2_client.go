@@ -30,7 +30,7 @@ type WebH2ClientConfig struct {
 	TLSConfig     *tls.Config
 	// FingerprintProfile defaults to chrome-133, the fixed Chrome 133
 	// explicit HelloChrome_133 reference originally shipped in uTLS v1.8.2.
-	// Native is for tests/debugging.
+	// Chrome 155 is an explicit opt-in; native is for tests/debugging.
 	FingerprintProfile FingerprintProfile
 	HandshakeTimeout   time.Duration
 	// DialTimeout bounds each TCP connect, separately from TLS/H2 setup.
@@ -162,9 +162,9 @@ func newWebH2ClientWithSigner(config WebH2ClientConfig, auth *webAuthSigner, cla
 	// Validate the conversion at construction time so unsupported security
 	// callbacks never fail only after the first network dial.
 	var utlsSessionCache utls.ClientSessionCache
-	if fingerprint == FingerprintChrome133 {
+	if fingerprint == FingerprintChrome133 || fingerprint == FingerprintChrome155 {
 		utlsSessionCache = newWebH2UTLSSessionCache(tlsConfig)
-		if _, err := chrome133UTLSConfig(tlsConfig, utlsSessionCache); err != nil {
+		if _, err := chromeUTLSConfig(tlsConfig, utlsSessionCache); err != nil {
 			return nil, err
 		}
 	}

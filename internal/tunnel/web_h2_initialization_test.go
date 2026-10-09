@@ -17,7 +17,7 @@ import (
 )
 
 func TestWebH2PostTLSInitializationHonorsCancellation(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			for _, mode := range []string{"caller_cancel", "caller_deadline", "client_close", "initialization_deadline"} {
 				t.Run(mode, func(t *testing.T) {
@@ -170,7 +170,7 @@ func TestWebH2PostTLSInitializationHonorsCancellation(t *testing.T) {
 }
 
 func TestWebH2InitializationWatcherDetachesAfterSuccess(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			serverTLS, clientTLS := testTLSConfigs(t)
 			server := startWebH2TestServer(t, WebH2ServerConfig{
@@ -202,7 +202,7 @@ func TestWebH2InitializationWatcherDetachesAfterSuccess(t *testing.T) {
 }
 
 func TestWebH2CloseAtInitializationHandoff(t *testing.T) {
-	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133} {
+	for _, profile := range []FingerprintProfile{FingerprintNative, FingerprintChrome133, FingerprintChrome155} {
 		t.Run(string(profile), func(t *testing.T) {
 			for range 10 {
 				t.Run("close", func(t *testing.T) {

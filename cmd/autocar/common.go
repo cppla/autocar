@@ -36,12 +36,43 @@ type tunnelFlags struct {
 	openTimeout    time.Duration
 	h2WriteTimeout time.Duration
 	fallbackTTL    time.Duration
+	h2Fingerprint  h2FingerprintFlag
 	h3Fingerprint  h3FingerprintFlag
 	pacing         string
 	pacingProfile  string
 	uploadMbps     uint64
 	downloadMbps   uint64
 	eventHandler   tunnel.ClientEventHandler
+}
+
+// h2FingerprintFlag validates both CLI and JSON input before any credentials or
+// network activity. An empty legacy value keeps the Chrome 133 default.
+type h2FingerprintFlag string
+
+func (value *h2FingerprintFlag) String() string {
+	if value == nil {
+		return ""
+	}
+	return string(*value)
+}
+
+func (value *h2FingerprintFlag) Get() any { return value.String() }
+
+func (value *h2FingerprintFlag) Set(profile string) error {
+	if err := validateH2Fingerprint(profile); err != nil {
+		return err
+	}
+	*value = h2FingerprintFlag(profile)
+	return nil
+}
+
+func validateH2Fingerprint(profile string) error {
+	switch tunnel.FingerprintProfile(profile) {
+	case "", tunnel.FingerprintChrome133, tunnel.FingerprintChrome155, tunnel.FingerprintNative:
+		return nil
+	default:
+		return errors.New("invalid --h2-fingerprint; want chrome-133, chrome-155, or native (empty uses chrome-133)")
+	}
 }
 
 // h3FingerprintFlag rejects the retired wire image at parse time, including
@@ -81,6 +112,8 @@ func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
 	fs.DurationVar(&flags.openTimeout, "open-timeout", 15*time.Second, "overall remote stream open timeout")
 	fs.DurationVar(&flags.h2WriteTimeout, "h2-write-timeout", 30*time.Second, "shared H2 connection write timeout (h2/web-auto only; 0 uses 30s; not an idle or per-stream timeout)")
 	fs.DurationVar(&flags.fallbackTTL, "fallback-cooldown", 30*time.Second, "base time to prefer the TCP fallback after a UDP path failure (each retry is jittered +/-20%)")
+	flags.h2Fingerprint = h2FingerprintFlag(tunnel.FingerprintChrome133)
+	fs.Var(&flags.h2Fingerprint, "h2-fingerprint", "web H2 wire profile: chrome-133, chrome-155, or native; empty uses chrome-133 (h2/web-auto only)")
 	flags.h3Fingerprint = h3FingerprintFlag(tunnel.H3FingerprintChrome202610)
 	fs.Var(&flags.h3Fingerprint, "h3-fingerprint", "web H3 wire profile: chrome-2026-10 or native; chrome-2026-08 is retired")
 	fs.StringVar(&flags.pacing, "pacing", "adaptive", "QUIC application pacing: adaptive, reno, or fixed-rate")
@@ -95,6 +128,9 @@ type closeDialer interface {
 }
 
 func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
+	if err := validateH2Fingerprint(string(flags.h2Fingerprint)); err != nil {
+		return nil, err
+	}
 	if tunnel.H3FingerprintProfile(flags.h3Fingerprint) == tunnel.H3FingerprintChrome202608 {
 		return nil, tunnel.ErrH3FingerprintProfileRetired
 	}
@@ -251,12 +287,13 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 		return newWebSnapshotDialer(client), nil
 	case "h2":
 		client, err := tunnel.NewWebH2Client(tunnel.WebH2ClientConfig{
-			ServerAddress:    flags.server,
-			Token:            token,
-			TLSConfig:        tlsConfig,
-			HandshakeTimeout: flags.openTimeout,
-			DialTimeout:      flags.dialTimeout,
-			WriteByteTimeout: flags.h2WriteTimeout,
+			ServerAddress:      flags.server,
+			Token:              token,
+			TLSConfig:          tlsConfig,
+			FingerprintProfile: tunnel.FingerprintProfile(flags.h2Fingerprint),
+			HandshakeTimeout:   flags.openTimeout,
+			DialTimeout:        flags.dialTimeout,
+			WriteByteTimeout:   flags.h2WriteTimeout,
 		})
 		if err != nil {
 			return nil, err
@@ -267,6 +304,7 @@ func buildTunnelDialer(flags tunnelFlags) (closeDialer, error) {
 			ServerAddress:         flags.server,
 			Token:                 token,
 			TLSConfig:             tlsConfig,
+			H2FingerprintProfile:  tunnel.FingerprintProfile(flags.h2Fingerprint),
 			H3FingerprintProfile:  tunnel.H3FingerprintProfile(flags.h3Fingerprint),
 			HandshakeTimeout:      flags.openTimeout,
 			H3DialTimeout:         flags.dialTimeout,

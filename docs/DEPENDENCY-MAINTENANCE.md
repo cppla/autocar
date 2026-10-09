@@ -26,6 +26,15 @@ private-error-text-triggered cold redial. This does not change the explicitly
 selected `chrome-133` or `chrome-2026-10` templates, enable H3 profile resumption,
 or establish passive browser similarity.
 
+The separate H2 `chrome-155` option selects upstream's explicit
+`HelloChrome_155`, never `HelloChrome_Auto`. It needs no further dependency
+change. The older `chrome-133` remains distinct and is still selected when an
+existing config omits the H2 profile; newly generated web bundles pin 155.
+AutoCAR's real-wrapper cold-wire comparison retains the upstream browser
+fixture, checksum, parser attribution and license under
+`internal/tunnel/testdata/chrome155/`. This checks a bounded historical wire
+reference, not browser equivalence or current-version freshness.
+
 ## Updating the patch queue
 
 1. Preserve the upstream history, copyright headers and all license/notice

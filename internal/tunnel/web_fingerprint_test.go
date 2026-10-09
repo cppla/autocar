@@ -14,6 +14,13 @@ import (
 	"time"
 )
 
+func forEachWebH2ChromeProfile(t *testing.T, test func(*testing.T, FingerprintProfile)) {
+	t.Helper()
+	for _, profile := range []FingerprintProfile{FingerprintChrome133, FingerprintChrome155} {
+		t.Run(string(profile), func(t *testing.T) { test(t, profile) })
+	}
+}
+
 func TestFingerprintProfileValidation(t *testing.T) {
 	for _, input := range []FingerprintProfile{"", FingerprintChrome133} {
 		got, err := normalizeFingerprintProfile(input)
@@ -23,6 +30,9 @@ func TestFingerprintProfileValidation(t *testing.T) {
 		if got != FingerprintChrome133 {
 			t.Fatalf("normalizeFingerprintProfile(%q) = %q, want %q", input, got, FingerprintChrome133)
 		}
+	}
+	if got, err := normalizeFingerprintProfile(FingerprintChrome155); err != nil || got != FingerprintChrome155 {
+		t.Fatalf("Chrome 155 profile = %q, %v", got, err)
 	}
 	if got, err := normalizeFingerprintProfile(FingerprintNative); err != nil || got != FingerprintNative {
 		t.Fatalf("native profile = %q, %v", got, err)
@@ -127,7 +137,7 @@ func TestChrome133ClientHelloHasVersionedBrowserShape(t *testing.T) {
 	}
 }
 
-func TestChrome133TLSConfigRemainsVerified(t *testing.T) {
+func TestChromeTLSConfigRemainsVerified(t *testing.T) {
 	roots := x509.NewCertPool()
 	input := &tls.Config{
 		ServerName:         "cover.example",
@@ -136,7 +146,7 @@ func TestChrome133TLSConfigRemainsVerified(t *testing.T) {
 		ClientSessionCache: tls.NewLRUClientSessionCache(64),
 	}
 	cache := newWebH2UTLSSessionCache(input)
-	got, err := chrome133UTLSConfig(input, cache)
+	got, err := chromeUTLSConfig(input, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,27 +168,27 @@ func TestChrome133TLSConfigRemainsVerified(t *testing.T) {
 
 	insecure := input.Clone()
 	insecure.InsecureSkipVerify = true
-	if _, err := chrome133UTLSConfig(insecure, cache); err == nil {
+	if _, err := chromeUTLSConfig(insecure, cache); err == nil {
 		t.Fatal("Chrome profile accepted InsecureSkipVerify")
 	}
 	callback := input.Clone()
 	callback.VerifyConnection = func(tls.ConnectionState) error { return nil }
-	if _, err := chrome133UTLSConfig(callback, cache); err == nil {
+	if _, err := chromeUTLSConfig(callback, cache); err == nil {
 		t.Fatal("Chrome profile silently dropped VerifyConnection")
 	}
 }
 
-func TestChrome133SessionCacheFollowsCallerPolicyAndIsReusable(t *testing.T) {
+func TestChromeSessionCacheFollowsCallerPolicyAndIsReusable(t *testing.T) {
 	enabled := &tls.Config{ClientSessionCache: tls.NewLRUClientSessionCache(2)}
 	cache := newWebH2UTLSSessionCache(enabled)
 	if cache == nil {
 		t.Fatal("enabled standard TLS resumption did not create a uTLS cache")
 	}
-	first, err := chrome133UTLSConfig(enabled, cache)
+	first, err := chromeUTLSConfig(enabled, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := chrome133UTLSConfig(enabled, cache)
+	second, err := chromeUTLSConfig(enabled, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +202,7 @@ func TestChrome133SessionCacheFollowsCallerPolicyAndIsReusable(t *testing.T) {
 	if disabledCache != nil {
 		t.Fatal("disabled session tickets created a cache")
 	}
-	got, err := chrome133UTLSConfig(disabled, disabledCache)
+	got, err := chromeUTLSConfig(disabled, disabledCache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +211,11 @@ func TestChrome133SessionCacheFollowsCallerPolicyAndIsReusable(t *testing.T) {
 	}
 }
 
-func TestChrome133ProfileRejectsTLS12Negotiation(t *testing.T) {
+func TestChromeProfilesRejectTLS12Negotiation(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testChromeProfileRejectsTLS12Negotiation)
+}
+
+func testChromeProfileRejectsTLS12Negotiation(t *testing.T, profile FingerprintProfile) {
 	serverTLS, clientTLS := testTLSConfigs(t)
 	serverTLS.MinVersion = tls.VersionTLS12
 	serverTLS.MaxVersion = tls.VersionTLS12
@@ -217,7 +231,7 @@ func TestChrome133ProfileRejectsTLS12Negotiation(t *testing.T) {
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Handshake() }()
 
-	client, err := newWebH2TLSClientConn(clientSide, clientTLS, FingerprintChrome133, newWebH2UTLSSessionCache(clientTLS))
+	client, err := newWebH2TLSClientConn(clientSide, clientTLS, profile, newWebH2UTLSSessionCache(clientTLS))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -134,11 +134,18 @@ func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
 				t.Fatal(err)
 			}
 			if wantProtocol == "web" {
+				if clientOptions["h2-fingerprint"] != string(tunnel.FingerprintChrome155) || tf.h2Fingerprint != h2FingerprintFlag(tunnel.FingerprintChrome155) {
+					t.Fatal("web bundle must explicitly pin the Chrome 155 H2 fingerprint")
+				}
 				if clientOptions["h3-fingerprint"] != string(tunnel.H3FingerprintChrome202610) || tf.h3Fingerprint != h3FingerprintFlag(tunnel.H3FingerprintChrome202610) {
 					t.Fatal("web bundle must explicitly pin the current H3 fingerprint")
 				}
-			} else if _, ok := clientOptions["h3-fingerprint"]; ok {
-				t.Fatal("native bundle unexpectedly contains an H3 fingerprint option")
+			} else {
+				for _, option := range []string{"h2-fingerprint", "h3-fingerprint"} {
+					if _, ok := clientOptions[option]; ok {
+						t.Fatalf("native bundle unexpectedly contains %s", option)
+					}
+				}
 			}
 			if err := cert.VerifyHostname(tf.serverName); err != nil {
 				t.Fatalf("certificate does not match generated client server name: %v", err)
@@ -158,6 +165,11 @@ func TestInitCreatesPrivatePortableMatchingBundle(t *testing.T) {
 			server, err := readCommandConfig(filepath.Join(dir, "server", "server.json"))
 			if err != nil || server["protocol"] != wantProtocol || server["allow-private"] != nil || server["disable-tcp-fallback"] != nil {
 				t.Fatal("generated server changed safe defaults")
+			}
+			for _, option := range []string{"h2-fingerprint", "h3-fingerprint"} {
+				if _, ok := server[option]; ok {
+					t.Fatalf("server bundle unexpectedly contains client-only %s", option)
+				}
 			}
 			if wantProtocol == "web" {
 				if server["cover-root"] != "cover" || server["cover-upstream"] != nil {

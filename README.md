@@ -227,6 +227,7 @@ H3。`--cover-root` 和 `--cover-upstream` 必须且只能选一个：
   --ca server.crt \
   --token-file token \
   --transport web-auto \
+  --h2-fingerprint chrome-155 \
   --h3-fingerprint chrome-2026-10
 ```
 
@@ -236,6 +237,12 @@ H3。`--cover-root` 和 `--cover-upstream` 必须且只能选一个：
 CONNECT-UDP，`h2` 不支持 UDP。Web 模式要求 TCP/UDP 使用相同数字端口，不能设置
 `--disable-tcp-fallback`，也不能在两端配置 mTLS。详细能力、边界和安全的验证方法见
 [Web-cover 模式](docs/WEB_COVER.md)。
+
+H2 可显式选择 `--h2-fingerprint=chrome-155`（固定的新模板）、`chrome-133`
+（兼容旧模板）或 `native`（Go TLS 调试/互操作）。新生成的 web `init` 客户端配置
+明确固定为 `chrome-155`；旧配置省略该字段时仍使用 `chrome-133`，不会静默改变。
+此选项也作用于 `web-auto` 的 H2 回退路径，不改变 H3。已加入与真实 Chrome 155
+历史抓取样本的冷 ClientHello 逐字段回归，但不代表完整流量等同浏览器。
 
 `--h3-fingerprint=chrome-2026-10` 是默认值，固定使用上述依赖版本提供的完整客户端
 QUIC/TLS 握手画像，并固定为与画像中版本参数一致的 QUIC v1。

@@ -212,6 +212,10 @@ func TestWebClientEndToEndPrefersH3AndDetachesEstablishedStream(t *testing.T) {
 }
 
 func TestWebClientEndToEndFallsBackToH2WithoutUDPListener(t *testing.T) {
+	forEachWebH2ChromeProfile(t, testWebClientEndToEndFallsBackToH2WithoutUDPListener)
+}
+
+func testWebClientEndToEndFallsBackToH2WithoutUDPListener(t *testing.T, profile FingerprintProfile) {
 	targetAddress, closeTarget := startHalfCloseTarget(t)
 	defer closeTarget()
 	serverTLS, clientTLS := testTLSConfigs(t)
@@ -228,6 +232,7 @@ func TestWebClientEndToEndFallsBackToH2WithoutUDPListener(t *testing.T) {
 		ServerAddress:         server.Addr().String(),
 		Token:                 testToken,
 		TLSConfig:             clientTLS,
+		H2FingerprintProfile:  profile,
 		H3DialTimeout:         40 * time.Millisecond,
 		PrimaryAttemptTimeout: 100 * time.Millisecond,
 		FallbackCooldown:      time.Minute,
@@ -251,6 +256,42 @@ func TestWebClientEndToEndFallsBackToH2WithoutUDPListener(t *testing.T) {
 	}
 	if got := client.SelectedTransport(); got != webAuthTransportH2 {
 		t.Fatalf("selection = %q, want h2", got)
+	}
+	fallback := client.fallback.dialer.(*WebH2Client)
+	if fallback.fingerprint != profile {
+		t.Fatalf("H2 fallback profile = %q, want %q", fallback.fingerprint, profile)
+	}
+}
+
+func TestNewWebClientH2FingerprintPolicy(t *testing.T) {
+	for _, profile := range []FingerprintProfile{"", FingerprintChrome133, FingerprintChrome155, FingerprintNative, "chrome-current"} {
+		t.Run(string(profile), func(t *testing.T) {
+			_, clientTLS := testTLSConfigs(t)
+			client, err := NewWebClient(WebClientConfig{
+				ServerAddress: "127.0.0.1:443", Token: testToken, TLSConfig: clientTLS,
+				H2FingerprintProfile: profile,
+			})
+			if profile == "chrome-current" {
+				if err == nil || client != nil {
+					if client != nil {
+						_ = client.Close()
+					}
+					t.Fatal("web-auto accepted an unsupported H2 profile")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = client.Close() })
+			want := profile
+			if want == "" {
+				want = FingerprintChrome133
+			}
+			if got := client.fallback.dialer.(*WebH2Client).fingerprint; got != want {
+				t.Fatalf("H2 fallback profile = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

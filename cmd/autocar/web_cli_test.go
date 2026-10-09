@@ -159,6 +159,9 @@ func TestTunnelHelpListsWebTransports(t *testing.T) {
 	if flags.h3Fingerprint != h3FingerprintFlag(tunnel.H3FingerprintChrome202610) || !strings.Contains(output.String(), "h3-fingerprint") || !strings.Contains(output.String(), "chrome-2026-10") {
 		t.Errorf("tunnel help omitted versioned H3 fingerprint profile: %s", output.String())
 	}
+	if flags.h2Fingerprint != h2FingerprintFlag(tunnel.FingerprintChrome133) || !strings.Contains(output.String(), "h2-fingerprint") || !strings.Contains(output.String(), "chrome-155") {
+		t.Errorf("tunnel help omitted H2 profiles or changed the legacy default: %s", output.String())
+	}
 }
 
 func TestWebTunnelModesRejectNativeFixedRatePacing(t *testing.T) {
