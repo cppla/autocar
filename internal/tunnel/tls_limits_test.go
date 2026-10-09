@@ -11,14 +11,17 @@ func TestTLSServerClientConnectionLimitValidationAndDefaults(t *testing.T) {
 	serverTLS, _ := testTLSConfigs(t)
 
 	for _, test := range []struct {
-		name       string
-		streams    int
-		clients    int
-		wantClient int
+		name        string
+		streams     int
+		connections int
+		clients     int
+		wantClient  int
 	}{
 		{name: "default below 32", streams: 2, wantClient: 2},
 		{name: "default capped at 32", streams: 64, wantClient: 32},
 		{name: "explicit", streams: 4, clients: 3, wantClient: 3},
+		{name: "default capped at connections", streams: 4, connections: 1, wantClient: 1},
+		{name: "explicit connection budget", streams: 4, connections: 3, clients: 3, wantClient: 3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server, err := ListenTLS(TLSServerConfig{
@@ -26,6 +29,7 @@ func TestTLSServerClientConnectionLimitValidationAndDefaults(t *testing.T) {
 				Token:                testToken,
 				TLSConfig:            serverTLS,
 				MaxConcurrentStreams: test.streams,
+				MaxConnections:       test.connections,
 				MaxClientConnections: test.clients,
 			})
 			if err != nil {
@@ -39,12 +43,15 @@ func TestTLSServerClientConnectionLimitValidationAndDefaults(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name    string
-		streams int
-		clients int
+		name        string
+		streams     int
+		connections int
+		clients     int
 	}{
 		{name: "negative", streams: 4, clients: -1},
 		{name: "exceeds global limit", streams: 2, clients: 3},
+		{name: "exceeds connection limit", streams: 4, connections: 2, clients: 3},
+		{name: "exceeds stream limit with explicit connections", streams: 2, connections: 4, clients: 3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server, err := ListenTLS(TLSServerConfig{
@@ -52,6 +59,7 @@ func TestTLSServerClientConnectionLimitValidationAndDefaults(t *testing.T) {
 				Token:                testToken,
 				TLSConfig:            serverTLS,
 				MaxConcurrentStreams: test.streams,
+				MaxConnections:       test.connections,
 				MaxClientConnections: test.clients,
 			})
 			if server != nil {

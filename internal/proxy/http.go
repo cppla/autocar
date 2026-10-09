@@ -283,10 +283,16 @@ func (s *HTTPServer) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer response.Body.Close()
+	// Preserve connection-specific trailer names before stripping Connection.
+	// The body can add both trailer values and previously unknown names at EOF.
+	blockedTrailers := httpForwardTrailerNominations(response.Header, response.Trailer)
 	removeHopByHopHeaders(response.Header)
 	copyHeaders(w.Header(), response.Header)
+	declaredTrailers := make(map[string]bool, len(response.Trailer))
 	for key := range response.Trailer {
-		if !isHopByHopHeader(key) {
+		if httpForwardTrailerAllowed(key, blockedTrailers) {
+			key = textproto.CanonicalMIMEHeaderKey(key)
+			declaredTrailers[key] = true
 			w.Header().Add("Trailer", key)
 		}
 	}
@@ -305,11 +311,22 @@ func (s *HTTPServer) serveForward(w http.ResponseWriter, r *http.Request) {
 		// response; net/http handles the sentinel without logging a stack trace.
 		panic(http.ErrAbortHandler)
 	}
+	for key := range httpForwardTrailerNominations(response.Trailer) {
+		blockedTrailers[key] = true
+	}
+	// A newly blocked declared trailer must not inherit an earlier header value.
+	for key := range declaredTrailers {
+		w.Header().Del(key)
+	}
 	for key, values := range response.Trailer {
-		if isHopByHopHeader(key) {
+		if !httpForwardTrailerAllowed(key, blockedTrailers) {
 			continue
 		}
-		w.Header()[textproto.CanonicalMIMEHeaderKey(key)] = append([]string(nil), values...)
+		key = textproto.CanonicalMIMEHeaderKey(key)
+		if !declaredTrailers[key] {
+			key = http.TrailerPrefix + key
+		}
+		w.Header()[key] = append([]string(nil), values...)
 	}
 }
 

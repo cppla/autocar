@@ -43,8 +43,13 @@ type QUICServerConfig struct {
 	// to the admission limit. Nil preserves the independent-server behavior.
 	StreamAdmission *StreamAdmission
 	// MaxConnections bounds accepted QUIC connections, including authenticated
-	// idle sessions. Zero uses a conservative default.
+	// idle sessions. Zero with nil ConnectionAdmission uses a conservative
+	// default; otherwise zero uses the shared admission limit.
 	MaxConnections int
+	// ConnectionAdmission optionally shares the accepted-connection budget
+	// with other native transports. MaxConnections must be zero or match its
+	// limit. Nil preserves an independent budget for this server.
+	ConnectionAdmission *ConnectionAdmission
 	// MaxClientConnections bounds concurrent QUIC sessions per source IPv4 or
 	// IPv6 /64. Zero uses a conservative default no larger than MaxConnections.
 	MaxClientConnections int
@@ -134,13 +139,11 @@ func ListenQUIC(config QUICServerConfig) (*QUICServer, error) {
 	if _, err := newServerPacingNegotiator(config.Pacing, config.MaxTx, config.MaxRx, config.AllowClientRates); err != nil {
 		return nil, err
 	}
-	if config.MaxConnections < 0 {
-		return nil, errors.New("tunnel: maximum QUIC connections cannot be negative")
+	connectionAdmission, err := resolveConnectionAdmission(config.MaxConnections, defaultMaxConnections, config.ConnectionAdmission)
+	if err != nil {
+		return nil, err
 	}
-	maxConnections := config.MaxConnections
-	if maxConnections == 0 {
-		maxConnections = defaultMaxConnections
-	}
+	maxConnections := cap(connectionAdmission.sem)
 	maxClientConnections := config.MaxClientConnections
 	if maxClientConnections < 0 {
 		return nil, errors.New("tunnel: maximum QUIC client connections cannot be negative")
@@ -167,7 +170,7 @@ func ListenQUIC(config QUICServerConfig) (*QUICServer, error) {
 		ctx:       ctx,
 		cancel:    cancel,
 		conns:     make(map[*quic.Conn]struct{}),
-		connSem:   make(chan struct{}, maxConnections),
+		connSem:   connectionAdmission.sem,
 		streamSem: make(chan struct{}, cap(core.sem)),
 		clients:   newSourceConnectionLimiter(maxClientConnections),
 		udp:       udp,

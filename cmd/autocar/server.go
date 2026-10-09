@@ -41,8 +41,8 @@ func runServer(parent context.Context, args []string) error {
 	deniedCIDRsText := fs.String("deny-cidrs", "", "additional comma-separated denied destination CIDRs/IPs")
 	maxStreams := fs.Int("max-streams", 1024, "maximum active tunnel streams")
 	maxConnections := fs.Int("max-connections", 256, "global maximum accepted relay connections")
-	maxClientConnections := fs.Int("max-client-connections", 32, "maximum relay connections per source IPv4 or IPv6 /64")
-	maxClientFallbackConnections := fs.Int("max-client-fallback-connections", 0, "native protocol: maximum TLS fallback connections per source IPv4 or IPv6 /64; zero uses min(32, --max-streams)")
+	maxClientConnections := fs.Int("max-client-connections", 32, "maximum connections per source IPv4 or IPv6 /64: native QUIC, or shared web H2/H3")
+	maxClientFallbackConnections := fs.Int("max-client-fallback-connections", 0, "native protocol: maximum TLS fallback connections per source IPv4 or IPv6 /64; zero uses min(32, --max-streams, --max-connections)")
 	maxUDPSessions := fs.Int("max-udp-sessions", 256, "maximum live UDP associations across all QUIC clients")
 	maxClientUDPSessions := fs.Int("max-client-udp-sessions", 32, "maximum live UDP associations per source IPv4 or IPv6 /64")
 	maxUDPDestinations := fs.Int("max-udp-destinations", 64, "maximum numeric destinations authorized per UDP association")
@@ -90,8 +90,8 @@ func runServer(parent context.Context, args []string) error {
 	if *maxClientConnections <= 0 || *maxClientConnections > *maxConnections {
 		return errors.New("--max-client-connections must be positive and no greater than --max-connections")
 	}
-	if !*disableFallback && (*maxClientFallbackConnections < 0 || *maxClientFallbackConnections > *maxStreams) {
-		return errors.New("--max-client-fallback-connections must be zero or positive and no greater than --max-streams")
+	if !*disableFallback && (*maxClientFallbackConnections < 0 || *maxClientFallbackConnections > min(*maxStreams, *maxConnections)) {
+		return errors.New("--max-client-fallback-connections must be zero or positive and no greater than --max-streams or --max-connections")
 	}
 	if serverProtocol == "web" && *maxClientFallbackConnections != 0 {
 		return errors.New("--max-client-fallback-connections is valid only with --protocol=native; web H2/H3 share --max-client-connections")
@@ -233,6 +233,10 @@ func runServer(parent context.Context, args []string) error {
 		return nil
 	}
 
+	connectionAdmission, err := tunnel.NewConnectionAdmission(*maxConnections)
+	if err != nil {
+		return fmt.Errorf("configure connection admission: %w", err)
+	}
 	quicServer, err := tunnel.ListenQUIC(tunnel.QUICServerConfig{
 		Address:                  *listen,
 		Token:                    token,
@@ -248,6 +252,7 @@ func runServer(parent context.Context, args []string) error {
 		MaxConcurrentStreams:     *maxStreams,
 		StreamAdmission:          streamAdmission,
 		MaxConnections:           *maxConnections,
+		ConnectionAdmission:      connectionAdmission,
 		MaxClientConnections:     *maxClientConnections,
 		MaxUDPSessions:           *maxUDPSessions,
 		MaxClientUDPSessions:     *maxClientUDPSessions,
@@ -274,6 +279,8 @@ func runServer(parent context.Context, args []string) error {
 			DestinationWriteTimeout: *destinationWriteTimeout,
 			MaxConcurrentStreams:    *maxStreams,
 			StreamAdmission:         streamAdmission,
+			MaxConnections:          *maxConnections,
+			ConnectionAdmission:     connectionAdmission,
 			MaxClientConnections:    *maxClientFallbackConnections,
 		})
 		if err != nil {

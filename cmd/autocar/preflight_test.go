@@ -245,6 +245,8 @@ func TestPreflightServerRejectsInvalidConfiguration(t *testing.T) {
 		{"handshake timeout", "--handshake-timeout", []string{"--handshake-timeout", "-1s"}},
 		{"destination write timeout", "--destination-write-timeout", []string{"--destination-write-timeout", "-1s"}},
 		{"connections", "--max-connections", []string{"--max-connections", "0"}},
+		{"fallback above connection limit", "--max-client-fallback-connections", []string{"--max-connections", "1", "--max-client-connections", "1", "--max-streams", "3", "--max-client-fallback-connections", "2"}},
+		{"fallback above stream limit", "--max-client-fallback-connections", []string{"--max-streams", "1", "--max-client-fallback-connections", "2"}},
 		{"UDP sessions", "--max-client-udp-sessions", []string{"--max-udp-sessions", "1"}},
 		{"rate bound", "protocol maximum", []string{"--pacing", "fixed-rate", "--max-upload-mbps", "8000001", "--max-download-mbps", "1"}},
 		{"web missing root", "static cover", []string{"--protocol", "web", "--cover-root", missing}},
