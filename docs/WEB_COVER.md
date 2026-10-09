@@ -674,6 +674,10 @@ historical browser capture, not a new browser run or a warm-handshake comparison
 Advertised trust-anchor IDs do not replace or expand the configured `RootCAs`.
 These profiles describe only the TLS ClientHello; H2 settings, header order, flow control,
 connection reuse, payload sizes and timing retain their implementation behavior.
+A [bounded H2 endpoint diagnostic](H2-DIAGNOSTIC-2026-10-09.md) records concrete
+settings/window differences from installed Chrome 154, along with an incomplete
+browser metadata check. It is a partial, decrypted endpoint observation, not
+evidence of passive browser similarity or a completed browser acceptance gate.
 Source builds after v1.0.1 also support ordinary TLS 1.3 session resumption for
 both profiles when the caller enables a TLS session cache. An empty cache keeps
 the fixed cold ClientHello shape; a valid cached ticket adds uTLS's native
