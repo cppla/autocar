@@ -144,6 +144,15 @@ streams on the affected connection, while ordinary stream cancellation must
 preserve healthy siblings. See [timeout semantics and configuration](DEPLOYMENT.md)
 for partial-progress and cleanup boundaries. This setting is not in v1.0.1.
 
+Failed H2 opens cancel their request immediately. An authenticated error or
+canceled handoff can leave unread response data whose cleanup needs that same
+shared write lock. Cleanup is client-owned and joined by client shutdown; it
+does not extend the failed caller's wait or retire usable sibling streams.
+The pending cleanup retains its opening reservation and continuation ticket
+slot until the response closes, so the per-connection authentication window
+also limits detached continuation cleanup. An invalid authentication proof
+instead retires the physical connection before closing its response body.
+
 There is no `autocar/2` ALPN or AutoCAR binary stream header on these paths.
 The web ALPNs are `h2`, `h3`, and `http/1.1`. Native and web transports remain
 separate modes and are not wire-compatible.
