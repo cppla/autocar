@@ -30,7 +30,17 @@ type TLSServerConfig struct {
 	// StreamAdmission optionally shares the active-stream budget with other
 	// server transports. When set, MaxConcurrentStreams must be zero or equal
 	// to the admission limit. Nil preserves the independent-server behavior.
-	StreamAdmission      *StreamAdmission
+	StreamAdmission *StreamAdmission
+	// MaxConnections bounds accepted TLS connections, including those awaiting
+	// authentication. Zero with nil ConnectionAdmission preserves the previous
+	// independent budget equal to the active-stream limit.
+	MaxConnections int
+	// ConnectionAdmission optionally shares the accepted-connection budget
+	// with other native transports. MaxConnections must be zero or match its
+	// limit. Nil preserves an independent budget for this server.
+	ConnectionAdmission *ConnectionAdmission
+	// MaxClientConnections separately bounds TLS connections per source IPv4
+	// or IPv6 /64. Zero uses min(32, stream limit, connection limit).
 	MaxClientConnections int
 }
 
@@ -78,15 +88,20 @@ func ListenTLS(config TLSServerConfig) (*TLSServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	connectionAdmission, err := resolveConnectionAdmission(config.MaxConnections, cap(core.sem), config.ConnectionAdmission)
+	if err != nil {
+		return nil, err
+	}
+	maxClientLimit := min(cap(core.sem), cap(connectionAdmission.sem))
 	maxClientConnections := config.MaxClientConnections
 	if maxClientConnections < 0 {
 		return nil, errors.New("tunnel: maximum TLS client connections cannot be negative")
 	}
 	if maxClientConnections == 0 {
-		maxClientConnections = min(defaultMaxClientConnections, cap(core.sem))
+		maxClientConnections = min(defaultMaxClientConnections, maxClientLimit)
 	}
-	if maxClientConnections > cap(core.sem) {
-		return nil, fmt.Errorf("tunnel: maximum TLS client connections (%d) exceeds maximum concurrent streams (%d)", maxClientConnections, cap(core.sem))
+	if maxClientConnections > maxClientLimit {
+		return nil, fmt.Errorf("tunnel: maximum TLS client connections (%d) exceeds connection or concurrent stream limit (%d)", maxClientConnections, maxClientLimit)
 	}
 	listener, err := net.Listen("tcp", config.Address)
 	if err != nil {
@@ -98,7 +113,7 @@ func ListenTLS(config TLSServerConfig) (*TLSServer, error) {
 		tlsConfig: tlsConfig,
 		core:      core,
 		clients:   newSourceConnectionLimiter(maxClientConnections),
-		connSem:   make(chan struct{}, cap(core.sem)),
+		connSem:   connectionAdmission.sem,
 		ctx:       ctx,
 		cancel:    cancel,
 		conns:     make(map[net.Conn]struct{}),

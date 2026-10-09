@@ -125,9 +125,14 @@ services. Add deployment-specific blocks with `--deny-cidrs` and
 `--deny-ports`.
 
 Resource controls include `--max-connections`, `--max-client-connections`,
-`--max-streams` and `--max-client-fallback-connections`. `--max-streams` is one
-global admission budget shared by the QUIC and TLS listeners; enabling fallback
-does not double the configured stream capacity.
+`--max-streams` and `--max-client-fallback-connections`. Native QUIC and TLS
+listeners share one `--max-connections` budget for all accepted connections,
+including unauthenticated connections and authenticated idle QUIC sessions.
+`--max-streams` independently limits active streams across both listeners.
+The per-source limits remain separate: `--max-client-connections` caps QUIC
+sessions, while `--max-client-fallback-connections` caps TLS connections and
+defaults to `min(32, --max-streams, --max-connections)`. An explicit fallback
+limit cannot exceed either `--max-streams` or `--max-connections`.
 
 QUIC UDP associations have separate bounded controls:
 
