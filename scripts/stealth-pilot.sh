@@ -32,7 +32,7 @@ EOF
 if [ "${1:-}" = --self-test ]; then
 	[ "$#" -eq 1 ] || { usage; exit 2; }
 	python3 scripts/stealth-pilot-config.py self-test
-	GOPROXY=off go test ./scripts/stealth-pilot
+	GOPROXY=off go test ./scripts/stealth-pilot ./scripts/stealth-build-info
 	exit 0
 fi
 [ "$#" -eq 0 ] || { usage; exit 2; }
@@ -221,7 +221,7 @@ if [ -n "$($docker_bin image ls -q "$runner_image" 2>/dev/null)" ]; then
 	exit 2
 fi
 
-# Compile from the current v1.0.1 worktree with dependency fetching disabled.
+# Compile from the current worktree with dependency fetching disabled.
 # The resulting Linux binaries are frozen before any capture begins.
 git_head=$(git rev-parse --verify HEAD)
 build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -231,6 +231,15 @@ GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" go build -trimpath \
 GOPROXY=off CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" go build -trimpath \
 	-o "$inputs/stealth-pilot" ./scripts/stealth-pilot
 chmod 0755 "$inputs/autocar" "$inputs/stealth-pilot"
+
+# Read the exact target binaries without executing them. Record the effective
+# replacement sources, not just the original module requirements or this
+# checkout's go.mod. Keep only the helper's allowlisted, secret-free fields.
+GOPROXY=off GOOS="$(go env GOHOSTOS)" GOARCH="$(go env GOHOSTARCH)" \
+	go run ./scripts/stealth-build-info \
+	--autocar "$inputs/autocar" --control "$inputs/stealth-pilot" \
+	>"$artifact_dir/build-provenance.json"
+cp "$artifact_dir/build-provenance.json" "$inputs/build-provenance.json"
 
 # Stage an already-local official binary and verify both its metadata and
 # preregistered release checksum. No curl, registry pull, or public endpoint is
@@ -416,6 +425,7 @@ python3 scripts/stealth-pilot-config.py prepare \
 	--hysteria-container "$hysteria_server" --hysteria-ip "$hysteria_ip" \
 	--origin-ip "$origin_ip" --cert "$inputs/server.crt" --key "$inputs/server.key" \
 	--token "$inputs/token" --autocar-binary "$inputs/autocar" \
+	--control-binary "$inputs/stealth-pilot" --build-info "$inputs/build-provenance.json" \
 	--hysteria-binary "$inputs/hysteria" \
 	--hysteria-client-config "$inputs/hysteria-client.yaml" \
 	--hysteria-server-config "$inputs/hysteria-server.yaml" \

@@ -177,6 +177,71 @@ class DependencyBoundaryTests(unittest.TestCase):
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_replacement_metadata_strings_and_comments_are_not_imports(self):
+        for path in (self.fork, self.quic_fork, self.fork + "/internal/fixture", self.quic_fork + "/http3"):
+            with self.subTest(path=path):
+                (self.root / "metadata.go").write_text(
+                    'package fixture\nimport "fmt"\n'
+                    f'const source = "{path}"\n'
+                    f'const rawSource = `{path}`\n'
+                    f'// import "{path}"\n'
+                    f'/* import (alias `{path}`) */\n'
+                    f'const example = `import _ "{path}"`\n'
+                    f'var sources = map[string]string{{"{path}": `{path}`}}\n'
+                    'var quotedImport = "import \\\"github.com/cppla/utls\\\""\n',
+                    encoding="utf-8",
+                )
+                result = self.check()
+                self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_literal_replacement_import_forms_and_subpackages_fail(self):
+        forms = (
+            'import "{path}"',
+            'import alias "{path}"',
+            'import _ "{path}"',
+            'import . "{path}"',
+            'import (\n "fmt"\n alias "{path}"\n)',
+            'import ("fmt"; _ "{path}")',
+            'import (\n . /* alias comment */ "{path}"\n)',
+            'import `{path}`',
+            'import alias `{path}`',
+            'import (\n _ `{path}`\n)',
+            'import (\n . `{path}`\n)',
+            'import /* declaration comment */ "{path}"',
+        )
+        for path in (self.fork, self.quic_fork, self.fork + "/internal/fixture", self.quic_fork + "/http3"):
+            for form in forms:
+                with self.subTest(path=path, form=form):
+                    (self.root / "main.go").write_text(
+                        "package fixture\n" + form.format(path=path) + "\n",
+                        encoding="utf-8",
+                    )
+                    result = self.check()
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("imports the replacement path directly", result.stdout)
+
+    def test_raw_import_carriage_returns_cannot_hide_replacement_identity(self):
+        for path in (self.fork, self.quic_fork + "/http3"):
+            with self.subTest(path=path):
+                (self.root / "main.go").write_bytes(
+                    ("package fixture\nimport `" + path.replace("/cppla/", "/cppla/\r") + "`\n").encode()
+                )
+                result = self.check()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("imports the replacement path directly", result.stdout)
+
+    def test_prohibited_application_module_whole_source_policy_is_unchanged(self):
+        path = "github.com/apernet/hysteria/v2"
+        for source in (
+            f'import _ "{path}"', f'const source = "{path}"',
+            f'const raw = `{path}`', f'// import "{path}"',
+        ):
+            with self.subTest(source=source):
+                (self.root / "main.go").write_text("package fixture\n" + source + "\n", encoding="utf-8")
+                result = self.check()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("Go source references the prohibited", result.stdout)
+
     def test_fork_cannot_be_required_or_imported_directly(self):
         result = self.check(self.module + f"\nrequire {self.fork} {FORK_VERSION}\n")
         self.assertNotEqual(result.returncode, 0, result.stdout)
