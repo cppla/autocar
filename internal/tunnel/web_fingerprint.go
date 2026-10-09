@@ -56,6 +56,12 @@ const (
 	// today". It is the default for web-cover HTTP/3 connections.
 	H3FingerprintChrome202610 H3FingerprintProfile = "chrome-2026-10"
 
+	// H3FingerprintChrome202610Resume explicitly opts into TLS 1.3 ticket
+	// resumption on the October profile. It never enables 0-RTT or reuses proxy
+	// authentication across physical connections. The default remains full TLS
+	// handshakes, including when the caller provides a session cache.
+	H3FingerprintChrome202610Resume H3FingerprintProfile = "chrome-2026-10-resume"
+
 	// H3FingerprintChrome202608 identifies the retired August 2026 profile.
 	// Deprecated: this profile is rejected, not aliased to a different wire
 	// image. Explicitly migrate to H3FingerprintChrome202610 or native.
@@ -76,11 +82,17 @@ func normalizeH3FingerprintProfile(profile H3FingerprintProfile) (H3FingerprintP
 		return H3FingerprintChrome202610, nil
 	case H3FingerprintChrome202608:
 		return "", ErrH3FingerprintProfileRetired
+	case H3FingerprintChrome202610Resume:
+		return H3FingerprintChrome202610Resume, nil
 	case H3FingerprintNative:
 		return H3FingerprintNative, nil
 	default:
-		return "", fmt.Errorf("tunnel: unsupported web-cover HTTP/3 fingerprint profile %q; supported profiles are %q and %q", profile, H3FingerprintChrome202610, H3FingerprintNative)
+		return "", fmt.Errorf("tunnel: unsupported web-cover HTTP/3 fingerprint profile %q; supported profiles are %q, %q and %q", profile, H3FingerprintChrome202610, H3FingerprintChrome202610Resume, H3FingerprintNative)
 	}
+}
+
+func isWebH3ChromeProfile(profile H3FingerprintProfile) bool {
+	return profile == H3FingerprintChrome202610 || profile == H3FingerprintChrome202610Resume
 }
 
 // webH2TLSClientConn keeps the rest of the HTTP/2 transport independent of

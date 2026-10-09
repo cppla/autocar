@@ -115,7 +115,7 @@ func addTunnelFlags(fs *flag.FlagSet, flags *tunnelFlags) {
 	flags.h2Fingerprint = h2FingerprintFlag(tunnel.FingerprintChrome133)
 	fs.Var(&flags.h2Fingerprint, "h2-fingerprint", "web H2 wire profile: chrome-133, chrome-155, or native; empty uses chrome-133 (h2/web-auto only)")
 	flags.h3Fingerprint = h3FingerprintFlag(tunnel.H3FingerprintChrome202610)
-	fs.Var(&flags.h3Fingerprint, "h3-fingerprint", "web H3 wire profile: chrome-2026-10 or native; chrome-2026-08 is retired")
+	fs.Var(&flags.h3Fingerprint, "h3-fingerprint", "web H3 wire profile: chrome-2026-10 (full handshake), chrome-2026-10-resume (opt-in tickets, no 0-RTT), or native; chrome-2026-08 is retired")
 	fs.StringVar(&flags.pacing, "pacing", "adaptive", "QUIC application pacing: adaptive, reno, or fixed-rate")
 	fs.StringVar(&flags.pacingProfile, "pacing-profile", "balanced", "adaptive pacing profile: conservative, balanced, or aggressive")
 	fs.Uint64Var(&flags.uploadMbps, "upload-mbps", 0, "client-to-relay fixed pacing rate in Mbit/s")

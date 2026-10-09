@@ -11,6 +11,7 @@ import (
 
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
+	utls "github.com/refraction-networking/utls"
 )
 
 type webH3ResumptionCache struct {
@@ -39,6 +40,49 @@ func (c *webH3ResumptionCache) Get(key string) (*tls.ClientSessionState, bool) {
 	return state, ok
 }
 
+type webH3ResumptionUTLSCache struct {
+	inner  utls.ClientSessionCache
+	stored chan struct{}
+	once   sync.Once
+	puts   atomic.Int64
+	hits   atomic.Int64
+}
+
+func (c *webH3ResumptionUTLSCache) Put(key string, state *utls.ClientSessionState) {
+	c.inner.Put(key, state)
+	if state != nil {
+		c.puts.Add(1)
+		c.once.Do(func() { close(c.stored) })
+	}
+}
+
+func (c *webH3ResumptionUTLSCache) Get(key string) (*utls.ClientSessionState, bool) {
+	state, ok := c.inner.Get(key)
+	if ok {
+		c.hits.Add(1)
+	}
+	return state, ok
+}
+
+func watchWebH3UTLSTickets(t *testing.T, client *WebH3Client) *webH3ResumptionUTLSCache {
+	t.Helper()
+	if client.quicConfig.ChromeParrotSessionCache == nil {
+		t.Fatal("opt-in client did not allocate a private uTLS session cache")
+	}
+	cache := &webH3ResumptionUTLSCache{inner: client.quicConfig.ChromeParrotSessionCache, stored: make(chan struct{})}
+	client.quicConfig.ChromeParrotSessionCache = cache
+	return cache
+}
+
+func waitWebH3Ticket(t *testing.T, stored <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-stored:
+	case <-time.After(3 * time.Second):
+		t.Fatal("TLS cache never received a real session ticket")
+	}
+}
+
 type webH3ResumptionRequest struct {
 	conn      *quic.Conn
 	state     quic.ConnectionState
@@ -56,9 +100,14 @@ func TestWebH3ResumptionReconnectContract(t *testing.T) {
 		cacheEnabled    bool
 		ticketsDisabled bool
 		wantResume      bool
+		rejectTicket    bool
 	}{
 		{name: "native_cache", profile: H3FingerprintNative, cacheEnabled: true, wantResume: true},
 		{name: "default_chrome_cache", cacheEnabled: true},
+		{name: "chrome_resume_cache", profile: H3FingerprintChrome202610Resume, cacheEnabled: true, wantResume: true},
+		{name: "chrome_resume_rejected_ticket", profile: H3FingerprintChrome202610Resume, cacheEnabled: true, rejectTicket: true},
+		{name: "chrome_resume_nil_cache", profile: H3FingerprintChrome202610Resume},
+		{name: "chrome_resume_tickets_disabled", profile: H3FingerprintChrome202610Resume, cacheEnabled: true, ticketsDisabled: true},
 		{name: "native_nil_cache", profile: H3FingerprintNative},
 		{name: "native_tickets_disabled", profile: H3FingerprintNative, cacheEnabled: true, ticketsDisabled: true},
 		{name: "default_chrome_tickets_disabled", cacheEnabled: true, ticketsDisabled: true},
@@ -72,6 +121,13 @@ func TestWebH3ResumptionReconnectContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			serverTLS.SetSessionTicketKeys([][32]byte{ticketKey})
+			var rejectedTickets atomic.Int32
+			if test.rejectTicket {
+				serverTLS.UnwrapSession = func([]byte, tls.ConnectionState) (*tls.SessionState, error) {
+					rejectedTickets.Add(1)
+					return nil, nil
+				}
+			}
 			cache := &webH3ResumptionCache{inner: tls.NewLRUClientSessionCache(4), stored: make(chan struct{})}
 			clientTLS.ClientSessionCache = nil
 			if test.cacheEnabled {
@@ -126,6 +182,14 @@ func TestWebH3ResumptionReconnectContract(t *testing.T) {
 			if test.profile == "" && client.fingerprint != H3FingerprintChrome202610 {
 				t.Fatal("default H3 profile changed")
 			}
+			stored, puts, hits := cache.stored, &cache.puts, &cache.hits
+			wantTicketUse := test.wantResume || test.rejectTicket
+			if test.profile == H3FingerprintChrome202610Resume && wantTicketUse {
+				chromeCache := watchWebH3UTLSTickets(t, client)
+				stored, puts, hits = chromeCache.stored, &chromeCache.puts, &chromeCache.hits
+			} else if client.quicConfig.ChromeParrotSessionCache != nil {
+				t.Fatal("full-handshake control allocated a Chrome session cache")
+			}
 			entropy := &webH2AuthEntropyCounter{}
 			client.signer = newWebAuthSigner(mustWebAuthKey(t, webTestToken), nil, entropy)
 
@@ -135,12 +199,8 @@ func TestWebH3ResumptionReconnectContract(t *testing.T) {
 			var resumed [3]bool
 			for phase, name := range []string{"cold", "same_connection_stream", "physical_reconnect"} {
 				if phase == 2 {
-					if test.wantResume {
-						select {
-						case <-cache.stored:
-						case <-time.After(3 * time.Second):
-							t.Fatal("native TLS cache never received a real session ticket")
-						}
+					if wantTicketUse {
+						waitWebH3Ticket(t, stored)
 					}
 					assertWebH3SessionUsers(t, client, first, 0)
 					client.retire(first.conn)
@@ -216,14 +276,20 @@ func TestWebH3ResumptionReconnectContract(t *testing.T) {
 			if dials.Load() != 3 {
 				t.Errorf("authenticated destination dials=%d, want 3", dials.Load())
 			}
-			if test.wantResume {
-				if cache.puts.Load() == 0 || cache.hits.Load() == 0 {
-					t.Error("native resumption lacked a real stored/loaded ticket")
+			if wantTicketUse {
+				if puts.Load() == 0 || hits.Load() == 0 {
+					t.Error("resumption lacked a real stored/loaded ticket")
 				}
-			} else if cache.puts.Load() != 0 || cache.hits.Load() != 0 {
+			} else if puts.Load() != 0 || hits.Load() != 0 {
 				t.Error("full-handshake control unexpectedly used the TLS cache")
 			}
-			t.Logf("TLS DidResume cold/reuse/reconnect=%v; cache puts=%d hits=%d; proxy bootstraps=%d", resumed, cache.puts.Load(), cache.hits.Load(), entropy.nonceReads.Load())
+			if test.profile == H3FingerprintChrome202610Resume && (cache.puts.Load() != 0 || cache.hits.Load() != 0) {
+				t.Fatal("uTLS resumption used the caller's crypto/tls cache")
+			}
+			if test.rejectTicket && rejectedTickets.Load() != 1 {
+				t.Fatalf("server ticket rejections=%d, want 1 on the same reconnect", rejectedTickets.Load())
+			}
+			t.Logf("TLS DidResume cold/reuse/reconnect=%v; cache puts=%d hits=%d; proxy bootstraps=%d", resumed, puts.Load(), hits.Load(), entropy.nonceReads.Load())
 		})
 	}
 }

@@ -338,7 +338,16 @@ func TestWebH3AddressRaceFallsBackAcrossFamilies(t *testing.T) {
 }
 
 func TestWebH3DefaultChromeInitialWireShape(t *testing.T) {
+	for _, profile := range []H3FingerprintProfile{"", H3FingerprintChrome202610Resume} {
+		t.Run(string(profile), func(t *testing.T) {
+			testWebH3ChromeInitialWireShape(t, profile)
+		})
+	}
+}
+
+func testWebH3ChromeInitialWireShape(t *testing.T, profile H3FingerprintProfile) {
 	serverTLS, clientTLS := testTLSConfigs(t)
+	clientTLS.ClientSessionCache = tls.NewLRUClientSessionCache(4)
 	server, err := ListenWebH3(WebH3ServerConfig{
 		Address: "127.0.0.1:0", Token: webTestToken, TLSConfig: serverTLS,
 		Dialer: transport.DialFunc((&net.Dialer{}).DialContext), Cover: http.NotFoundHandler(),
@@ -394,7 +403,7 @@ func TestWebH3DefaultChromeInitialWireShape(t *testing.T) {
 
 	client, err := NewWebH3Client(WebH3ClientConfig{
 		ServerAddress: proxy.LocalAddr().String(), Token: webTestToken, TLSConfig: clientTLS,
-		DialTimeout: time.Second, HandshakeTimeout: 2 * time.Second,
+		FingerprintProfile: profile, DialTimeout: time.Second, HandshakeTimeout: 2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

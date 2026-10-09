@@ -159,6 +159,9 @@ func TestTunnelHelpListsWebTransports(t *testing.T) {
 	if flags.h3Fingerprint != h3FingerprintFlag(tunnel.H3FingerprintChrome202610) || !strings.Contains(output.String(), "h3-fingerprint") || !strings.Contains(output.String(), "chrome-2026-10") {
 		t.Errorf("tunnel help omitted versioned H3 fingerprint profile: %s", output.String())
 	}
+	if !strings.Contains(output.String(), "chrome-2026-10-resume") || !strings.Contains(output.String(), "no 0-RTT") {
+		t.Errorf("tunnel help omitted the explicit H3 resumption policy: %s", output.String())
+	}
 	if flags.h2Fingerprint != h2FingerprintFlag(tunnel.FingerprintChrome133) || !strings.Contains(output.String(), "h2-fingerprint") || !strings.Contains(output.String(), "chrome-155") {
 		t.Errorf("tunnel help omitted H2 profiles or changed the legacy default: %s", output.String())
 	}
@@ -189,12 +192,15 @@ func TestBuildExplicitAndAutomaticWebDialers(t *testing.T) {
 	for _, test := range []struct {
 		mode       string
 		wantPacket bool
+		profile    h3FingerprintFlag
 	}{
 		{mode: "h3", wantPacket: true},
 		{mode: "h2", wantPacket: false},
 		{mode: "web-auto", wantPacket: true},
+		{mode: "h3", wantPacket: true, profile: h3FingerprintFlag(tunnel.H3FingerprintChrome202610Resume)},
+		{mode: "web-auto", wantPacket: true, profile: h3FingerprintFlag(tunnel.H3FingerprintChrome202610Resume)},
 	} {
-		t.Run(test.mode, func(t *testing.T) {
+		t.Run(test.mode+"/"+string(test.profile), func(t *testing.T) {
 			dialer, err := buildTunnelDialer(tunnelFlags{
 				server:         "127.0.0.1:443",
 				mode:           test.mode,
@@ -206,6 +212,7 @@ func TestBuildExplicitAndAutomaticWebDialers(t *testing.T) {
 				fallbackTTL:    time.Second,
 				pacing:         "adaptive",
 				pacingProfile:  "balanced",
+				h3Fingerprint:  test.profile,
 			})
 			if err != nil {
 				t.Fatal(err)

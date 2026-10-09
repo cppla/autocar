@@ -35,8 +35,10 @@ HTTP/3/UDP，UDP 不可用时让新 TCP 流继续走 HTTPS/HTTP/2/TCP；SOCKS5 U
 AutoCAR 的身份验证、`autocar/2` 协议、TCP/UDP framing、速率协商、pacing、
 熔断回退和资源边界均由 AutoCAR 实现；自有协议不提供第三方代理协议兼容模式。
 Native 模式继续使用上游 `github.com/quic-go/quic-go`；web H3 则透明依赖
-`github.com/apernet/quic-go` fork，并精确锁定到
-`v0.63.1-0.20261004180939-a10df75c260c`，用于客户端 Chrome QUIC 握手画像。
+`github.com/apernet/quic-go` 模块身份，并通过精确远程 replacement 使用自维护的
+`github.com/cppla/quic-go`。其上游基线为
+`v0.63.1-0.20261004180939-a10df75c260c`；版本、校验和与补丁维护见
+[依赖维护说明](docs/DEPENDENCY-MAINTENANCE.md)。
 项目不依赖外部代理应用模块，依赖边界由自动检查验证。
 
 ## 设计目标与实现边界
@@ -246,15 +248,21 @@ H2 可显式选择 `--h2-fingerprint=chrome-155`（固定的新模板）、`chro
 
 `--h3-fingerprint=chrome-2026-10` 是默认值，固定使用上述依赖版本提供的完整客户端
 QUIC/TLS 握手画像，并固定为与画像中版本参数一致的 QUIC v1。
+新选项 `--h3-fingerprint=chrome-2026-10-resume` 在同一客户端重连时使用
+有效票据恢复 TLS 1.3 会话；不启用 0-RTT，新连接仍重新认证。缓存仅在内存中、
+按客户端隔离，重启进程后不会保留。默认值和已有 `chrome-2026-10` 保持完整握手。
+会话恢复用于减少完整握手开销；尚未量化延迟收益，也不代表流量等同真实浏览器。
 `--h3-fingerprint=native` 是互操作与故障回滚选项：它关闭该
 fork 的 ChromeParrot 行为，但仍属于 web H3，不会切换成 `autocar/2` 或第三方代理
 协议，也不会把依赖替换为 native 模式使用的上游模块。
 
-升级前请检查客户端配置：显式的 `chrome-2026-08` 已被拒绝，不会静默映射到新画像；
-请有意识地改为 `chrome-2026-10` 或 `native`。未填写 `h3-fingerprint` 的旧配置会采用
-新默认值，因此也会改变客户端握手。新生成的 web `init` 客户端配置会明确固定
-`chrome-2026-10`；仅运行服务端不需要迁移客户端画像选项。此更新不启用 H3 Chrome
-画像的 TLS 会话恢复或 0-RTT，也不构成隐蔽性保证；旧采集结果仍只属于其冻结版本。
+从十月画像之前的版本升级时，请检查客户端配置：显式的 `chrome-2026-08` 已被拒绝，
+不会静默映射到新画像；请有意识地改为 `chrome-2026-10` 或 `native`。那些版本中
+未填写 `h3-fingerprint` 的配置升级后会采用十月默认画像，改变客户端握手。
+本次会话恢复改造不再改变默认画像。新生成的 web `init` 客户端配置会明确固定
+`chrome-2026-10`；仅运行服务端不需要迁移客户端画像选项。只有显式选择上述
+`-resume` 选项才启用 Chrome H3 会话恢复；所有画像仍禁用 0-RTT。
+这不构成隐蔽性保证；旧采集结果仍只属于其冻结版本。
 
 在启动本地代理前，可用同一组隧道参数做一次真实端到端探测：
 
@@ -451,8 +459,8 @@ iptables 下的 UDP `sendmsg` 直接返回 `EPERM`。有损阶段只硬验证协
 
 `scripts/` 中：
 
-- `check-dependency-boundary.sh` 只允许 go.mod 精确锁定上述唯一
-  `github.com/apernet/quic-go` 版本，拒绝已知外部代理应用模块、local replace 和
+- `check-dependency-boundary.sh` 只允许 go.mod 精确锁定上述 web QUIC 基线及
+  两个自维护库的远程版本，保持官方 native QUIC 不被替换，拒绝已知外部代理应用模块、local replace 和
   vendored/copied 外部源码目录，并扫描已跟踪及未跟踪的 Go 源；
 - `docker-integration.sh` 在隔离容器网络中验证 QUIC、TLS、自动回退、`doctor`、错误令牌拒绝和非 root 只读运行；
 - `govulncheck.sh` 安装固定版本的扫描器并检查可达漏洞；上游 quic-go 公告不会自动

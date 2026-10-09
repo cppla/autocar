@@ -57,6 +57,7 @@ func hardenWebH3ServerConfig(input *quic.Config, maxStreams int, handshakeTimeou
 	// ChromeParrot is a client-only wire profile. The public cover server keeps
 	// ordinary server behavior even if a caller reuses a client config.
 	cfg.ChromeParrot = false
+	cfg.ChromeParrotSessionCache = nil
 	cfg.HandshakeIdleTimeout = boundedPositiveDuration(cfg.HandshakeIdleTimeout, handshakeTimeout)
 	cfg.MaxIdleTimeout = boundedPositiveDuration(cfg.MaxIdleTimeout, webH3MaxIdleTimeout)
 	// A server keepalive would retain unauthenticated cover connections.
@@ -79,7 +80,10 @@ func hardenedWebH3ClientConfig(input *quic.Config, handshakeTimeout time.Duratio
 	cfg.MaxIncomingUniStreams = webH3RequiredIncomingUniStreams
 	cfg.Allow0RTT = false
 	cfg.EnableDatagrams = true
-	cfg.ChromeParrot = profile == H3FingerprintChrome202610
+	cfg.ChromeParrot = isWebH3ChromeProfile(profile)
+	// The client constructor alone owns the opt-in cache and its lifetime.
+	// Never retain a caller's cache across profiles or client instances.
+	cfg.ChromeParrotSessionCache = nil
 	cfg.HandshakeIdleTimeout = boundedPositiveDuration(cfg.HandshakeIdleTimeout, handshakeTimeout)
 	cfg.MaxIdleTimeout = boundedPositiveDuration(cfg.MaxIdleTimeout, webH3MaxIdleTimeout)
 	// A deterministic keepalive interval is a strong long-lived-flow marker.

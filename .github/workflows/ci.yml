@@ -179,6 +179,18 @@ jobs:
           name: utls-upstream-advisories
           path: ${{ runner.temp }}/utls-upstream-advisories.json
           if-no-files-found: error
+      - name: Query official QUIC source-lineage advisories
+        if: always()
+        run: |
+          ./scripts/govulncheck.sh --upstream-quic > "$RUNNER_TEMP/quic-official-upstream-advisories.json"
+          ./scripts/check-upstream-advisories.sh "$RUNNER_TEMP/quic-official-upstream-advisories.json"
+      - name: Preserve official QUIC source-lineage advisory query
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quic-official-upstream-advisories
+          path: ${{ runner.temp }}/quic-official-upstream-advisories.json
+          if-no-files-found: error
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}

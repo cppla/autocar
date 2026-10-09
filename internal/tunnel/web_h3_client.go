@@ -15,6 +15,7 @@ import (
 	"github.com/apernet/quic-go/http3"
 	"github.com/cppla/autocar/internal/protocol"
 	"github.com/cppla/autocar/internal/transport"
+	utls "github.com/refraction-networking/utls"
 )
 
 const webH3HappyEyeballsDelay = 250 * time.Millisecond
@@ -26,7 +27,9 @@ type WebH3ClientConfig struct {
 	TLSConfig     *tls.Config
 	QUICConfig    *quic.Config
 	// FingerprintProfile defaults to chrome-2026-10, a fixed full QUIC
-	// handshake profile. Native is retained for interoperability and rollback.
+	// handshake profile. chrome-2026-10-resume explicitly enables ticket
+	// resumption when TLSConfig permits it, without 0-RTT. Native is retained
+	// for interoperability and rollback.
 	FingerprintProfile H3FingerprintProfile
 	DialTimeout        time.Duration
 	HandshakeTimeout   time.Duration
@@ -166,6 +169,12 @@ func NewWebH3Client(config WebH3ClientConfig) (*WebH3Client, error) {
 		handshakeTimeout = defaultHandshakeTimeout
 	}
 	quicConfig := hardenedWebH3ClientConfig(config.QUICConfig, handshakeTimeout, fingerprint)
+	if fingerprint == H3FingerprintChrome202610Resume && tlsConfig.ClientSessionCache != nil && !tlsConfig.SessionTicketsDisabled {
+		// Native uTLS sessions are opaque and cannot share crypto/tls cache
+		// entries. Keep a bounded cache private to this H3 client, independent
+		// of its H2 fallback and every other client made from the same config.
+		quicConfig.ChromeParrotSessionCache = utls.NewLRUClientSessionCache(64)
+	}
 	maxUDPSessions, err := normalizedUDPCount(config.MaxUDPSessions, defaultClientMaxUDPSessions, "maximum web-cover UDP sessions")
 	if err != nil {
 		return nil, err
@@ -208,14 +217,14 @@ func NewWebH3Client(config WebH3ClientConfig) (*WebH3Client, error) {
 }
 
 func validateWebH3FingerprintTLSConfig(config *tls.Config, profile H3FingerprintProfile) error {
-	if profile != H3FingerprintChrome202610 {
+	if !isWebH3ChromeProfile(profile) {
 		return nil
 	}
 	if config.VerifyConnection != nil {
-		return errors.New("tunnel: chrome-2026-10 HTTP/3 fingerprint profile does not support crypto/tls VerifyConnection; use VerifyPeerCertificate or the native rollback profile")
+		return fmt.Errorf("tunnel: %s HTTP/3 fingerprint profile does not support crypto/tls VerifyConnection; use VerifyPeerCertificate or the native rollback profile", profile)
 	}
 	if config.GetConfigForClient != nil || config.GetCertificate != nil || len(config.Certificates) > 0 {
-		return errors.New("tunnel: chrome-2026-10 HTTP/3 fingerprint profile does not support server-side TLS fields or static client certificates")
+		return fmt.Errorf("tunnel: %s HTTP/3 fingerprint profile does not support server-side TLS fields or static client certificates", profile)
 	}
 	return nil
 }
@@ -661,7 +670,7 @@ func (c *WebH3Client) dialSessionAddress(ctx context.Context, address net.IPAddr
 		return nil, fmt.Errorf("listen %s for %s: %w", network, address.String(), err)
 	}
 	quicTransport := &quic.Transport{Conn: packet}
-	if c.fingerprint == H3FingerprintChrome202610 {
+	if isWebH3ChromeProfile(c.fingerprint) {
 		quicTransport.ConnectionIDGenerator = quic.ZeroLengthConnectionIDGenerator{}
 	}
 	remote := &net.UDPAddr{IP: address.IP, Port: port, Zone: address.Zone}
