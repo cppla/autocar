@@ -8,6 +8,8 @@ The SHA-256 value is calculated from the upstream file's original bytes; line en
 
 ## `github.com/apernet/quic-go` `v0.63.1-0.20261004180939-a10df75c260c`
 
+Effective source replacement: `github.com/cppla/quic-go v0.63.1-0.20261009040133-c1cae948af15`.
+
 ### `LICENSE`
 
 SHA-256: `77d0b7b53e8abb84cf4dd3f9945a7fdf27044240d2e8023966a721a9a46fe96e`
@@ -427,7 +429,7 @@ SOFTWARE.
 
 ## `github.com/refraction-networking/utls` `v1.8.3-0.20261006222701-ff1b50fbbe9a`
 
-Effective source replacement: `github.com/cppla/utls v0.0.0-20261009014536-ff869e255a30`.
+Effective source replacement: `github.com/cppla/utls v0.0.0-20261009031926-14c2a4cb1403`.
 
 ### `LICENSE`
 

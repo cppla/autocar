@@ -37,13 +37,16 @@ AutoCAR does not hide endpoint IPs, packet size, timing, traffic volume, or the
 use of QUIC/TLS. Web mode serves a real configured H1/H2/H3 origin and routes
 unauthenticated requests through that cover, but normal HTTP semantics do not
 make all observable behavior identical to a browser. The H2 client uses a fixed
-Chrome 133 uTLS ClientHello reference; that is not a claim about the complete
+Chrome 133 or explicitly selected Chrome 155 uTLS ClientHello reference; that is not a claim about the complete
 TLS/H2 fingerprint. Web H3 defaults to the fixed `chrome-2026-10` client
 handshake profile from the exactly pinned `github.com/apernet/quic-go` fork and
 uses a zero-length source CID. That client-only profile does not reproduce the
 relay, H3 SETTINGS, CONNECT traffic, packet sizes, reuse, or timing. This profile
 still disables TLS session resumption: a replacement connection performs a full
-handshake even with a configured session cache. Neither the dependency update
+handshake even with a configured session cache. The separate opt-in
+`chrome-2026-10-resume` profile can resume TLS using a bounded, per-client
+memory-only cache. It still requires new proxy authentication for each physical
+connection, and all profiles keep 0-RTT disabled. Neither the dependency update
 nor the profile is proof of a classification advantage. AutoCAR makes no
 undetectability guarantee.
 
@@ -241,13 +244,15 @@ parties.
 ## Dependency boundary
 
 Native AutoCAR builds on official upstream quic-go. Web H3 uses
-`github.com/apernet/quic-go` pinned exactly to
-`v0.63.1-0.20261004180939-a10df75c260c`; H2 uses x/net HTTP/2 and uTLS for its
-fixed ClientHello reference. A targeted CI boundary allows only that exact web
-QUIC fork version and one exact published `github.com/cppla/utls` remote
-replacement for the original uTLS module. The same replacement covers H2 and
-the web-H3 adapter; direct imports of the replacement path are rejected to
-avoid a second uTLS module identity. The boundary rejects the known external
+`github.com/apernet/quic-go` at source baseline
+`v0.63.1-0.20261004180939-a10df75c260c`, globally replaced by an exact
+published `github.com/cppla/quic-go` revision; H2 uses x/net HTTP/2 and uTLS.
+A targeted CI boundary allows only that exact web QUIC source baseline and
+two exact published remote replacements: the maintained QUIC fork and
+`github.com/cppla/utls` for the original uTLS module. The uTLS replacement
+covers H2 and the web-H3 adapter; direct imports of either replacement path
+are rejected to avoid duplicate module identities. Official native QUIC is
+not replaced. The boundary rejects the known external
 proxy application module, local replacements, and copied/vendored
 external-source directories, and scans tracked
 and untracked Go source.
@@ -265,14 +270,17 @@ has no vulnerabilities.
 
 The managed uTLS replacement has the same database-identity limitation, even
 though its original import paths are retained. CI separately queries the exact
-original uTLS baseline, retains the JSON output, and stops for human review if
-advisories are returned. This is not a reachability result for the fork. The
+original uTLS baseline and the web-H3 lineage's official QUIC baseline, retains
+both JSON outputs, and stops for human review if advisories are returned.
+These queries are not reachability results for the forks. The
 review must also consider relevant Go TLS security fixes. See the executable
 update and advisory-review procedure in
 [dependency maintenance](docs/DEPENDENCY-MAINTENANCE.md).
 
 The current client profile is versioned as `chrome-2026-10`; the retired
-`chrome-2026-08` name is rejected, not aliased. Existing client configurations
-that omit the profile select the new default on upgrade. Review that handshake
-change before deployment; new web `init` client files pin the profile explicitly.
+`chrome-2026-08` name is rejected, not aliased. When upgrading from builds predating
+the October profile, client configurations that omit the profile adopt the
+October default and change their handshake. Review that migration before
+deployment. This resumption update does not change the current default;
+new web `init` client files pin the profile explicitly.
 Server-only deployments have no client-profile setting to migrate.

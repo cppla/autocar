@@ -435,17 +435,21 @@ enables the fixed full client QUIC/TLS handshake profile and zero-length source
 CID supplied by the pinned `github.com/apernet/quic-go` fork. The profile is
 locked to QUIC v1 because its fixed version-information transport parameter is
 part of that v1 handshake image.
+`--h3-fingerprint=chrome-2026-10-resume` explicitly adds ticket-based TLS
+resumption to that cold profile, without 0-RTT; the default is unchanged.
+See [the resumption boundaries](#fingerprint-boundary) before opting in.
 `--h3-fingerprint=native` disables ChromeParrot inside that same fork as an
 explicit interoperability and rollback choice. Here `native` names only the H3
 fingerprint fallback; it does not select AutoCAR's native `autocar/2` protocol.
 
 The retired `chrome-2026-08` name is rejected, not mapped to the new image. To
 upgrade an explicitly pinned client config, choose `chrome-2026-10` or `native`
-and validate it with `client --check`. Old configs that omit the profile adopt
-the new default and therefore change their handshake after upgrade. New web
-`init` client files record the current profile explicitly. Review this change
-before deploying clients; server-only configurations have no client-profile
-migration.
+and validate it with `client --check`. When upgrading from builds predating the
+October profile, configs that omit the profile adopt the October default and
+change their handshake. Review that migration before deploying clients. This
+resumption update leaves the current default unchanged. New web `init` client
+files record the current profile explicitly; server-only configurations have
+no client-profile migration.
 
 For `web-auto`, `0 < --quic-attempt-timeout < --open-timeout` is required.
 When the relay name resolves to both address families, H3 interleaves IPv6 and
@@ -639,8 +643,10 @@ clocks must be synchronized closely enough to satisfy the acceptance window.
 ## Fingerprint boundary
 
 The H3 client uses the fixed `chrome-2026-10` profile by default. AutoCAR obtains
-that profile from the `github.com/apernet/quic-go` fork,
-pinned to `v0.63.1-0.20261004180939-a10df75c260c`. It applies the fork's
+that profile from the `github.com/apernet/quic-go` module, globally replaced
+by an exact published `github.com/cppla/quic-go` revision. The source baseline
+remains `v0.63.1-0.20261004180939-a10df75c260c`; see
+[dependency maintenance](DEPENDENCY-MAINTENANCE.md). It applies the fork's
 ChromeParrot client handshake image—including ClientHello, client transport
 parameters and Initial packetization—and uses a zero-length client source CID.
 ChromeParrot is client-only: it does not turn the AutoCAR relay into a particular
@@ -648,15 +654,31 @@ Chrome-facing CDN/server implementation, and it does not make H3 SETTINGS,
 CONNECT/authentication traffic, packet sizes, connection reuse or timing match
 Chrome. The `native` rollback profile disables this client image.
 
-The fixed H3 Chrome profile also disables TLS session resumption inside the
-pinned fork. Supplying `tls.Config.ClientSessionCache` does not change that:
-each replacement QUIC connection performs a full TLS handshake. The H3 `native`
-profile can resume TLS when a caller-provided cache has a valid ticket and the
-server permits it; a nil cache or `SessionTicketsDisabled` retains full
-handshakes. Neither profile enables 0-RTT. Reusing an already-open QUIC
+The existing `chrome-2026-10` profile retains full TLS handshakes.
+Supplying `tls.Config.ClientSessionCache` alone does not change that.
+The separate opt-in `chrome-2026-10-resume` profile uses the same cold
+QUIC/ClientHello template and permits TLS 1.3 ticket resumption on reconnect.
+Each configured client owns a bounded 64-entry, memory-only uTLS-native cache;
+it is never shared with H2, another client, or the standard-library cache.
+The caller's non-nil standard-library cache enables the policy, but its
+incompatible session contents are not translated. A nil cache or
+`SessionTicketsDisabled` keeps full handshakes, even with the new profile.
+The CLI's normal TLS configuration permits this opt-in. Restarting the process
+starts cold; there is no ticket file or global cache.
+
+The H3 `native` profile can also resume TLS when a caller-provided cache has a
+valid ticket and the server permits it. No profile enables 0-RTT, including
+when a server issues an early-data-capable ticket. Reusing an already-open QUIC
 connection for another stream is connection reuse, not TLS resumption. Every
 replacement physical connection still starts fresh proxy authentication,
 including when its TLS session resumes.
+
+Select the new option explicitly with
+`--h3-fingerprint=chrome-2026-10-resume`, or set the same value in the
+client JSON's `h3-fingerprint` field. Existing/default configurations and
+newly generated bundles stay on `chrome-2026-10`. Roll back by selecting it
+again. A changed warm ClientHello is not a new real-browser reference:
+actual traffic equivalence remains unproven.
 
 The H3 loopback reconnect regression checks these distinct behaviors with the
 same client and server, an actual received-ticket signal, and both peers' TLS

@@ -3,10 +3,12 @@ set -Eeuo pipefail
 
 readonly ALLOWED_WEB_QUIC_MODULE='github.com/apernet/quic-go'
 readonly ALLOWED_WEB_QUIC_VERSION='v0.63.1-0.20261004180939-a10df75c260c'
+readonly ALLOWED_WEB_QUIC_REPLACEMENT='github.com/cppla/quic-go'
+readonly ALLOWED_WEB_QUIC_FORK_VERSION='v0.63.1-0.20261009040133-c1cae948af15'
 readonly ALLOWED_UTLS_MODULE='github.com/refraction-networking/utls'
 readonly ALLOWED_UTLS_UPSTREAM_VERSION='v1.8.3-0.20261006222701-ff1b50fbbe9a'
 readonly ALLOWED_UTLS_REPLACEMENT='github.com/cppla/utls'
-readonly ALLOWED_UTLS_VERSION='v0.0.0-20261009014536-ff869e255a30'
+readonly ALLOWED_UTLS_VERSION='v0.0.0-20261009031926-14c2a4cb1403'
 readonly FORBIDDEN_HYSTERIA_PATTERN='github\.com/apernet/hysteria(/|[[:space:]"`]|$)'
 readonly FORBIDDEN_HYSTERIA_GO_PATTERN='["`]github\.com/apernet/hysteria(/[^"`[:space:]]*)?["`]'
 status=0
@@ -31,20 +33,22 @@ if [[ -n ${noncanonical_module_tokens} ]]; then
   status=1
 fi
 
-if [[ ${ALLOWED_UTLS_VERSION} == TODO_* ]]; then
-  echo "error: the managed uTLS fork's published version has not been pinned" >&2
-  status=1
-elif [[ ! ${ALLOWED_UTLS_VERSION} =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(0\.)?[0-9]{14}-[0-9a-f]{12}$ ]]; then
-  echo "error: the managed uTLS fork must use an exact published pseudo-version" >&2
-  status=1
-fi
-
 # Keep the upstream module identity for both direct and transitive imports. Only
-# one global, remote, immutable replacement is allowed; a version-scoped replace
-# could leave another selected upstream version unpatched.
-utls_counts=$(
-  awk -v module="${ALLOWED_UTLS_MODULE}" -v upstream="${ALLOWED_UTLS_UPSTREAM_VERSION}" \
-      -v replacement="${ALLOWED_UTLS_REPLACEMENT}" -v version="${ALLOWED_UTLS_VERSION}" '
+# one global, remote, immutable replacement per fork is allowed; a version-scoped
+# replace could leave another selected upstream version unpatched.
+check_managed_fork() {
+  local label=$1 module=$2 upstream=$3 replacement=$4 version=$5
+  local counts source_count target_count require_count replace_count
+  if [[ ${version} == TODO_* ]]; then
+    echo "error: the managed ${label} fork's published version has not been pinned" >&2
+    status=1
+  elif [[ ! ${version} =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(0\.)?[0-9]{14}-[0-9a-f]{12}$ ]]; then
+    echo "error: the managed ${label} fork must use an exact published pseudo-version" >&2
+    status=1
+  fi
+  counts=$(
+    awk -v module="${module}" -v upstream="${upstream}" \
+        -v replacement="${replacement}" -v version="${version}" '
     {
       line = $0
       sub(/[[:space:]]*\/\/.*/, "", line)
@@ -62,44 +66,38 @@ utls_counts=$(
           part[first + 2] == replacement && part[first + 3] == version) exact_replace++
     }
     END { print source_count + 0, target_count + 0, exact_require + 0, exact_replace + 0 }
-  ' go.mod
-)
-read -r utls_source_count utls_target_count utls_require_count utls_replace_count <<<"${utls_counts}"
-if (( utls_source_count != 2 || utls_target_count != 1 || utls_require_count != 1 || utls_replace_count != 1 )); then
-  echo "error: require exactly ${ALLOWED_UTLS_MODULE} ${ALLOWED_UTLS_UPSTREAM_VERSION} and globally replace it with ${ALLOWED_UTLS_REPLACEMENT} ${ALLOWED_UTLS_VERSION}" >&2
-  status=1
-fi
+    ' go.mod
+  )
+  read -r source_count target_count require_count replace_count <<<"${counts}"
+  if (( source_count != 2 || target_count != 1 || require_count != 1 || replace_count != 1 )); then
+    echo "error: require exactly ${module} ${upstream} and globally replace it with ${replacement} ${version}" >&2
+    status=1
+  fi
+}
+check_managed_fork uTLS "${ALLOWED_UTLS_MODULE}" "${ALLOWED_UTLS_UPSTREAM_VERSION}" \
+  "${ALLOWED_UTLS_REPLACEMENT}" "${ALLOWED_UTLS_VERSION}"
+check_managed_fork 'web QUIC' "${ALLOWED_WEB_QUIC_MODULE}" "${ALLOWED_WEB_QUIC_VERSION}" \
+  "${ALLOWED_WEB_QUIC_REPLACEMENT}" "${ALLOWED_WEB_QUIC_FORK_VERSION}"
 
-module_counts=$(
-  awk -v module="${ALLOWED_WEB_QUIC_MODULE}" -v version="${ALLOWED_WEB_QUIC_VERSION}" '
+# The managed web adapter must not redirect the independent native transport.
+native_quic_replacements=$(
+  awk '
     {
       line = $0
       sub(/[[:space:]]*\/\/.*/, "", line)
       sub(/^[[:space:]]+/, "", line)
-      sub(/[[:space:]]+$/, "", line)
       fields = split(line, part, /[[:space:]]+/)
-      for (field = 1; field <= fields; field++) {
-        if (part[field] == module || index(part[field], module "/") == 1) {
-          count++
-        }
-      }
-      if (part[1] == "require" && part[2] == module) {
-        if (fields == 3 && part[3] == version) {
-          exact++
-        }
-      } else if (part[1] == module) {
-        if (fields == 2 && part[2] == version) {
-          exact++
-        }
+      first = part[1] == "replace" ? 2 : 1
+      if ((part[first] == "github.com/quic-go/quic-go" ||
+           index(part[first], "github.com/quic-go/quic-go/") == 1) && index(line, "=>")) {
+        print NR ":" line
       }
     }
-    END { print count + 0, exact + 0 }
   ' go.mod
 )
-read -r web_quic_count exact_web_quic_count <<<"${module_counts}"
-if (( web_quic_count != 1 || exact_web_quic_count != 1 )); then
-  echo "error: go.mod must require exactly ${ALLOWED_WEB_QUIC_MODULE} ${ALLOWED_WEB_QUIC_VERSION}:" >&2
-  awk -v module="${ALLOWED_WEB_QUIC_MODULE}" 'index($0, module) { print NR ":" $0 }' go.mod >&2
+if [[ -n ${native_quic_replacements} ]]; then
+  echo "error: native transport must keep the official QUIC module without replacement:" >&2
+  printf '%s\n' "${native_quic_replacements}" >&2
   status=1
 fi
 
@@ -113,17 +111,6 @@ else
     echo "error: could not inspect go.mod" >&2
     status=1
   fi
-fi
-
-web_quic_replacements=$(
-  awk -v module="${ALLOWED_WEB_QUIC_MODULE}" '
-    index($0, module) && index($0, "=>") { print NR ":" $0 }
-  ' go.mod
-)
-if [[ -n ${web_quic_replacements} ]]; then
-  echo "error: the pinned web QUIC module must not be replaced:" >&2
-  printf '%s\n' "${web_quic_replacements}" >&2
-  status=1
 fi
 
 local_replacements=$(
@@ -151,8 +138,8 @@ if [[ -n ${local_replacements} ]]; then
 fi
 
 while IFS= read -r -d '' source_file; do
-  if grep -qE '["`]github\.com/cppla/utls(/[^"`[:space:]]*)?["`]' "${source_file}"; then
-    echo "error: ${source_file#./} imports the replacement path directly; retain the original uTLS import path" >&2
+  if grep -qE '["`]github\.com/cppla/(utls|quic-go)(/[^"`[:space:]]*)?["`]' "${source_file}"; then
+    echo "error: ${source_file#./} imports the replacement path directly; retain the original module import path" >&2
     status=1
   fi
   if imports=$(grep -nE "${FORBIDDEN_HYSTERIA_GO_PATTERN}" "${source_file}"); then
@@ -224,7 +211,8 @@ for source_dir in \
   vendor/github.com/apernet/hysteria \
   vendor/github.com/apernet/quic-go \
   vendor/github.com/refraction-networking/utls \
-  vendor/github.com/cppla/utls; do
+  vendor/github.com/cppla/utls \
+  vendor/github.com/cppla/quic-go; do
   if [[ -e ${source_dir} || -L ${source_dir} ]]; then
     external_sources+="${source_dir}"$'\n'
   fi

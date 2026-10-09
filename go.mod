@@ -3,7 +3,10 @@ module github.com/cppla/autocar
 go 1.27.2
 
 // Preserve upstream type identity for H2 and the web-H3 adapter. See docs/DEPENDENCY-MAINTENANCE.md.
-replace github.com/refraction-networking/utls => github.com/cppla/utls v0.0.0-20261009014536-ff869e255a30
+replace github.com/refraction-networking/utls => github.com/cppla/utls v0.0.0-20261009031926-14c2a4cb1403
+
+// The web adapter is independent of native transport's official QUIC module.
+replace github.com/apernet/quic-go => github.com/cppla/quic-go v0.63.1-0.20261009040133-c1cae948af15
 
 require (
 	github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c

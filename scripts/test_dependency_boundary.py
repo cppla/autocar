@@ -17,6 +17,12 @@ PINS = dict(re.findall(r"^readonly (ALLOWED_[A-Z_]+)='([^']+)'$", BOUNDARY, re.M
 FORK_VERSION = PINS["ALLOWED_UTLS_VERSION"]
 if FORK_VERSION.startswith("TODO_"):
     FORK_VERSION = "v1.8.3-0.20261008120000-0123456789ab"
+QUIC_FORK_VERSION = PINS["ALLOWED_WEB_QUIC_FORK_VERSION"]
+if QUIC_FORK_VERSION.startswith("TODO_"):
+    QUIC_FORK_VERSION = "v0.0.0-20261009120000-0123456789ab"
+FIXTURE_BOUNDARY = BOUNDARY.replace(PINS["ALLOWED_UTLS_VERSION"], FORK_VERSION).replace(
+    PINS["ALLOWED_WEB_QUIC_FORK_VERSION"], QUIC_FORK_VERSION
+)
 
 
 class DependencyBoundaryTests(unittest.TestCase):
@@ -25,17 +31,20 @@ class DependencyBoundaryTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.script = self.root / "check.sh"
-        self.script.write_text(
-            BOUNDARY.replace(PINS["ALLOWED_UTLS_VERSION"], FORK_VERSION), encoding="utf-8"
-        )
+        self.script.write_text(FIXTURE_BOUNDARY, encoding="utf-8")
         self.upstream = PINS["ALLOWED_UTLS_MODULE"]
         self.fork = PINS["ALLOWED_UTLS_REPLACEMENT"]
         self.replacement = f"replace {self.upstream} => {self.fork} {FORK_VERSION}"
+        self.quic_upstream = PINS["ALLOWED_WEB_QUIC_MODULE"]
+        self.quic_fork = PINS["ALLOWED_WEB_QUIC_REPLACEMENT"]
+        self.quic_replacement = (
+            f"replace {self.quic_upstream} => {self.quic_fork} {QUIC_FORK_VERSION}"
+        )
         self.module = (
             "module example.invalid/fixture\n\ngo 1.27.2\n\nrequire (\n"
             f"\t{PINS['ALLOWED_WEB_QUIC_MODULE']} {PINS['ALLOWED_WEB_QUIC_VERSION']}\n"
             f"\t{self.upstream} {PINS['ALLOWED_UTLS_UPSTREAM_VERSION']}\n"
-            ")\n\n" + self.replacement + "\n"
+            ")\n\n" + self.replacement + "\n" + self.quic_replacement + "\n"
         )
 
     def check(self, module=None):
@@ -50,13 +59,19 @@ class DependencyBoundaryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_block_replacement_and_comments_pass(self):
-        block = f"replace (\n\t{self.upstream} => {self.fork} {FORK_VERSION} // frozen\n)"
-        result = self.check(self.module.replace(self.replacement, block))
+        block = (
+            f"replace (\n\t{self.upstream} => {self.fork} {FORK_VERSION} // frozen\n"
+            f"\t{self.quic_upstream} => {self.quic_fork} {QUIC_FORK_VERSION} // frozen\n)"
+        )
+        result = self.check(
+            self.module.replace(self.replacement, block).replace(self.quic_replacement, "")
+        )
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_original_import_and_official_native_quic_remain_allowed(self):
         (self.root / "main.go").write_text(
             f'package fixture\nimport _ "{self.upstream}"\n'
+            f'import _ "{self.quic_upstream}/http3"\n'
             'import _ "github.com/quic-go/quic-go"\n', encoding="utf-8"
         )
         result = self.check()
@@ -83,6 +98,24 @@ class DependencyBoundaryTests(unittest.TestCase):
         result = self.check(self.module.replace(PINS["ALLOWED_UTLS_UPSTREAM_VERSION"], "v1.8.2"))
         self.assertNotEqual(result.returncode, 0, result.stdout)
 
+    def test_quic_missing_changed_scoped_or_duplicate_replacement_fails(self):
+        replacements = {
+            "missing": "",
+            "other owner": self.quic_replacement.replace(self.quic_fork, "github.com/other/quic-go"),
+            "different version": self.quic_replacement.replace(QUIC_FORK_VERSION, "v0.63.0"),
+            "branch": self.quic_replacement.replace(QUIC_FORK_VERSION, "main"),
+            "local relative": f"replace {self.quic_upstream} => ../quic-go",
+            "local absolute": f"replace {self.quic_upstream} => /tmp/quic-go",
+            "version scoped": self.quic_replacement.replace(" =>", " v0.63.0 =>"),
+            "duplicate": self.quic_replacement + "\n" + self.quic_replacement,
+            "reversed": f"replace {self.quic_fork} => {self.quic_upstream} {QUIC_FORK_VERSION}",
+            "submodule": self.quic_replacement.replace(self.quic_upstream, self.quic_upstream + "/http3"),
+        }
+        for label, replacement in replacements.items():
+            with self.subTest(label=label):
+                result = self.check(self.module.replace(self.quic_replacement, replacement))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+
     def test_quoted_or_escaped_module_tokens_cannot_bypass_policy(self):
         escaped_upstream = r'"github.com/refraction-networking/\x75tls"'
         escaped_fork = r'"github.com/cppla/\u0075tls"'
@@ -96,6 +129,11 @@ class DependencyBoundaryTests(unittest.TestCase):
             "quoted local path": 'replace example.invalid/other => "./other"',
             "quoted token": 'require "example.invalid/other" v1.0.0',
             "raw quoted token": f"require {chr(96)}example.invalid/other{chr(96)} v1.0.0",
+            "escaped QUIC scoped override": (
+                r'replace "github.com/apernet/quic\x2dgo" v0.63.0'
+                " => github.com/other/quic-go v0.63.0"
+            ),
+            "escaped QUIC dual identity": r'require "github.com/cppla/quic\x2dgo" v0.63.0',
         }
         for label, extra in extras.items():
             with self.subTest(label=label):
@@ -116,6 +154,8 @@ class DependencyBoundaryTests(unittest.TestCase):
             r' _ "github.com/cppla/\165tls"' + '\n)\n',
             r'package fixture; import ("fmt"; alias "github.com/cppla/\x75tls")',
             r'package fixture; import /* comment */ "github.com/cppla/\x75tls"',
+            r'package fixture; import "github.com/cppla/quic\x2dgo"',
+            r'package fixture; import _ "github.com/cppla/quic-go/\x68ttp3"',
         )
         for source in sources:
             with self.subTest(source=source):
@@ -147,7 +187,19 @@ class DependencyBoundaryTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("imports the replacement path directly", result.stdout)
 
-    def test_web_quic_pin_and_no_replacement_policy_remain_enforced(self):
+    def test_quic_fork_cannot_be_required_or_imported_directly(self):
+        for path in (self.quic_fork, self.quic_fork + "/http3"):
+            with self.subTest(path=path):
+                source = self.root / "main.go"
+                source.unlink(missing_ok=True)
+                result = self.check(self.module + f"\nrequire {path} {QUIC_FORK_VERSION}\n")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                source.write_text(f'package fixture\nimport _ "{path}"\n', encoding="utf-8")
+                result = self.check()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("imports the replacement path directly", result.stdout)
+
+    def test_web_quic_original_baseline_remains_enforced(self):
         changed = self.module.replace(PINS["ALLOWED_WEB_QUIC_VERSION"], "v0.63.0")
         replaced = self.module + (
             f"\nreplace {PINS['ALLOWED_WEB_QUIC_MODULE']} => github.com/cppla/quic-go v0.63.0\n"
@@ -155,6 +207,18 @@ class DependencyBoundaryTests(unittest.TestCase):
         for module in (changed, replaced):
             result = self.check(module)
             self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_native_quic_cannot_be_redirected_with_web_fork(self):
+        for replacement in (
+            "replace github.com/quic-go/quic-go => github.com/other/quic-go v0.63.0",
+            "replace github.com/quic-go/quic-go v0.63.0 => github.com/other/quic-go v0.63.0",
+            "replace (\n github.com/quic-go/quic-go => github.com/other/quic-go v0.63.0\n)",
+            "replace github.com/quic-go/quic-go/http3 => github.com/other/http3 v0.63.0",
+        ):
+            with self.subTest(replacement=replacement):
+                result = self.check(self.module + "\n" + replacement + "\n")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("native transport must keep the official QUIC module", result.stdout)
 
     def test_unrelated_local_replace_still_fails(self):
         result = self.check(self.module + "\nreplace example.invalid/other => ./other\n")
@@ -172,9 +236,29 @@ class DependencyBoundaryTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 directory.rmdir()
 
+    def test_copied_quic_sources_fail(self):
+        for relative in (
+            "third_party/quic-go", "vendor/github.com/apernet/quic-go",
+            "vendor/github.com/cppla/quic-go",
+        ):
+            with self.subTest(path=relative):
+                directory = self.root / relative
+                directory.mkdir(parents=True)
+                result = self.check()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                directory.rmdir()
+
+    def test_symlinked_quic_sources_fail(self):
+        (self.root / "third_party").mkdir()
+        # Even a dangling symlink must not bypass the copied-source check.
+        (self.root / "third_party/quic-go").symlink_to(self.root / "absent")
+        result = self.check()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("prohibited vendored or copied", result.stdout)
+
     def test_unpublished_placeholder_fails_closed(self):
         self.script.write_text(
-            BOUNDARY.replace(PINS["ALLOWED_UTLS_VERSION"], "TODO_PUBLISHED_CPPLA_UTLS_VERSION"),
+            FIXTURE_BOUNDARY.replace(FORK_VERSION, "TODO_PUBLISHED_CPPLA_UTLS_VERSION"),
             encoding="utf-8",
         )
         result = self.check(self.module.replace(FORK_VERSION, "TODO_PUBLISHED_CPPLA_UTLS_VERSION"))
@@ -183,11 +267,25 @@ class DependencyBoundaryTests(unittest.TestCase):
 
     def test_allowlist_itself_cannot_pin_a_branch(self):
         self.script.write_text(
-            BOUNDARY.replace(PINS["ALLOWED_UTLS_VERSION"], "main"), encoding="utf-8"
+            FIXTURE_BOUNDARY.replace(FORK_VERSION, "main"), encoding="utf-8"
         )
         result = self.check(self.module.replace(FORK_VERSION, "main"))
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("exact published pseudo-version", result.stdout)
+
+    def test_quic_unpublished_or_mutable_allowlist_fails_closed(self):
+        for version, diagnostic in (
+            ("TODO_PUBLISHED_QUIC_VERSION", "published version has not been pinned"),
+            ("main", "exact published pseudo-version"),
+            ("v0.63.0", "exact published pseudo-version"),
+        ):
+            with self.subTest(version=version):
+                self.script.write_text(
+                    FIXTURE_BOUNDARY.replace(QUIC_FORK_VERSION, version), encoding="utf-8"
+                )
+                result = self.check(self.module.replace(QUIC_FORK_VERSION, version))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(diagnostic, result.stdout)
 
 
 class UpstreamAdvisoryGateTests(unittest.TestCase):
@@ -264,6 +362,16 @@ class VulnerabilityWrapperTests(unittest.TestCase):
             f"{PINS['ALLOWED_UTLS_MODULE']}@{PINS['ALLOWED_UTLS_UPSTREAM_VERSION']}",
         ])
 
+    def test_quic_query_uses_official_source_lineage_not_renamed_fork_or_native_version(self):
+        # A native transport version may differ from the web fork's lineage;
+        # neither that nor the renamed module is the web QUIC advisory key.
+        self.env["AUTOCAR_TEST_UPSTREAM_VERSION"] = "v99.0.0"
+        result = self.run_wrapper("--upstream-quic")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout.splitlines(), [
+            "-mode=query", "-json", "github.com/quic-go/quic-go@v0.63.0",
+        ])
+
     def test_missing_baseline_and_unknown_options_fail(self):
         self.env["AUTOCAR_TEST_UPSTREAM_VERSION"] = ""
         self.assertNotEqual(self.run_wrapper("--upstream-utls").returncode, 0)
@@ -273,7 +381,7 @@ class VulnerabilityWrapperTests(unittest.TestCase):
         Path(self.env["AUTOCAR_TEST_VULN_TOOL"]).write_text(
             '#!/bin/sh\nexit 42\n', encoding="utf-8"
         )
-        for args in ((), ("--upstream-utls",)):
+        for args in ((), ("--upstream-utls",), ("--upstream-quic",)):
             with self.subTest(args=args):
                 result = self.run_wrapper(*args)
                 self.assertEqual(result.returncode, 42, result.stdout)

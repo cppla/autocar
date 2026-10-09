@@ -120,7 +120,7 @@ func TestRetiredH3FingerprintConfigCommandsStayOffline(t *testing.T) {
 }
 
 func TestH3FingerprintFlagPreservesNonRetiredValues(t *testing.T) {
-	for _, profile := range []string{"", "chrome-2026-10", "native", "unused-by-native"} {
+	for _, profile := range []string{"", "chrome-2026-10", "chrome-2026-10-resume", "native", "unused-by-native"} {
 		fs := flag.NewFlagSet("native-client", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		var tf tunnelFlags

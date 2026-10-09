@@ -55,6 +55,9 @@ func TestH3FingerprintProfileValidation(t *testing.T) {
 	if got, err := normalizeH3FingerprintProfile(H3FingerprintNative); err != nil || got != H3FingerprintNative {
 		t.Fatalf("native H3 profile = %q, %v", got, err)
 	}
+	if got, err := normalizeH3FingerprintProfile(H3FingerprintChrome202610Resume); err != nil || got != H3FingerprintChrome202610Resume {
+		t.Fatalf("opt-in resumed H3 profile = %q, %v", got, err)
+	}
 	if _, err := normalizeH3FingerprintProfile("chrome-current"); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unversioned H3 profile error = %v", err)
 	}
