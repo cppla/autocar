@@ -1,5 +1,5 @@
-github.com/cppla/quic-go v0.63.1-0.20261009040133-c1cae948af15 h1:pymPD+qKo2BoQchlq1Ke70OXRAWPfJp25Jjj7+1+F8A=
-github.com/cppla/quic-go v0.63.1-0.20261009040133-c1cae948af15/go.mod h1:TqjSZptjiHgfRItER3Mn5ymcv8OBcpfZkC2W9qn4WI0=
+github.com/cppla/quic-go v0.63.1-0.20261009113701-3a0e2cdb87a8 h1:cRdU8MvvT8WQsIrEEW7Iu2yRkWwzKc0qILo7yLSqSeA=
+github.com/cppla/quic-go v0.63.1-0.20261009113701-3a0e2cdb87a8/go.mod h1:TqjSZptjiHgfRItER3Mn5ymcv8OBcpfZkC2W9qn4WI0=
 github.com/cppla/utls v0.0.0-20261009031926-14c2a4cb1403 h1:4mCd3Kcelm0jFNEWI//rA80LenP2OiMc4E4it17nLQU=
 github.com/cppla/utls v0.0.0-20261009031926-14c2a4cb1403/go.mod h1:rc/ctWeKlh9LSk5k90KlSPcwF7P6D31mn/9GI2NAfBI=
 github.com/klauspost/compress v1.20.1 h1:T7kKElXUMXrUJ2E9QhQhxFtcK5rPyLdsGZvdbLMPdiQ=

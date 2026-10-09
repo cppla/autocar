@@ -8,7 +8,7 @@ The SHA-256 value is calculated from the upstream file's original bytes; line en
 
 ## `github.com/apernet/quic-go` `v0.63.1-0.20261004180939-a10df75c260c`
 
-Effective source replacement: `github.com/cppla/quic-go v0.63.1-0.20261009040133-c1cae948af15`.
+Effective source replacement: `github.com/cppla/quic-go v0.63.1-0.20261009113701-3a0e2cdb87a8`.
 
 ### `LICENSE`
 
