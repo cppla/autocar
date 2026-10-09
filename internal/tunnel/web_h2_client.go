@@ -73,8 +73,8 @@ type WebH2Client struct {
 	sessions  map[*webH2ClientSession]struct{}
 	dial      *webH2DialAttempt
 	selection *webH2SelectionCohort
-	// Additions are made under mu before the closed gate. Close joins both
-	// unpublished physical setup and cleanup detached from sessions.
+	// Additions are made under mu before the closed gate. Close joins physical
+	// setup, opening reservations and cleanup detached from failed responses.
 	workers   sync.WaitGroup
 	closeDone chan struct{}
 	closeErr  error
@@ -103,7 +103,8 @@ type webH2ClientSession struct {
 	authReady chan struct{}
 	auth      *webSessionClientAuth
 	// opening protects a selected session while an authentication ticket waits
-	// for replay-window capacity, before RoundTrip owns an HTTP/2 stream.
+	// for replay-window capacity and until an unsuccessful response is closed.
+	// Each reservation also owns a worker so client Close joins its cleanup.
 	opening int
 	// active counts returned net.Conns until full close, including deadline
 	// cancellation. Half-closes keep the opposite direction's ownership.
@@ -308,17 +309,38 @@ func (c *WebH2Client) dialStreamOnce(
 		return nil, err, false
 	}
 	session := reservation.session
-	defer c.releaseSessionReservation(session)
 	var (
 		bearer     string
 		authClaims webAuthClaims
 		exchange   webSessionExchange
 	)
+	finish := func() {
+		reservation.auth.complete(exchange)
+		c.releaseSessionReservation(session)
+	}
+	cleanupTransferred := false
+	defer func() {
+		if !cleanupTransferred {
+			finish()
+		}
+	}()
+	// Closing an unread response may wait on the shared HTTP/2 write lock
+	// even after request cancellation. Transfer the already-registered opening
+	// reservation, rather than delaying this caller or closing usable siblings.
+	// Keep its short-ticket slot until cleanup completes: the authentication
+	// replay window then also bounds pending continuation cleanup per session.
+	failResponse := func(body io.ReadCloser) {
+		fail()
+		cleanupTransferred = true
+		go func() {
+			defer finish()
+			_ = body.Close()
+		}()
+	}
 	if reservation.bootstrap {
 		bearer, authClaims, err = c.auth.authorization(binding, c.claims)
 	} else {
 		bearer, exchange, err = reservation.auth.authorization(requestCtx, binding)
-		defer reservation.auth.complete(exchange)
 	}
 	if err != nil {
 		fail()
@@ -375,9 +397,9 @@ func (c *WebH2Client) dialStreamOnce(
 			response.StatusCode,
 		)
 		if !ok || !c.completeSessionBootstrap(session, sessionAuth) {
-			_ = response.Body.Close()
 			fail()
 			c.failSessionAuthentication(session)
+			_ = response.Body.Close()
 			return nil, errors.New("tunnel: web-cover HTTP/2 server authentication failed"), false
 		}
 	} else if !reservation.auth.verifyResponseProof(
@@ -386,44 +408,39 @@ func (c *WebH2Client) dialStreamOnce(
 		exchange,
 		response.StatusCode,
 	) {
-		_ = response.Body.Close()
 		fail()
 		c.failSessionAuthentication(session)
+		_ = response.Body.Close()
 		return nil, errors.New("tunnel: web-cover HTTP/2 server authentication failed"), false
 	}
 	if response.StatusCode != http.StatusOK {
-		_ = response.Body.Close()
-		fail()
+		failResponse(response.Body)
 		return nil, &WebConnectError{Transport: webAuthTransportH2, StatusCode: response.StatusCode}, false
 	}
 	// Stop the establishment-only cancellation link before handing ownership
 	// to the caller. If cancellation won the race with the response, fail the
 	// dial instead of returning an already-canceled stream.
 	if !stopOpenTimeout() {
-		_ = response.Body.Close()
-		fail()
+		failResponse(response.Body)
 		return nil, context.DeadlineExceeded, false
 	}
 	stopDial()
 	if err := contextError(ctx); err != nil {
-		_ = response.Body.Close()
-		fail()
+		failResponse(response.Body)
 		return nil, err, false
 	}
 
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		_ = response.Body.Close()
-		fail()
+		failResponse(response.Body)
 		return nil, net.ErrClosed, false
 	}
 	// Detaching the opening watcher is not the ownership handoff. A caller
 	// canceled while queued on mu still owns only this request, not its session.
 	if err := contextError(ctx); err != nil {
 		c.mu.Unlock()
-		_ = response.Body.Close()
-		fail()
+		failResponse(response.Body)
 		return nil, err, false
 	}
 	c.selected = true
@@ -546,6 +563,7 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 					// not when a background worker publishes a cold connection.
 					session.authState = webH2ClientAuthBootstrapping
 					session.opening++
+					c.workers.Add(1)
 					c.mu.Unlock()
 					<-c.dialGate
 					return webH2SessionReservation{session: session, bootstrap: true}, nil
@@ -554,6 +572,7 @@ func (c *WebH2Client) reserveSession(ctx context.Context) (webH2SessionReservati
 			case webH2ClientAuthReady:
 				if canTake {
 					session.opening++
+					c.workers.Add(1)
 					auth := session.auth
 					c.mu.Unlock()
 					<-c.dialGate
@@ -651,6 +670,7 @@ func (c *WebH2Client) runSessionDial(attempt *webH2DialAttempt) {
 }
 
 func (c *WebH2Client) releaseSessionReservation(session *webH2ClientSession) {
+	defer c.workers.Done()
 	c.mu.Lock()
 	session.opening--
 	retired := c.cleanupIdleSessionsLocked()
@@ -896,7 +916,7 @@ func closeWebH2Session(session *webH2ClientSession) error {
 }
 
 // Close prevents future dials, cancels active streams, and closes every pooled
-// HTTP/2 connection. It joins owned setup and detached cleanup; concurrent
+// HTTP/2 connection. It joins owned setup, pending opens and detached cleanup; concurrent
 // callers observe the same completed closure and error.
 func (c *WebH2Client) Close() error {
 	c.mu.Lock()

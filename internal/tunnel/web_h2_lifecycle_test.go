@@ -28,6 +28,7 @@ func TestWebH2RetirementAndCloseDoNotWaitForWireWrite(t *testing.T) {
 				ctx: ctx, cancel: cancel, dialGate: make(chan struct{}, 1),
 				sessions: map[*webH2ClientSession]struct{}{session: {}},
 			}
+			client.workers.Add(session.opening)
 			// Leave the dial gate occupied so a second dial can only finish
 			// through its deadline, without accessing the network.
 			client.dialGate <- struct{}{}
@@ -76,6 +77,7 @@ func TestWebH2RetirementKeepsOpeningReservation(t *testing.T) {
 	wire, h2 := newWebH2StalledWriter(t)
 	session := &webH2ClientSession{raw: wire, h2: h2, opening: 2}
 	client := &WebH2Client{sessions: map[*webH2ClientSession]struct{}{session: {}}}
+	client.workers.Add(session.opening)
 	client.releaseSessionReservation(session)
 	if wire.closes.Load() != 0 || len(client.sessions) != 1 || session.opening != 1 {
 		t.Fatal("retirement closed a session with another opening stream")
