@@ -263,6 +263,15 @@ func (s *HTTPServer) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An origin may send progress while the client is still uploading. Disable
+	// net/http's automatic request-body drain before writing that response: the
+	// transport owns the body reader until the upload finishes. Embedders whose
+	// writers lack this control retain their existing forwarding behavior.
+	if err := http.NewResponseController(w).EnableFullDuplex(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		http.Error(w, "could not enable HTTP full duplex", http.StatusInternalServerError)
+		return
+	}
+
 	out := r.Clone(r.Context())
 	prepareHTTPForwardRequestTrailers(r, out)
 	out.RequestURI = ""

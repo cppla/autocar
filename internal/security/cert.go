@@ -196,8 +196,17 @@ func validateCertificateDestinations(certFile, keyFile string) error {
 }
 
 func prepareAtomicFile(destination string, data []byte, mode os.FileMode) (path string, err error) {
-	dir := filepath.Dir(destination)
-	base := filepath.Base(destination)
+	// Keep the same symlink/.. semantics used by validation and Rename. A
+	// lexical Dir/Clean could put the temporary file in a different directory
+	// or filesystem than the destination, breaking atomic installation.
+	dir, base := filepath.Split(destination)
+	if dir == "" {
+		dir = "."
+	} else if len(dir) == 2 && dir[1] == ':' && filepath.VolumeName(dir) == dir {
+		// CreateTemp appends a separator to its directory. Preserve C:file's
+		// drive-relative parent as C:. rather than accidentally selecting C:\.
+		dir += "."
+	}
 	f, err := os.CreateTemp(dir, "."+base+".tmp-*")
 	if err != nil {
 		return "", err

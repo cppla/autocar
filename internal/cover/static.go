@@ -21,7 +21,7 @@ func NewStaticHandler(directory string) (http.Handler, error) {
 	if strings.TrimSpace(directory) == "" {
 		return nil, errors.New("static directory is required")
 	}
-	root, err := filepath.Abs(directory)
+	root, err := absoluteStaticDirectory(directory)
 	if err != nil {
 		return nil, errors.New("resolve static directory")
 	}
@@ -42,6 +42,38 @@ func NewStaticHandler(directory string) (http.Handler, error) {
 		return nil, errors.New("close static directory")
 	}
 	return &staticHandler{directory: root}, nil
+}
+
+// Anchor a relative directory without cleaning its components: link/.. must
+// retain the filesystem's meaning. Do not resolve links here either, because
+// replacing a site link must still take effect on the next request.
+func absoluteStaticDirectory(directory string) (string, error) {
+	if filepath.IsAbs(directory) {
+		return directory, nil
+	}
+	volume := filepath.VolumeName(directory)
+	base, err := os.Getwd()
+	if volume != "" {
+		base, err = filepath.Abs(volume + ".")
+	}
+	if err != nil {
+		return "", err
+	}
+	relative := directory[len(volume):]
+	if len(relative) != 0 && os.IsPathSeparator(relative[0]) {
+		if len(relative) > 1 && os.IsPathSeparator(relative[1]) {
+			// An unrecognized UNC volume must not become a local drive path.
+			return "", errors.New("invalid static directory volume")
+		}
+		// A Windows rooted path such as \site inherits the current volume.
+		return filepath.VolumeName(base) + relative, nil
+	}
+	// On Windows base also honors the working directory of a drive-relative
+	// path such as C:site. Concatenation preserves the supplied components.
+	if !os.IsPathSeparator(base[len(base)-1]) {
+		base += string(os.PathSeparator)
+	}
+	return base + relative, nil
 }
 
 type staticHandler struct {

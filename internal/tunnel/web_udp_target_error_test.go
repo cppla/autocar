@@ -81,3 +81,86 @@ func TestWebUDPTargetSendErrorScopeAndCause(t *testing.T) {
 		})
 	}
 }
+
+func TestWebUDPClosedCachedTargetPreservesOtherTargets(t *testing.T) {
+	target := startWebUDPEcho(t)
+	sibling := startWebUDPEcho(t)
+	resolver := newWebUDPTestResolver(map[string]netip.AddrPort{
+		target.String(): target, sibling.String(): sibling,
+	})
+	_, client := startWebUDPTestPair(t, resolver, WebH3ServerConfig{}, WebH3ClientConfig{})
+	packet, err := client.DialPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packet.Close()
+	assertWebUDPEcho(t, packet, []byte("target before closure"), target.String())
+	assertWebUDPEcho(t, packet, []byte("sibling before closure"), sibling.String())
+	p := packet.(*webUDPPacketConn)
+
+	// Hold exactly the reference Send obtains from its cache, then finish the
+	// target before enqueueing. This deterministically reproduces the ordering
+	// of a target stream closing between p.session and session.send.
+	session, err := p.session(target.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.closeAndWait()
+	if p.ctx.Err() != nil || session.connection.Context().Err() != nil {
+		t.Fatal("target closure ended the packet or QUIC connection")
+	}
+	err = session.send([]byte("lost target datagram"))
+	if !errors.Is(err, transport.ErrPacketTargetUnavailable) || !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed cached target error = %v, want recoverable target error retaining net.ErrClosed", err)
+	}
+	assertWebUDPEcho(t, packet, []byte("sibling after closure"), sibling.String())
+	assertWebUDPEcho(t, packet, []byte("target reopened"), target.String())
+	if resolver.count(target.String()) != 2 || resolver.count(sibling.String()) != 1 {
+		t.Fatal("target was not reopened once or sibling session was replaced")
+	}
+}
+
+func TestWebUDPClosedCachedTargetKeepsGlobalClosureTerminal(t *testing.T) {
+	for _, scope := range []string{"packet", "client", "quic"} {
+		t.Run(scope, func(t *testing.T) {
+			target := startWebUDPEcho(t)
+			resolver := newWebUDPTestResolver(map[string]netip.AddrPort{target.String(): target})
+			_, client := startWebUDPTestPair(t, resolver, WebH3ServerConfig{}, WebH3ClientConfig{})
+			packet, err := client.DialPacket(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer packet.Close()
+			assertWebUDPEcho(t, packet, []byte("before global closure"), target.String())
+			p := packet.(*webUDPPacketConn)
+			session, err := p.session(target.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Both the target and global closure signals are observable before
+			// send. Choosing the target's ready channel must not hide shutdown.
+			session.closeAndWait()
+			switch scope {
+			case "packet":
+				_ = packet.Close()
+			case "client":
+				_ = client.Close()
+			case "quic":
+				_ = session.connection.CloseWithError(0, "test physical shutdown")
+				<-session.connection.Context().Done()
+			}
+			assertTerminal := func(err error) {
+				t.Helper()
+				if !errors.Is(err, net.ErrClosed) || errors.Is(err, transport.ErrPacketTargetUnavailable) {
+					t.Fatalf("global closure error = %v, want terminal net.ErrClosed", err)
+				}
+			}
+			assertTerminal(session.send([]byte("stale target after global closure")))
+			if scope != "quic" {
+				// A live PacketConn can replace a dead physical connection on a
+				// subsequent lookup, but packet/client Close must reject new Send.
+				assertTerminal(packet.Send([]byte("new send after global closure"), target.String()))
+			}
+		})
+	}
+}

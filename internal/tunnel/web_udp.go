@@ -737,18 +737,32 @@ func (s *webUDPClientSession) runWorker(worker func()) {
 func (s *webUDPClientSession) send(payload []byte) error {
 	select {
 	case <-s.done:
-		return net.ErrClosed
+		return s.closedSendError()
 	default:
 	}
 	frame := encodeConnectUDPDatagram(append([]byte(nil), payload...))
 	select {
 	case <-s.done:
-		return net.ErrClosed
+		return s.closedSendError()
 	case s.outbound <- frame:
 		return nil
 	default:
 		return transport.ErrPacketQueueFull
 	}
+}
+
+func (s *webUDPClientSession) closedSendError() error {
+	// Send can retain a target session across its removal from the cache. A
+	// closed request stream (for example after a destination ICMP error) must
+	// not turn that race into a terminal error for every target on the packet
+	// connection. Preserve terminal errors when the logical or physical
+	// connection has ended; s.ctx alone cannot distinguish these cases because
+	// every target termination cancels it.
+	if s.packet == nil || s.packet.ctx == nil || s.connection == nil ||
+		s.packet.ctx.Err() != nil || s.connection.Context().Err() != nil {
+		return net.ErrClosed
+	}
+	return fmt.Errorf("%w: %w", transport.ErrPacketTargetUnavailable, net.ErrClosed)
 }
 
 func (s *webUDPClientSession) sendDatagrams() {
