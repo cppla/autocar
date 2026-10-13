@@ -83,6 +83,12 @@ sudo -u autocar /usr/local/bin/autocar cert \
   --key /etc/autocar/server.key
 ```
 
+`cert` creates new files exclusively: existing output paths, including dangling
+symlinks, are refused. Concurrent commands using the same output files report a
+conflict instead of replacing each other's credentials. If the process is
+interrupted, inspect any remaining files and use a fresh pair of output paths
+before retrying; an incomplete pair must not be deployed.
+
 Keep the private key only on the relay. Copy the token and trust anchor through
 an authenticated channel. The relay process must be able to traverse the
 credential directory and read its files: the private key must be a regular file
@@ -495,9 +501,13 @@ expansion, environment-variable expansion, or automatic reloads.
 These commands also reject unexpected positional arguments instead of silently
 ignoring them; use named options for every setting.
 
-Relative credential/certificate/cover-root paths in JSON are resolved against
-the config file's directory (not the process working directory). Paths supplied
-on the CLI keep their existing working-directory semantics. To switch from a
+Ordinary relative credential/certificate/cover-root paths in JSON are resolved
+against the config file's directory. Symbolic links followed by `..` keep their
+filesystem meaning in both the config path and its referenced paths. A symlink
+to the config itself uses the directory containing that link. Explicit Windows
+drive-relative (`C:file`), rooted (`\file`), and UNC paths retain the operating
+system's own addressing rules. Paths supplied on the CLI keep their existing
+working-directory semantics. To switch from a
 configured private CA to system roots, explicitly clear the old setting:
 `--ca= --system-roots`. Credentials themselves are never accepted inline in JSON;
 `token-file` and `proxy-password-file` retain the existing environment fallback

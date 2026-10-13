@@ -127,12 +127,18 @@ jobs:
             }
             Write-Output "Verified ${testName}: $passes passes, $skips skips"
           }
-      - name: Exercise static cover and certificate path policy on Windows
+      - name: Exercise path handling and certificate creation on Windows
         shell: pwsh
         run: |
-          $pathTests = @('TestStaticHandlerServesGETAndHEAD', 'TestStaticHandlerUsesStandardErrors', 'TestStaticHandlerValidatesDirectory', 'TestStaticFileSystemPathPolicy', 'TestStaticRootWindowsRelativePaths', 'TestCertificateTemporaryFileForDriveRelativeFilename')
+          $pathTests = @(
+            'TestStaticHandlerServesGETAndHEAD', 'TestStaticHandlerUsesStandardErrors', 'TestStaticHandlerValidatesDirectory',
+            'TestStaticFileSystemPathPolicy', 'TestStaticRootWindowsRelativePaths', 'TestCertificateTemporaryFileForDriveRelativeFilename',
+            'TestCommandConfigWindowsPathKinds', 'TestInitCreatesPrivatePortableMatchingBundle', 'TestInitRefusesExistingPathsAndMissingParent',
+            'TestCertConcurrentProcesses', 'TestCreateSelfSignedCertificate',
+            'TestCreateSelfSignedCertificateWindowsDriveRelativePaths', 'TestCreateCertificatePairCleansOwnKeyAfterCertificateConflict'
+          )
           $selection = '^(' + ($pathTests -join '|') + ')$'
-          $testOutput = & go test ./internal/cover ./internal/security -run $selection -count=1 -timeout=30s -json
+          $testOutput = & go test ./internal/cover ./internal/security ./cmd/autocar -run $selection -count=1 -timeout=60s -json
           $testExit = $LASTEXITCODE
           $testOutput | Write-Output
           if ($testExit -ne 0) { exit $testExit }

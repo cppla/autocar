@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -121,7 +122,7 @@ func TestQUICWriteActivityEndsWhenPacingCanceled(t *testing.T) {
 				cancelStream()
 			case "deadline":
 				_ = conn.SetWriteDeadline(time.Now())
-				wantErr = context.DeadlineExceeded
+				wantErr = os.ErrDeadlineExceeded
 			}
 			if err := awaitActivityResult(t, done); !errors.Is(err, wantErr) {
 				t.Fatalf("Write error = %v, want %v", err, wantErr)

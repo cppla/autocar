@@ -37,7 +37,7 @@ func parseFlagsWithConfig(fs *flag.FlagSet, args []string) error {
 	if err != nil {
 		return err
 	}
-	base, err := filepath.Abs(filepath.Dir(*configPath))
+	base, err := commandConfigDirectory(*configPath)
 	if err != nil {
 		return fmt.Errorf("resolve config directory: %w", err)
 	}
@@ -55,8 +55,8 @@ func parseFlagsWithConfig(fs *flag.FlagSet, args []string) error {
 		if err != nil {
 			return fmt.Errorf("config option %q: %w", name, err)
 		}
-		if commandConfigFileOption(name) && value != "" && !filepath.IsAbs(value) {
-			value = filepath.Join(base, value)
+		if commandConfigFileOption(name) && value != "" && configRelativePath(value) {
+			value = appendUncleanPath(base, value)
 		}
 		// Validate even overridden entries so stale/invalid config never goes
 		// unnoticed. Do not include a possibly sensitive value in diagnostics.
@@ -75,6 +75,45 @@ func parseFlagsWithConfig(fs *flag.FlagSet, args []string) error {
 		}
 	}
 	return nil
+}
+
+// A config's parent is its spelled directory, including symlink/.. traversal.
+// Do not resolve the final component: a symlink to a config still uses paths
+// relative to the directory containing that symlink. Ordinary relative parents
+// are anchored to the working directory without filepath.Abs's lexical Clean.
+func commandConfigDirectory(path string) (string, error) {
+	dir, _ := filepath.Split(path)
+	if dir != "" && !configRelativePath(dir) {
+		return dir, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if dir == "" {
+		return cwd, nil
+	}
+	return appendUncleanPath(cwd, dir), nil
+}
+
+// Windows drive-relative (C:file), rooted (\file), and UNC paths already
+// select their own volume/root semantics. Keep them as written, just like
+// absolute paths, rather than appending them to the config directory.
+func configRelativePath(path string) bool {
+	return filepath.VolumeName(path) == "" && (path == "" || !os.IsPathSeparator(path[0]))
+}
+
+// filepath.Join would collapse a symlink followed by .. before the filesystem
+// has a chance to resolve it. All callers have already selected the base and
+// classified name as a relative path.
+func appendUncleanPath(dir, name string) string {
+	if dir == "" || os.IsPathSeparator(dir[len(dir)-1]) {
+		return dir + name
+	}
+	if len(dir) == 2 && dir[1] == ':' && filepath.VolumeName(dir) == dir {
+		return dir + name // C:file is drive-relative; C:\file is not.
+	}
+	return dir + string(os.PathSeparator) + name
 }
 
 func readCommandConfig(path string) (map[string]any, error) {

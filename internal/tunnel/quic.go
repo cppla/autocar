@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -1380,6 +1381,9 @@ func (c *quicStreamConn) waitForPacing(bytes int) error {
 		c.deadlineMu.Unlock()
 
 		err := c.pacer.wait(waitCtx, bytes, c.conn)
+		writeDeadlineExpired := !deadline.IsZero() &&
+			errors.Is(err, context.DeadlineExceeded) &&
+			errors.Is(waitCtx.Err(), context.DeadlineExceeded)
 		cancelDeadline()
 		cancelActive()
 
@@ -1395,6 +1399,12 @@ func (c *quicStreamConn) waitForPacing(bytes int) error {
 			// the newly installed deadline instead of treating an extension or
 			// clear as a spurious write failure.
 			continue
+		}
+		if writeDeadlineExpired {
+			// Expose the net.Conn deadline contract at the stream boundary.
+			// Keep the pacer's own context errors unchanged, and only translate
+			// after a deadline extension or clear has had a chance to retry.
+			return os.ErrDeadlineExceeded
 		}
 		return err
 	}

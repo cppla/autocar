@@ -117,10 +117,102 @@ func GenerateSelfSignedCertificate(opts CertificateOptions) (certPEM, keyPEM []b
 	return certPEM, keyPEM, nil
 }
 
-// WriteSelfSignedCertificate generates and atomically writes a certificate and
-// private key. The key is always installed with mode 0600, even when replacing
-// a pre-existing file; the certificate is installed with mode 0644. Destinations
-// in the same directory must not have equal or case-only-different filenames.
+// CreateSelfSignedCertificate generates a certificate and private key only when
+// both output paths are unused. Exclusive file creation, not the preliminary
+// existence check, prevents concurrent processes from overwriting either file.
+// The key uses mode 0600 and the certificate uses 0644 on Unix.
+//
+// This is not a two-file transaction: new files can be visible while being
+// written, and process interruption can leave incomplete outputs for inspection.
+// Ordinary failures close and remove this call's files when their identities
+// can still be verified. The output directories must remain trusted; identity
+// checks during cleanup are not protection against hostile directory changes.
+func CreateSelfSignedCertificate(certFile, keyFile string, opts CertificateOptions) error {
+	if strings.TrimSpace(certFile) == "" || strings.TrimSpace(keyFile) == "" {
+		return errors.New("security: certificate and key paths are required")
+	}
+	if err := validateCertificateDestinations(certFile, keyFile); err != nil {
+		return err
+	}
+	for _, path := range []string{certFile, keyFile} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("security: refusing to overwrite certificate output %q: %w", path, os.ErrExist)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("security: inspect certificate output: %w", err)
+		}
+	}
+	certPEM, keyPEM, err := GenerateSelfSignedCertificate(opts)
+	if err != nil {
+		return err
+	}
+	return createCertificatePair(certFile, keyFile, certPEM, keyPEM)
+}
+
+func createCertificatePair(certFile, keyFile string, certPEM, keyPEM []byte) error {
+	keyInfo, err := createCertificateFile(keyFile, keyPEM, 0o600)
+	if err != nil {
+		return fmt.Errorf("security: create private key: %w", err)
+	}
+	if _, err := createCertificateFile(certFile, certPEM, 0o644); err != nil {
+		return errors.Join(fmt.Errorf("security: create certificate: %w", err), removeCreatedCertificateFile(keyFile, keyInfo))
+	}
+	return nil
+}
+
+func createCertificateFile(path string, contents []byte, mode os.FileMode) (_ os.FileInfo, err error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	var created os.FileInfo
+	defer func() {
+		err = errors.Join(err, file.Close())
+		if err != nil && created != nil {
+			err = errors.Join(err, removeCreatedCertificateFile(path, created))
+		}
+	}()
+	created, err = file.Stat()
+	if err != nil {
+		// Without an identity, leave the new file for inspection rather than
+		// risk removing a replacement at this path.
+		return nil, fmt.Errorf("inspect newly created output (may remain incomplete): %w", err)
+	}
+	if _, err := file.Write(contents); err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(mode); err != nil {
+		return nil, err
+	}
+	if err := file.Sync(); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func removeCreatedCertificateFile(path string, created os.FileInfo) error {
+	current, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("security: inspect newly created output for cleanup: %w", err)
+	}
+	if !os.SameFile(created, current) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("security: remove incomplete output: %w", err)
+	}
+	return nil
+}
+
+// WriteSelfSignedCertificate writes a certificate and private key, allowing
+// existing files to be replaced using atomic renames, not a two-file transaction.
+// The key is always
+// installed with mode 0600, even when replacing a pre-existing file; the
+// certificate uses 0644. Destinations in the same directory must not have equal
+// or case-only-different filenames. Use CreateSelfSignedCertificate when an
+// existing output must never be replaced.
 func WriteSelfSignedCertificate(certFile, keyFile string, opts CertificateOptions) error {
 	if strings.TrimSpace(certFile) == "" || strings.TrimSpace(keyFile) == "" {
 		return errors.New("security: certificate and key paths are required")

@@ -26,16 +26,13 @@ func runCert(args []string) error {
 	if *days < 1 || *days > 1825 {
 		return errors.New("--days must be between 1 and 1825")
 	}
-	if fileExists(*certFile) || fileExists(*keyFile) {
-		return errors.New("refusing to overwrite an existing certificate or key")
-	}
 	var sans []string
 	for _, host := range strings.Split(*hosts, ",") {
 		if host = strings.TrimSpace(host); host != "" {
 			sans = append(sans, host)
 		}
 	}
-	if err := security.WriteSelfSignedCertificate(*certFile, *keyFile, security.CertificateOptions{
+	if err := security.CreateSelfSignedCertificate(*certFile, *keyFile, security.CertificateOptions{
 		Hosts:        sans,
 		ValidFor:     time.Duration(*days) * 24 * time.Hour,
 		Organization: *organization,

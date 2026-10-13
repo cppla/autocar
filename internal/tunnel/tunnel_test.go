@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -117,8 +118,8 @@ func TestQUICStreamUpdatedDeadlineInterruptsPendingPacingWait(t *testing.T) {
 	}
 	select {
 	case err := <-writeDone:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Write error = %v, want deadline exceeded", err)
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("Write error = %v, want os.ErrDeadlineExceeded", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("updated write deadline did not interrupt pacing wait")

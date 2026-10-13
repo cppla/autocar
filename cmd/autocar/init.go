@@ -187,34 +187,46 @@ func writeInitBundleContents(directory string, files []initBundleFile) error {
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return err
 	}
+	// Open the directory using the same spelling passed to Mkdir. A lexical
+	// Join would change symlink/.. traversal and could write into an unrelated
+	// pre-existing directory. Root keeps every subsequent operation attached
+	// to this directory, even if an ancestor is renamed while we are writing.
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return writeInitBundleRoot(root, files)
+}
+
+func writeInitBundleRoot(root *os.Root, files []initBundleFile) error {
 	for _, name := range []string{"server", "client"} {
-		path := filepath.Join(directory, name)
-		if err := os.Mkdir(path, 0o700); err != nil {
+		if err := root.Mkdir(name, 0o700); err != nil {
 			return err
 		}
-		if err := os.Chmod(path, 0o700); err != nil {
+		if err := root.Chmod(name, 0o700); err != nil {
 			return err
 		}
 	}
 	for _, file := range files {
 		if file.path == "server/cover/index.html" {
-			coverDirectory := filepath.Join(directory, "server", "cover")
-			if err := os.Mkdir(coverDirectory, 0o700); err != nil {
+			coverDirectory := filepath.Join("server", "cover")
+			if err := root.Mkdir(coverDirectory, 0o700); err != nil {
 				return err
 			}
-			if err := os.Chmod(coverDirectory, 0o700); err != nil {
+			if err := root.Chmod(coverDirectory, 0o700); err != nil {
 				return err
 			}
 		}
-		if err := writeNewInitFile(filepath.Join(directory, filepath.FromSlash(file.path)), file.data); err != nil {
+		if err := writeNewInitFile(root, filepath.FromSlash(file.path), file.data); err != nil {
 			return fmt.Errorf("write bundle file %s: %w", file.path, err)
 		}
 	}
 	return nil
 }
 
-func writeNewInitFile(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+func writeNewInitFile(root *os.Root, path string, data []byte) error {
+	file, err := root.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
