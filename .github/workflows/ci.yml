@@ -66,7 +66,7 @@ jobs:
       - name: Test with coverage
         run: go test -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
       - name: Upload coverage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-go-${{ matrix.go }}
           path: coverage.out
@@ -182,7 +182,7 @@ jobs:
           ./scripts/check-upstream-advisories.sh "$RUNNER_TEMP/utls-upstream-advisories.json"
       - name: Preserve original uTLS advisory query
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: utls-upstream-advisories
           path: ${{ runner.temp }}/utls-upstream-advisories.json
@@ -194,7 +194,7 @@ jobs:
           ./scripts/check-upstream-advisories.sh "$RUNNER_TEMP/quic-official-upstream-advisories.json"
       - name: Preserve official QUIC source-lineage advisory query
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: quic-official-upstream-advisories
           path: ${{ runner.temp }}/quic-official-upstream-advisories.json
@@ -253,7 +253,7 @@ jobs:
             tar -C dist/package -czf "dist/${{ matrix.archive }}" "${{ matrix.binary }}" LICENSE THIRD_PARTY_NOTICES.md
           fi
           test -s "dist/${{ matrix.archive }}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.archive }}
