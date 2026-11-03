@@ -25,11 +25,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - go: '1.27.2'
-            version: '1.27.2'
+          - go: '1.27.3'
+            version: '1.27.3'
           - go: '1.27.x'
             # Reject stale manifests and caches below the security baseline.
-            version: '>=1.27.2 <1.28.0'
+            version: '>=1.27.3 <1.28.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -73,26 +73,26 @@ jobs:
           if-no-files-found: error
 
   macos-test:
-    name: macOS test (Go 1.27.2)
+    name: macOS test (Go 1.27.3)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.2
+          go-version: 1.27.3
           cache: true
       - name: Test
         run: go test -shuffle=on -count=1 ./...
 
   windows-udp-test:
-    name: Windows UDP continuity (Go 1.27.2)
+    name: Windows UDP continuity (Go 1.27.3)
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.2
+          go-version: 1.27.3
           cache: true
       - name: Exercise native UDP continuity and platform bind errors
         shell: pwsh
@@ -159,7 +159,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '>=1.27.2 <1.28.0'
+          go-version: '>=1.27.3 <1.28.0'
           check-latest: true
           cache: true
       - run: make race
@@ -171,7 +171,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.27.2
+          go-version: 1.27.3
           cache: true
       - name: Run govulncheck
         run: ./scripts/govulncheck.sh
@@ -231,7 +231,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '>=1.27.2 <1.28.0'
+          go-version: '>=1.27.3 <1.28.0'
           check-latest: true
           cache: true
       - name: Cross-build

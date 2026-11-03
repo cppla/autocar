@@ -623,7 +623,7 @@ def self_test_build_provenance(root: Path) -> Dict[str, Any]:
     report: Dict[str, Any] = {"schema_version": 1, "kind": BUILD_INFO_KIND}
     for role, filename in (("autocar", "autocar"), ("control", "stealth-pilot")):
         report[role] = {
-            "binary_sha256": sha256(root / filename), "go_version": "go1.27.2",
+            "binary_sha256": sha256(root / filename), "go_version": "go1.27.3",
             "goos": "linux", "goarch": "arm64", "package": BUILD_PACKAGES[role],
             "modules": [{
                 "module_path": identity, "requested_version": "v0.63.0" if identity == NATIVE_QUIC else "v1.2.3",
