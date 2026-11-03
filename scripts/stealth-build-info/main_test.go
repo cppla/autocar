@@ -22,7 +22,7 @@ import (
 
 func fixtureBuildInfo(spec binarySpec) *debug.BuildInfo {
 	info := &debug.BuildInfo{
-		GoVersion: "go1.27.2",
+		GoVersion: "go1.27.3",
 		Path:      spec.path,
 		Main:      debug.Module{Path: "github.com/cppla/autocar", Version: "(devel)"},
 		Settings: []debug.BuildSetting{
@@ -57,7 +57,7 @@ func TestInspectBuildInfoReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Modules) != 3 || got.Package != autocarSpec.path || got.GoVersion != "go1.27.2" || got.GOOS != "linux" || got.GOARCH != "arm64" {
+	if len(got.Modules) != 3 || got.Package != autocarSpec.path || got.GoVersion != "go1.27.3" || got.GOOS != "linux" || got.GOARCH != "arm64" {
 		t.Fatalf("unexpected binary provenance: %+v", got)
 	}
 	for i, path := range selectedModules {
@@ -249,7 +249,7 @@ func TestProvenanceRequiresMatchingCompilerAndTarget(t *testing.T) {
 	for _, edit := range []func(*binaryProvenance){
 		func(b *binaryProvenance) { b.GOOS = "darwin" },
 		func(b *binaryProvenance) { b.GOARCH = "amd64" },
-		func(b *binaryProvenance) { b.GoVersion = "go1.27.3" },
+		func(b *binaryProvenance) { b.GoVersion = "go1.27.4" },
 	} {
 		changed := control
 		edit(&changed)
@@ -329,7 +329,7 @@ func TestReadRealCompiledBinaryOfflineWithoutExecuting(t *testing.T) {
 	if err := os.MkdirAll(commandDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/cppla/autocar\n\ngo 1.27.2\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/cppla/autocar\n\ngo 1.27.3\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(dir, "must-not-run")

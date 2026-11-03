@@ -41,7 +41,7 @@ class DependencyBoundaryTests(unittest.TestCase):
             f"replace {self.quic_upstream} => {self.quic_fork} {QUIC_FORK_VERSION}"
         )
         self.module = (
-            "module example.invalid/fixture\n\ngo 1.27.2\n\nrequire (\n"
+            "module example.invalid/fixture\n\ngo 1.27.3\n\nrequire (\n"
             f"\t{PINS['ALLOWED_WEB_QUIC_MODULE']} {PINS['ALLOWED_WEB_QUIC_VERSION']}\n"
             f"\t{self.upstream} {PINS['ALLOWED_UTLS_UPSTREAM_VERSION']}\n"
             ")\n\n" + self.replacement + "\n" + self.quic_replacement + "\n"

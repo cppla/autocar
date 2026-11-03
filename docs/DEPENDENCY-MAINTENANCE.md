@@ -25,7 +25,7 @@ web-H3 adapter's transitive imports. It is not a local source override.
 The upstream baseline is
 `v1.8.3-0.20261006222701-ff1b50fbbe9a`
 (`ff1b50fbbe9a6dff1dcb1cfc0493bd5b0f073f67`). It requires Go 1.27;
-AutoCAR's minimum supported toolchain is Go 1.27.2.
+AutoCAR's minimum supported toolchain is Go 1.27.3.
 
 The initial compatibility patch queue fixes custom-QUIC shutdown signaling and
 transport-parameter ownership after preset cloning. Its deterministic shutdown
@@ -178,7 +178,7 @@ This is an update/release procedure, not a background monitoring service.
 
 The October 9 pre-merge scan reported 11 reachable advisory IDs in the Go
 1.27.1 / `x/net v0.59.0` build, following the October 8 advisory publication.
-Current builds require [Go 1.27.2](https://go.dev/doc/devel/release#go1.27.0)
+Current builds require [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.0)
 and select `x/net v0.60.0`, including the
 [HTTP/2 HPACK race fix](https://pkg.go.dev/vuln/GO-2026-6617). CI, release builds
 and all current Go builder images are updated together; historical validation

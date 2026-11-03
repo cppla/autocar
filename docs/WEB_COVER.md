@@ -231,7 +231,7 @@ the upstream cannot be reached. Consequently, an upstream that requires an
 `Authorization` request header is not suitable without a separate authorized
 front end.
 
-With the minimum Go 1.27.2 security update, the standard reverse proxy rejects
+With the minimum Go 1.27.3 security update, the standard reverse proxy rejects
 `CONNECT` before contacting the upstream, addressing
 [GO-2026-6605](https://pkg.go.dev/vuln/GO-2026-6605). Unauthenticated or invalid
 CONNECT/CONNECT-UDP requests delegated to a reverse-proxy cover therefore get
