@@ -172,6 +172,114 @@ Unix 目录权限为 `0700`、文件为 `0600`；Windows 需另行限制 ACL。
 `token`、`cert`、`init` 遇到这类输入会先报错，不生成凭据或配置文件；
 正常参数、`-h/--help` 与既有配置文件覆盖规则保持不变。
 
+### Docker 部署：四步上手
+
+服务端和客户端使用同一个镜像 `cppla/autocar:latest`，无需安装 Go 或下载源码。
+镜像包含 `linux/amd64`、`linux/arm64`、`linux/arm/v7`，Docker 会按运行环境选择架构。
+将示例 IP `203.0.113.10` 换成你的服务器公网 IP；两台机器均需安装并启动 Docker。
+以下使用 Linux Docker 或 macOS Docker Desktop 的
+[端口映射方式](https://docs.docker.com/engine/network/port-publishing/)，命令在 Bash/Zsh 中执行。
+
+**一、客户端生成配置（只执行一次）**
+
+在客户端准备工作目录并生成两端配置；`autocar-config` 必须尚不存在：
+
+```bash
+mkdir -p ~/autocar
+cd ~/autocar
+docker pull cppla/autocar:latest
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD:/work" \
+  cppla/autocar:latest init --server 203.0.113.10:8443 --out /work/autocar-config
+```
+
+镜像默认以 UID/GID `65532:65532` 运行；这里及下面的命令使用宿主当前用户的
+UID/GID，以便读写权限为 `0700/0600` 的配置，不需要放宽私钥或令牌权限。
+
+如果拉取出现 `size validation`、`unexpected EOF` 或返回 `text/html`，可尝试
+直接使用 Docker Hub 官方地址拉取，再建立教程所用的同名标签，然后继续运行 `init`：
+
+```bash
+docker pull registry-1.docker.io/cppla/autocar:latest
+docker tag registry-1.docker.io/cppla/autocar:latest cppla/autocar:latest
+```
+
+**二、上传 server/，在服务端启动**
+
+在客户端执行，将 `user` 替换为服务器 SSH 用户：
+
+```bash
+ssh user@203.0.113.10 'mkdir -p ~/autocar'
+scp -rp ./autocar-config/server user@203.0.113.10:~/autocar/
+```
+
+登录服务端后，以接收文件的同一用户执行；放行安全组和防火墙的 **TCP、UDP 8443**：
+
+```bash
+cd ~/autocar
+docker pull cppla/autocar:latest
+docker run -d --name autocar-server --restart unless-stopped \
+  --user "$(id -u):$(id -g)" --read-only \
+  -p 8443:8443/tcp -p 8443:8443/udp \
+  -v "$PWD/server:/config:ro" \
+  cppla/autocar:latest server --config /config/server.json
+```
+
+只上传完整的 `server/`，客户端保留 `client/`；服务端不再执行 `init`。
+证书、令牌和 cover 路径会相对于配置文件解析，挂载整个目录即可。
+
+**三、在客户端启动**
+
+回到客户端的 `~/autocar`，先生成独立的本地代理密码，再启动容器：
+
+```bash
+cd ~/autocar
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD/autocar-config/client:/config" \
+  cppla/autocar:latest token --out /config/proxy-password
+
+docker run -d --name autocar-client --restart unless-stopped \
+  --user "$(id -u):$(id -g)" --read-only \
+  -p 127.0.0.1:1080:1080/tcp -p 127.0.0.1:8080:8080/tcp \
+  -v "$PWD/autocar-config/client:/config:ro" \
+  cppla/autocar:latest client --config /config/client.json \
+  --socks 0.0.0.0:1080 --http 0.0.0.0:8080 \
+  --proxy-user autocar --proxy-password-file /config/proxy-password \
+  --allow-public-plaintext
+```
+
+容器内必须监听 `0.0.0.0` 才能通过端口映射访问；AutoCAR 要求这种监听同时开启
+代理认证和 `--allow-public-plaintext`。宿主端口仅映射到 `127.0.0.1`。
+在代理软件中填写 SOCKS5 `127.0.0.1:1080` 或 HTTP `127.0.0.1:8080`，
+用户名为 `autocar`，密码可在客户端用以下命令查看：
+
+```bash
+cat ./autocar-config/client/proxy-password
+```
+
+`proxy-password` 只用于本地代理登录，与两端的 `relay-token` 不同；保留已有文件，
+后续重建容器不用重新生成。客户端不会自动修改系统代理。
+
+**四、检查连接**
+
+在客户端执行；`curl` 会提示输入上一步生成的代理密码：
+
+```bash
+docker logs --tail 50 autocar-client
+docker exec autocar-client /autocar doctor --config /config/client.json --target example.com:443
+curl --noproxy '' --proxy http://127.0.0.1:8080 --proxy-user autocar https://example.com
+```
+
+服务端日志使用 `docker logs --tail 50 autocar-server`。两端均在后台运行，Docker
+启动后会按重启策略恢复；修改配置后在对应机器执行 `docker restart autocar-server`
+或 `docker restart autocar-client`。更新镜像需重新 `pull` 并重建容器，仅 restart
+不会切换到新镜像；重建时保留宿主配置目录，沿用上面的挂载和启动参数。
+
+本例用于 SOCKS5 TCP 与 HTTP/HTTPS 网站代理。H3 到服务端的 UDP 通信正常使用
+容器出站网络，但 SOCKS5 UDP ASSOCIATE 会分配动态 UDP 端口，不能靠这里的
+TCP 端口映射提供给宿主应用；需要该功能时使用前面的原生客户端。
+容器用户映射等进阶配置见 [容器部署说明](docs/DEPLOYMENT.md#8-container)。
+
 ### 手动配置
 
 也可分别生成独立令牌与含真实 SAN 的证书：
