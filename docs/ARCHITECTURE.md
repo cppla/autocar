@@ -357,8 +357,11 @@ Capacity history is a recent maximum of eight eligible delivery samples, not
 an average or a promise of a monotonically decreasing target. Higher delivery
 evidence can raise it even in a pacing-dominated interval. The shared-stream
 regression test therefore witnesses actual peer-received flow-control blocking
-and checks learning at a fixed, still-backpressured feedback checkpoint. It
-also drains the remaining payload and verifies same-connection recovery;
+and checks learning at a fixed, still-backpressured feedback checkpoint. Its
+slow readers release credit in small, spaced reads rather than two large
+bursts, to reduce short high-rate samples caused by scheduler skew between
+large drains. Both aligned and deliberately skewed readers retain the same
+checkpoint and capacity-reduction assertion. It also drains the remaining payload and verifies same-connection recovery;
 an arbitrary final target alone is not evidence that capacity never adapted.
 
 Web H2/H3 streams do not use the native pacing negotiation and report client
