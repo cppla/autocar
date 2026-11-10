@@ -41,6 +41,15 @@ func TestQUICPacingSustainedDownloadDoesNotSelfLimitToFloor(t *testing.T) {
 }
 
 func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
+	for _, skew := range []time.Duration{0, 15 * time.Millisecond} {
+		t.Run(fmt.Sprintf("reader-skew-%s", skew), func(t *testing.T) {
+			testQUICPacingSharedStreamsAcceptTransportBackpressure(t, skew)
+		})
+	}
+}
+
+func testQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T, readerSkew time.Duration) {
+	t.Helper()
 	// Each stream's fixed 16 KiB receive window is smaller than one 32 KiB
 	// write, and cannot auto-grow to absorb the entire slow-reader payload.
 	trace := newFeedbackSharedTrace()
@@ -80,8 +89,12 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 	// Start a fast sibling while the primary cannot drain its finite receive
 	// buffer. The real clock observes actual token sleeps, not merely calls to
 	// Wait, while the primary is inside the underlying QUIC stream.Write.
-	siblingBurst := f.run(func() error { return writeFeedbackPayload(f.serverStreams[1], 128<<10) })
-	if err := readFeedbackPayload(f.clientStreams[1], 128<<10); err != nil {
+	// A short burst can fit the shared bucket plus tokens refilled during
+	// transport work. The same fixed 1 MiB warmup as the primary gives this
+	// phase more real writes in which to witness a token sleep under race.
+	const siblingWarmupBytes = 1 << 20
+	siblingBurst := f.run(func() error { return writeFeedbackPayload(f.serverStreams[1], siblingWarmupBytes) })
+	if err := readFeedbackPayload(f.clientStreams[1], siblingWarmupBytes); err != nil {
 		t.Fatal(err)
 	}
 	f.await(t, siblingBurst)
@@ -93,7 +106,7 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 	// Both streams now have slow readers. Unlike one blocked stream with an
 	// unrestricted sibling, this reduces delivery for the shared connection.
 	// Arm this immutable phase only after the preceding fast writer joined.
-	siblingWitness := newFeedbackSharedWitness(f.rawStreams[1], trace.streams[1], 128<<10, checkpoint, receiptQueue)
+	siblingWitness := newFeedbackSharedWitness(f.rawStreams[1], trace.streams[1], siblingWarmupBytes, checkpoint, receiptQueue)
 	f.rawStreams[1].sharedWitness = siblingWitness
 	f.streamPacers[1].sharedWitness = siblingWitness
 	siblingFinished := make(chan struct{})
@@ -101,7 +114,7 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 		defer close(siblingFinished)
 		return writeFeedbackPayload(f.serverStreams[1], slowBytes)
 	})
-	if _, err := siblingWitness.awaitRaw(f.ctx, siblingFinished, 1, 128<<10); err != nil {
+	if _, err := siblingWitness.awaitRaw(f.ctx, siblingFinished, 1, siblingWarmupBytes); err != nil {
 		t.Fatalf("sibling fresh backpressure before shared reads: %v", err)
 	}
 	if _, err := primaryWitness.awaitRaw(f.ctx, primaryFinished, 1, 1<<20); err != nil {
@@ -109,16 +122,25 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 	}
 	var after int64
 	for round := 0; round < rounds; round++ {
-		timer := time.NewTimer(120 * time.Millisecond)
-		select {
-		case <-timer.C:
-		case <-f.ctx.Done():
-			timer.Stop()
-			t.Fatal(f.ctx.Err())
-		}
-		for _, reader := range f.clientStreams {
-			if err := readFeedbackPayload(reader, feedbackChunkSize); err != nil {
-				t.Fatal(err)
+		// Release credit gradually instead of draining two 32 KiB bursts. A
+		// scheduler gap between those bursts can create a high-rate sample
+		// just over the controller's 10 ms minimum window, even though the
+		// round's sustained rate is low. Its recent-maximum estimator is
+		// right to retain that evidence. Small reads and the fixed window bound
+		// that burstiness without changing the production estimator or the
+		// prescribed checkpoint. Relative delays never catch up after a stall.
+		// Each read spans whole repetitions of the 32-byte payload pattern.
+		const readSize = 1 << 10
+		const steps = feedbackChunkSize / readSize
+		for step := 0; step < steps; step++ {
+			feedbackReadDelay(t, f.ctx, 120*time.Millisecond/steps)
+			for index, reader := range f.clientStreams {
+				if step == 0 && index == 1 && readerSkew != 0 {
+					feedbackReadDelay(t, f.ctx, readerSkew)
+				}
+				if err := readFeedbackPayload(reader, readSize); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 		if round+1 == checkpoint {
@@ -169,6 +191,17 @@ func TestQUICPacingSharedStreamsAcceptTransportBackpressure(t *testing.T) {
 	f.checkReverse(t)
 	t.Logf("shared round-%d checkpoint target %d -> %d; primary QUIC Write=%s, pacing Wait=%s; overlapping token sleeps=%d", checkpoint,
 		before, after, transport, pacing, f.clock.sleepsWithPrimaryWrite.Load())
+}
+
+func feedbackReadDelay(t *testing.T, ctx context.Context, duration time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
 }
 
 type feedbackQUICFixture struct {
@@ -336,7 +369,7 @@ func writeFeedbackPayload(writer io.Writer, size int) error {
 }
 
 func readFeedbackPayload(reader io.Reader, size int) error {
-	buffer := make([]byte, len(feedbackPayload))
+	buffer := make([]byte, min(size, len(feedbackPayload)))
 	for remaining := size; remaining > 0; {
 		chunk := buffer[:min(remaining, len(buffer))]
 		if _, err := io.ReadFull(reader, chunk); err != nil {
