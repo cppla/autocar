@@ -1,6 +1,6 @@
 module github.com/cppla/autocar
 
-go 1.27.3
+go 1.27.4
 
 // Preserve upstream type identity for H2 and the web-H3 adapter. See docs/DEPENDENCY-MAINTENANCE.md.
 replace github.com/refraction-networking/utls => github.com/cppla/utls v0.0.0-20261009031926-14c2a4cb1403
