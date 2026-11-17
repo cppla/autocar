@@ -25,7 +25,7 @@ web-H3 adapter's transitive imports. It is not a local source override.
 The upstream baseline is
 `v1.8.3-0.20261006222701-ff1b50fbbe9a`
 (`ff1b50fbbe9a6dff1dcb1cfc0493bd5b0f073f67`). It requires Go 1.27;
-AutoCAR's minimum supported toolchain is Go 1.27.3.
+AutoCAR's minimum supported toolchain is Go 1.27.4.
 
 The initial compatibility patch queue fixes custom-QUIC shutdown signaling and
 transport-parameter ownership after preset cloning. Its deterministic shutdown
@@ -178,8 +178,8 @@ This is an update/release procedure, not a background monitoring service.
 
 The October 9 pre-merge scan reported 11 reachable advisory IDs in the Go
 1.27.1 / `x/net v0.59.0` build, following the October 8 advisory publication.
-Current builds require [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.0)
-and select `x/net v0.60.0`, including the
+The October refresh required [Go 1.27.3](https://go.dev/doc/devel/release#go1.27.0)
+and selected `x/net v0.60.0`, including the
 [HTTP/2 HPACK race fix](https://pkg.go.dev/vuln/GO-2026-6617). CI, release builds
 and all current Go builder images are updated together; historical validation
 records and frozen capture inputs are not rewritten.
@@ -197,3 +197,14 @@ security behavior and assert no upstream dial. See the
 [cover compatibility boundary](WEB_COVER.md#fixed-upstream-origin). Functional
 passes, a clean reachability scan, and the separate copied-source review remain
 distinct evidence, not a claim that every dependency is vulnerability-free.
+
+## November 2026 toolchain security refresh
+
+Current builds require [Go 1.27.4](https://go.dev/doc/devel/release#go1.27.4)
+to include the `net/http` fix for
+[GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859). The PR #95 reachability
+scan reported this advisory while running Go 1.27.3; updating only the production
+Docker builder left CI and release builds on the affected standard library.
+The module minimum, exact and floating CI toolchains, release toolchain, and
+current Go container images now share the 1.27.4 minimum. Historical validation
+records and synthetic provenance fixtures retain their original versions.
